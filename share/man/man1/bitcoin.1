@@ -1,0 +1,101 @@
+.\" Manpage for bitcoin(1).
+.TH BITCOIN 1 "May 2026" "scripts" "User Commands"
+
+.SH NAME
+bitcoin \- educational Bitcoin frontend (BIPs implemented end-to-end)
+
+.SH SYNOPSIS
+.B bitcoin
+.RI [ options ]
+.I command
+.RI [ args ...]
+
+.SH DESCRIPTION
+.B bitcoin
+is the educational Bitcoin frontend. Each subcommand
+implements a specific BIP (Bitcoin Improvement Proposal),
+cites the spec in its help text, and points at the
+vendored reference under
+.IR share/doc/bitcoin/standards/
+(FEAT-017).
+
+The wallet model:
+
+.IP \(bu 2
+The seed phrase lives in
+.BR secret (1)
+\(em not in
+.BR bitcoin .
+.IP \(bu 2
+Address derivation reads the seed via
+.B "secret get <wallet>/seed"
+on demand.
+.IP \(bu 2
+Same address use is acceptable; no privacy-leak
+warning is emitted.
+
+.SH SUBCOMMANDS
+
+.SS BIP plugins (libexec/bitcoin/<name>)
+
+.TP
+.B bip13
+Pay-to-Script-Hash address encoding.
+.TP
+.B bip32
+Hierarchical deterministic wallet derivation.
+.TP
+.B bip39
+Mnemonic seed phrase encoding.
+.TP
+.B wif
+Wallet Import Format private key encoding.
+.TP
+.B daemon
+Multi-backend daemon abstraction
+(bitcoind / mempool.space / blockstream.info).
+
+.SS Wallet (FEAT-018, partial)
+
+.TP
+.BI "wallet new " name
+Create a new wallet (seed phrase stored in
+.BR secret ).
+.TP
+.BI "wallet derive " name " " path
+Derive an address at the given BIP-32 path.
+.TP
+.BI "wallet balance " name
+Query balance via the configured daemon.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+Enable shell tracing.
+
+.SH FILES
+.TP
+.I libexec/bitcoin/<plugin>
+Per-BIP plugin script.
+.TP
+.I share/doc/bitcoin/standards/
+Vendored BIP source documents (FEAT-017).
+
+.SH EXIT STATUS
+0 on success; non-zero on failure.
+
+.SH SEE ALSO
+.BR account (1),
+.BR secret (1),
+.BR lightning (1),
+.BR bitcoind (8).
+
+.SH STANDARDS
+BIP 13 (P2SH), BIP 32 (HD wallets), BIP 39 (mnemonic),
+BIP 173 (bech32 addresses) \(em vendored under
+.IR share/doc/bitcoin/standards/ .
+
+.SH BUGS
+Report at
+.UR https://github.com/nostra124/scripts/issues
+.UE .

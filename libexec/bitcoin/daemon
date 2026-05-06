@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+
+############################################################################
+# Configuration section
+############################################################################
+
+############################################################################
+
+# This should always be the first line of code to facilitate debugging
+[ -n "$SELF_DEBUG" ] && set -vx
+
+VERSION='0.6'
+SELF=$(basename $0)
+
+die() {
+	echo "$1" >&2
+	exit "${2:-1}"
+}
+
+fatal() {
+	echo "$SELF: fatal - $1" >&2
+	exit "${2:-1}"
+}
+
+debug() {
+	[ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $@" >&2
+}
+
+info() {
+	if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$@\033[0m" >&2; fi
+}
+
+warn() {
+	echo -e "$SELF: warn - \033[31;1;m$@\033[0m" >&2
+}
+
+# checks if a certain function exists: eg. has command update
+has() {
+	local KIND=$1
+	local NAME=$2
+
+	type -t $KIND:$NAME | grep -q function
+}
+
+escape() {
+	if test -t 1; then
+		xxd -p -c 0
+#		cat -v
+	else
+		cat
+	fi
+}
+
+# We need to run getops as soon as possible so we catch -d and other
+# options that will modify our behaviour.
+# Commands are handled at the end of this script.
+while getopts "c:dqpt" flag; do
+	if [ x"$1" = x'-q' ]; then
+		SELF_QUIET=1
+	fi
+	if [ x"$1" = x'-d' ]; then
+		SELF_DEBUG=1
+	fi
+	if [ x"$1" = x'-p' ]; then
+		SELF_PASSPHRASE=1
+	fi
+	if [ x"$1" = x'-t' ]; then
+		SELF_TEST=1
+	fi
+	shift 1
+done
+
+# Read configuration and set defaults if anything's not set
+: ${XDG_CONFIG_HOME:="~/.config"}
+: ${XDG_CACHE_HOME:="~/.cache"}
+: ${XDG_DATA_HOME:="~/.local/var"}
+: ${XDG_SHARE_HOME:="$HOME/.local/share"}
+
+[ -n "$SELF_VERBOSE" ] && set -vx
+
+command:help() {
+	if [[ $# != 0 ]]; then
+		if ! has command $1; then
+			echo "'$1' is not an $SELF command"
+			echo ""
+			echo "please see '$SELF help'"
+			exit -1
+		elif ! has help $1; then
+			echo "No help found for '$1'"
+			echo ""
+			echo "please see '$SELF help'"
+			exit -2
+		else
+			help:$1
+			return 0
+		fi
+	else
+		cat >&2 <<ENDHELP
+usage: $SELF <options> <command>
+
+   options:
+   -d                     Enable debug output
+   -q                     Enable quiet mode
+   -p                     Read BIP39 passphrase
+
+   $SELF implements a frontent for various bitcoin tools.
+
+generic commands:
+   help                    print this help message
+   help <command>          prints command specific help.
+   version                 print the version of $SELF
+
+$SELF commands:
+   start                   starts the bitcoind daemon
+   stop                    stops the bitcoind daemon
+   monitor                 monitors the bitcoind daemon
+   space                   shows the disk space currently occupied
+ENDHELP
+	fi
+}
+
+command:version() {
+	echo $VERSION
+}
+
+# This file requires extended globs to be parsed
+shopt -s extglob
+
+command:start() {
+	case $(account platform) in
+		alpine)
+			sudo rc-service bitcoind start
+			;;
+		pureos|ubuntu)
+			sudo service bitcoind start
+			;;
+		macos)
+			sudo launchctl load -w /Library/LaunchDaemons/org.macports.bitcoin.plist 2> /dev/null
+			;;
+	esac
+}
+
+command:stop() {
+	case $(account platform) in
+		alpine)
+			sudo rc-service bitcoind stop
+			;;
+		pureos|ubuntu)
+			sudo service bitcoind stop
+			;;
+		macos)
+			sudo launchctl unload -w /Library/LaunchDaemons/org.macports.bitcoin.plist 2> /dev/null
+			;;
+	esac
+}
+
+command:monitor() {
+	case $(account platform) in
+		pureos|ubuntu|alpine)
+			sudo less +F /var/lib/bitcoin/debug.log
+			;;
+		macos)
+			less +F $HOME/Library/Application\ Support/Bitcoin/debug.log
+			;;
+	esac
+}
+
+command:space() {
+	case $(account platform) in
+		pureos|ubuntu|alpine)
+			sudo du -sh /var/lib/bitcoin | cut -f1
+			;;
+		macos)
+			du -sh $HOME/Library/Application\ Support/Bitcoin/ | cut -f1
+			;;
+	esac
+}
+
+#------------------------------------------------------------------------------
+# Command-line processing
+if [[ $# == 0 ]]; then
+	command:help
+	exit 0
+fi
+
+#------------------------------------------------------------------------------
+# If this is a builtin command, execute it, otherwise fall through
+if has command $1; then
+	debug "executing command:$1 ${@:2}"
+	command:$1 "${@:2}" # array slice skipping first element
+	exit $?
+else
+	command:help
+	exit $?
+fi

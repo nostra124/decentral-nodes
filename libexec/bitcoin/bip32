@@ -1,0 +1,470 @@
+#!/usr/bin/env bash
+
+############################################################################
+# Configuration section
+############################################################################
+
+############################################################################
+
+# This should always be the first line of code to facilitate debugging
+[ -n "$SELF_DEBUG" ] && set -vx
+
+VERSION='0.6'
+SELF=$(basename $0)
+
+die() {
+	echo "$1" >&2
+	exit "${2:-1}"
+}
+
+fatal() {
+	echo "$SELF: fatal - $1" >&2
+	exit "${2:-1}"
+}
+
+debug() {
+	[ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $@" >&2
+}
+
+info() {
+	if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$@\033[0m" >&2; fi
+}
+
+warn() {
+	echo -e "$SELF: warn - \033[31;1;m$@\033[0m" >&2
+}
+
+# checks if a certain function exists: eg. has command update
+has() {
+	local KIND=$1
+	local NAME=$2
+
+	type -t $KIND:$NAME | grep -q function
+}
+
+escape() {
+	if test -t 1; then
+		xxd -p -c 0
+#		cat -v
+	else
+		cat
+	fi
+}
+
+# We need to run getops as soon as possible so we catch -d and other
+# options that will modify our behaviour.
+# Commands are handled at the end of this script.
+while getopts "c:dqpt" flag; do
+	if [ x"$1" = x'-q' ]; then
+		SELF_QUIET=1
+	fi
+	if [ x"$1" = x'-d' ]; then
+		SELF_DEBUG=1
+	fi
+	if [ x"$1" = x'-p' ]; then
+		SELF_PASSPHRASE=1
+	fi
+	if [ x"$1" = x'-t' ]; then
+		SELF_TEST=1
+	fi
+	shift 1
+done
+
+# Read configuration and set defaults if anything's not set
+: ${XDG_CONFIG_HOME:="~/.config"}
+: ${XDG_CACHE_HOME:="~/.cache"}
+: ${XDG_DATA_HOME:="~/.local/var"}
+: ${XDG_SHARE_HOME:="$HOME/.local/share"}
+
+[ -n "$SELF_VERBOSE" ] && set -vx
+
+command:help() {
+	if [[ $# != 0 ]]; then
+		if ! has command $1; then
+			echo "'$1' is not an $SELF command"
+			echo ""
+			echo "please see '$SELF help'"
+			exit -1
+		elif ! has help $1; then
+			echo "No help found for '$1'"
+			echo ""
+			echo "please see '$SELF help'"
+			exit -2
+		else
+			help:$1
+			return 0
+		fi
+	else
+		cat >&2 <<ENDHELP
+usage: $SELF <options> <command>
+
+options:
+ -d                     Enable debug output
+ -q                     Enable quiet mode
+ -t                     generate key for test net
+
+ $SELF implements commands for hierarchical deterministic 
+ wallets.
+
+ Generates extended keys as defined by BIP-0032. When writing to a terminal,
+ $SELF will print the base58-checked version of the serialized key. Otherwise,
+ it will print the serialized key.
+
+ With no argument, $SELF will generate an extended master key from a binary
+ seed read on standard input. With the -t option, it will generate such key
+ for the test network.
+
+ With a derivation path as an argument, $SELF will read a seralized extended
+ key from stdin and generate the corresponding derived key.
+
+ If the derivation path begins with 'm', $SELF will expect a master private
+ key as input. If the derivation path begins with 'M', $SELF will expect a
+ master public key as input. Otherwise the derivation path begins with '/',
+ then we will derive any key read from standard input.
+
+ When expecting a serialized key from stdin, $SELF will only read the first
+ 78 bytes. With the -s option, input is interpreted as a seed in hex format,
+ not as a serialized key. With the -t option, input is interpreted as a seed,
+ and a testnet master key is generated.
+
+generic commands:
+  help                    print this help message
+  help <command>          prints command specific help.
+  version                 print the version of $SELF
+
+bip32 related commands:
+  ser32 <i>               serialize a 32-bit unsigned integer <i> as a 4-byte
+                          sequence, most significant byte first
+  ser256 <p>              serializes the integer <p> as a 32-byte sequence,
+                          most significant byte first.
+  hash160                 calculates the has160 for the input read from stdin
+
+  is-secret <key>   checks if the given key is a secret key
+  is-public <key>   checks if the given key is a public key
+  create [-st] [p]  generates extended keys from a seed read from stdin
+  derive
+
+ENDHELP
+	fi
+}
+
+command:version() {
+	echo $VERSION
+}
+
+declare -r secp256k1="
+I16i7sb0sa[[_1*lm1-*lm%q]Std0>tlm%Lts@]s%[Smddl%x-lm/rl%xLms@]s~
+[[L0s@0pq]S0d0=0l<~2%2+l<*+[0]Pp]sE[_1*l%x]s_[+l%x]s+2 100^ds<d
+14551231950B75FC4402DA1732FC9BEBF-sn1000003D1-dspsm [I1d+d+d*i1
+483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+4Ri]dsgx3Rs@l<*+sG[*l%x]s*[-l%x]s-[l%xSclmSd1Su0Sv0Sr1St[q]SQ[lc
+0=Qldlcl~xlcsdscsqlrlqlu*-ltlqlv*-lulvstsrsvsulXx]dSXxLXs@LQs@Lc
+s@Lds@Lus@Lvs@Lrl%xLts@]sI[lpd1+4/r|]sRi[lpSm[+lCxq]S0[l1lDxlCxq
+]Sd[0lCxq]SzdS1rdS2r[L0s@L1s@L2s@Lds@Lms@LCs@]SCd0=0rd0=0r=dl1l<
+/l2l</l-xd*l1l<%l2l<%l+xd*+0=zl2l</l1l</l-xlIxl2l<%l1l<%l-xl*xd2
+lm|l1l</l2l</+l-xd_3Rl1l</rl-xl*xl1l<%l-xrl<*+lCx]sA[lpSm[LCxq]
+S0dl<~SySx[Lms@L0s@LCs@Lxs@Lys@]SC0=0lxd*3*la+ly2*lIxl*xdd*lx2*
+l-xd_3Rlxrl-xl*xlyl-xrl<*+lCx]sD[rS.0r[rl.lAxr]SP[q]SQ[d0=Qd2%1
+=P2/l.lDxs.lLx]dSLxs@L.s@LLs@LPs@LQs@]sM[[d2%1=_q]s2 2 2 8^^~dsx
+d3lp|rla*+lb+lRxr2=2d2%0=_]sY[2l<*2^+]sU[d2%2+l<*rl</+]sC[l<~dlY
+x3R2%rd3R+2%1=_rl<*+]s>[1_3R]sj[3Rd_3Rdl*xd_3RlIxl*x_4Rl*xlIxl*x
+r]sf[[LQs@q]SQ3Rd_4R0=QLQs@[3R0*_3RLQs@q]SQrd_3R0=QLQs@rdd*lm%3R
+d3Rd3R4**lm%3Rd*3*lm%5R5R*2*lm%rdd*lm%4Rd_3R2*l-xd_6Rl-x*3Rd*8*
+l-x3R]s:[_4RSXSYSZ[s@0ddL0s@q]S0d0=0[_4RlZlYlXlPx4R]S+[q]SQ0dd4R
+[d0=Qd2%1=+2/lZlYlXl:xsXsYsZlLx]dSLxLXs@LYs@LZs@s@LLs@L0s@L+s@LQ
+s@]s;[3Rd[s@s@s@Lqs@q]Sq0=qLqs@6Rd[s@4Rs@4Rs@_3RLqs@q]Sq0=qLqs@d
+dl*xd3Rd_4Rl*x6Rd3Rl*x3R6Rd3Rl*x6Rddl*xd3Rd_4Rl*x5d+Rl*x9R3Rl*x4
+Rd_3Rl-x3R6Rd_3Rl-x3R[[s@s@s@s@s@s@0 0 0L1s@L2s@3Q]S2s@0*0=2s@s@
+4Rs@_3Rl:xL1s@L2s@q]S1d0=1L1s@6Rs@6Rs@ddl*xd3Rd3Rl*x4Rddl*x7R6R
+l*xd2l*x5Rd5R_4R_4R+l-xd4Rr5R_3Rl-xl*x5R4Rl*xl-x_5R_5Rl*xl*xr3R]
+sP[[[INFINITY]nLIs@q]SI3Rd0=I_3RLIs@IO_5R_5Rlfx1d+d+d*doi2 100^d
+3Rr2*+_3Rr2%*+[0]nnAPoi]se"
+
+# This file requires extended globs to be parsed
+shopt -s extglob
+
+# bip32 (Hierarchical Deterministic Wallets) commands
+command:ser32() {
+	if local -i i=$1; ((i >= 0 && i < 1<<32)); then
+		printf "%08X" $i | basenc --base16 -d
+	else
+		return 1
+	fi
+}
+
+command:ser256() {
+	if [[ "$1" =~ ^(0x)?([[:xdigit:]]{65,})$ ]]; then
+		warn "unexpectedly large parameter"
+		return 1
+	elif [[ "$1" =~ ^(0x)?([[:xdigit:]]{64})$ ]]; then
+		basenc --base16 -d <<<"${BASH_REMATCH[2]^^[a-f]}"
+	elif [[ "$1" =~ ^(0x)?([[:xdigit:]]{1,63})$ ]]; then
+		$FUNCNAME "0x0${BASH_REMATCH[2]}"
+	else
+		return 1
+	fi
+}
+
+command:hash160() {
+	openssl dgst -sha256 -binary |
+	{
+		# https://github.com/openssl/openssl/issues/16994
+		# "-provider legacy" for openssl 3.0 || fallback for old versions
+		2>/dev/null openssl dgst -provider legacy -rmd160 -binary ||
+		openssl dgst -rmd160 -binary
+	}
+}
+
+MAINNET_PUBLIC_VERSION_CODE=0x0488B21E
+MAINNET_PRIVATE_VERSION_CODE=0x0488ADE4
+TESTNET_PUBLIC_VERSION_CODE=0x043587CF
+TESTNET_PRIVATE_VERSION_CODE=0x04358394
+
+command:is-secret() (( $1 == BIP32_TESTNET_PRIVATE_VERSION_CODE || $1 == BIP32_MAINNET_PRIVATE_VERSION_CODE ))
+command:is-public() (( $1 == BIP32_TESTNET_PUBLIC_VERSION_CODE || $1 == BIP32_MAINNET_PUBLIC_VERSION_CODE ))
+
+command:create() {
+	while getopts "st" flag; do
+		if [ x"$1" = x'-t' ]; then
+			local COMMAND_TEST=1
+		fi
+		shift 1
+	done
+	local header_format='%08X%02X%08X%08X'
+	{
+		if [ -n "${COMMAND_TEST}" ]; then
+			printf "$header_format" $TESTNET_PRIVATE_VERSION_CODE 0 0 0
+		else
+			printf "$header_format" $MAINNET_PRIVATE_VERSION_CODE 0 0 0
+		fi
+		openssl mac -digest sha512 -macopt key:"Bitcoin seed" -binary hmac |
+		basenc --base16 -w64 | tac | sed 2i00 
+	} | basenc --base16 -d | bitcoin bip13 base58-encode
+}
+
+command:derive() {
+	while getopts "st" flag; do
+		if [ x"$1" = x'-t' ]; then
+			local COMMAND_TEST=1
+		fi
+		if [ x"$1" = x'-s' ]; then
+			local COMMAND_SEED=1
+		fi
+		shift 1
+	done
+
+	local header_format='%08X%02X%08X%08X'
+	if [ -n "${COMMAND_SEED}" ]; then
+		COMMAND_SEED=""
+		{
+			if [ -n "${COMMAND_TEST}" ]; then
+        	  		printf "$header_format" $TESTNET_PRIVATE_VERSION_CODE 0 0 0
+			else
+				printf "$header_format" $MAINNET_PRIVATE_VERSION_CODE 0 0 0
+			fi
+			xxd -r -p | openssl mac -digest sha512 -macopt key:"Bitcoin seed" -binary hmac |
+			basenc --base16 -w64 | tac | sed 2i00
+		} | basenc --base16 -d | ${FUNCNAME[0]} $@
+	fi
+
+	if (( $# > 1 )); then
+		fatal "too many parameters given : $@" 1
+	elif [[ "$1" =~ ^[mM]?(/([[:digit:]]+h?|N))*$ ]]; then
+		local path="$1" hexdump="$(
+		if test -t 0; then
+			read -p "eXtended key (secret or public): "
+			bitcoin bip13 base58-decode <<<"$REPLY"
+		else
+			cat
+		fi | head -c 78 | basenc --base16 -w0)"
+	
+		if (( ${#hexdump} < 2*78 )); then
+			fatal "$FUNCNAME: input is too short" -1
+		fi
+
+		local -i      version="0x${hexdump:0:8}"
+		local -i        depth="0x${hexdump:8:2}"
+		local -i    parent_fp="0x${hexdump:10:8}"
+		local -i child_number="0x${hexdump:18:8}"
+		local      chain_code="${hexdump:26:64}"
+		local             key="${hexdump:90:66}"
+
+		# sanity checks
+		if [[ "$path" =~ ^m ]] && ((
+			version != TESTNET_PRIVATE_VERSION_CODE &&
+			version != MAINNET_PRIVATE_VERSION_CODE
+		)); then
+			fatal "eXtended key represents no private key" 2
+		elif [[ "$path" =~ ^M ]] && ((
+			version != TESTNET_PUBLIC_VERSION_CODE &&
+			version != MAINNET_PUBLIC_VERSION_CODE
+		)); then
+			fatal "eXtended key represents no public key" 3
+		elif [[ "$path" =~ ^[mM] ]] && ((depth > 0)); then
+			fatal "eXtended key has to be a master key with depth = 0" 4
+		elif [[ "$path" =~ ^[mM] ]] && ((parent_fp > 0)); then
+			fatal "eXtended key has to be a master key with no parent" 5
+		elif [[ "$path" =~ ^[mM] ]] && ((child_number > 0)); then
+			fatal "eXtended key has to be a master key child number = 0" 6
+		elif [[ ! "$key" =~ ^0[023] ]]; then
+			fatal "unexpected key: $key (hexdump is $hexdump)" 7
+		elif ((
+			version != TESTNET_PRIVATE_VERSION_CODE &&
+			version != MAINNET_PRIVATE_VERSION_CODE &&
+			version != TESTNET_PUBLIC_VERSION_CODE  &&
+			version != MAINNET_PUBLIC_VERSION_CODE
+		)); then
+			fatal "key has to be either a private or a public key" 8
+		elif ((depth < 0 || depth > 255)); then
+			fatal "key depth has to be between 0 and 255" 9
+		elif ((parent_fp < 0 || parent_fp > 0xffffffff)); then
+			fatal "key parent has to be between 0 and 0xffffffff" 10
+		elif ((child_number < 0 || child_number > 0xffffffff)); then
+			fatal "key child number has to be between 0 and 0xffffffff" 11
+		elif command:bip32-is-public  $version && [[ "$key" =~ ^00    ]]; then
+			fatal "key is not a valid public key" 12
+		elif command:bip32-is-secret $version && [[ "$key" =~ ^0[23] ]]; then
+			fatal "key is not a valid private key" 13
+		fi
+		
+		path="${path#[mM]}"
+		if test -n "$path"; then
+			coproc DC { dc -e "$secp256k1" -; }
+			trap 'echo q >&"${DC[1]}"' EXIT RETURN
+			while [[ "$path" =~ ^/(N|[[:digit:]]+h?) ]]; do
+				path="${path#/${BASH_REMATCH[1]}}"
+				local operator="${BASH_REMATCH[1]}"
+				case "$operator" in
+					N)
+						case $version in
+							$((TESTNET_PUBLIC_VERSION_CODE))) ;;
+							$((MAINNET_PUBLIC_VERSION_CODE))) ;;
+							$((MAINNET_PRIVATE_VERSION_CODE)))
+								version=$BIP32_MAINNET_PUBLIC_VERSION_CODE;;&
+							$((TESTNET_PRIVATE_VERSION_CODE)))
+								version=$BIP32_TESTNET_PUBLIC_VERSION_CODE;;&
+							*)
+								echo "4d*doilgx${key^^}l;xlex" >&"${DC[1]}"
+								read key <&"${DC[0]}"
+						esac
+						;;
+					+([[:digit:]])h)
+						(( child_number= ${operator%h} + (1 << 31) ));&
+					+([[:digit:]]))
+						((depth++))
+						local parent_id
+						if [[ ! "$operator" =~ h$ ]]; then
+							child_number=operator
+						fi
+						if isPrivate "$version"; then
+							echo "4d*doilgx${key^^}l;xlex" >&"${DC[1]}"
+							read parent_id <&"${DC[0]}"
+							{
+								{
+									if (( child_number >= (1 << 31) )); then
+										printf "\x00"
+										command:ser256 "0x${key:2}" || warn "WARNING: ser256 return $?"
+									else
+										basenc --base16 -d <<<"${parent_id^^[a-f]}"
+									fi
+									command:ser32 $child_number
+								} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary | basenc --base16 -w64 | 
+								{
+									read left
+									read right
+									echo "4d*doi$right ${key^^} $left+ln%p"
+								}
+							} >&"${DC[1]}"
+						elif isPublic "$version"; then
+							parent_id="$key"
+							if (( child_number >= (1 << 31) )); then
+								fatal "extented public key can't produce a hardened child" 4
+							else
+								{
+									{
+										basenc --base16 -d <<<"${key^^[a-f]}"
+										command:ser32 $child_number
+									} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary | basenc --base16 -w64 |
+									{
+										read left
+										read right
+										echo "8d+doi$right lgx$left l;x ${key^^}l>x l<~rljx lPxlex 0"
+									}
+								} >&"${DC[1]}"
+							fi
+						else
+							fatal "version is neither private nor public?!" 111
+						fi
+						read key <&"${DC[0]}"
+						while ((${#key} < 66)); do
+							key="0$key"
+						done
+						echo rp >&"${DC[1]}"
+						read chain_code <&"${DC[0]}"
+						while ((${#chain_code} < 64)); do
+							chain_code="0$chain_code"
+						done
+						parent_fp="0x$(basenc --base16 -d <<<"${parent_id^^[a-f]}" | command:hash160 | head -c 4 | basenc --base16 -w0)"
+						;;
+				esac
+			done
+		fi				
+		printf "$header_format%s%s" $version $depth $parent_fp $child_number "$chain_code" "$key" |
+		basenc --base16 -d | if [[ -t 1 ]]; then
+			$SELF bip13 base58-encode
+		else
+			cat
+		fi		
+	else
+		fatal "no deriviation path given" 255
+	fi
+}
+
+help:derive() {
+	cat <<-END_USAGE
+usage: $SELF bip32 [-st] [derivation-path]
+
+Generates extended keys as defined by BIP-0032. When writing to a terminal,
+$SELF will print the base58-checked version of the serialized key. Otherwise, 
+it will print the serialized key.
+
+With no argument, $SELF will generate an extended master key from a binary
+seed read on standard input. With the -t option, it will generate such key
+for the test network.
+
+With a derivation path as an argument, $SELF will read a seralized extended 
+key from stdin and generate the corresponding derived key.
+
+If the derivation path begins with 'm', $SELF will expect a master private
+key as input. If the derivation path begins with 'M', $SELF will expect a 
+master public key as input. Otherwise the derivation path begins with '/', 
+then we will derive any key read from standard input.
+
+When expecting a serialized key from stdin, $SELF will only read the first
+78 bytes. With the -s option, input is interpreted as a seed in hex format,
+not as a serialized key. With the -t option, input is interpreted as a seed,
+and a testnet master key is generated.
+END_USAGE
+}
+
+#------------------------------------------------------------------------------
+# Command-line processing
+if [[ $# == 0 ]]; then
+	command:help
+	exit 0
+fi
+
+#------------------------------------------------------------------------------
+# If this is a builtin command, execute it, otherwise fall through
+if has command $1; then
+	debug "executing command:$1 ${@:2}"
+	command:$1 "${@:2}" # array slice skipping first element
+	exit $?
+elif scripts has $SELF/$1; then
+	scripts $SELF/$1 "${@:2}" # array slice skipping first element
+	exit $?
+else
+	command:help
+	exit $?
+fi
