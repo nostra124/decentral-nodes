@@ -221,7 +221,7 @@ command:bech32() {
 	done
 
 	local hrp="${1,,}" data="${2,,}"
-	if [[ "$1$2" =~ [A-Z] && "$hrp$data" =~ [a-z] ]]; then
+	if [[ "$1$2" =~ [A-Z] && "$1$2" =~ [a-z] ]]; then
 		return 1
 	elif (( ${#hrp} + ${#data} + 6 > 90 )); then
 		return 2
@@ -351,7 +351,7 @@ bech32-create-checksum() {
 bech32-verify-checksum() {
 	local hrp="$1"
 	shift
-	local -i pmod="$(polymod $(hrpExpand "$hrp") "$@")"
+	local -i pmod="$(bech32-polymod $(bech32-hrp-expand "$hrp") "$@")"
 	(( pmod == ${BECH32_CONST:-1} ))
 }
 

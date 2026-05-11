@@ -31,10 +31,10 @@ teardown() {
 	[ -x "$BITCOIN_BIN" ]
 }
 
-@test "bitcoin version returns 1.0.0" {
+@test "bitcoin version returns 1.0.1" {
 	run "$BITCOIN_BIN" version
 	[ "$status" -eq 0 ]
-	[ "$output" = "1.0.0" ]
+	[ "$output" = "1.0.1" ]
 }
 
 @test "bitcoin help prints usage" {
@@ -111,5 +111,40 @@ teardown() {
 @test "bech32-verify rejects a tampered checksum" {
 	# Flip the last character of a known-good bech32 string.
 	run "$BITCOIN_BIN" bech32-verify "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxq"
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# BUG-010 regression — bech32-verify-checksum called undefined polymod /
+# hrpExpand instead of bech32-polymod / bech32-hrp-expand, so
+# command:bech32-decode always exited 8.
+# ---------------------------------------------------------------------------
+
+@test "bech32-decode decodes a known BIP-173 vector" {
+	run "$BITCOIN_BIN" bech32-decode "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"abcdef"* ]]
+}
+
+@test "bech32-decode rejects a tampered checksum" {
+	run "$BITCOIN_BIN" bech32-decode "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxq"
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# BUG-011 regression — command:bech32 case-mixing guard compared the
+# lowercased copy against [a-z], so any uppercase letter triggered a
+# rejection. BIP-173 only forbids *mixed* case.
+# ---------------------------------------------------------------------------
+
+@test "bech32 accepts all-uppercase input (BIP-173 allows)" {
+	run "$BITCOIN_BIN" bech32 "ABCDEF" "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L"
+	[ "$status" -eq 0 ]
+	# Output is normalised to lowercase per BIP-173.
+	[ "$(echo "$output" | tail -n 1)" = "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw" ]
+}
+
+@test "bech32 rejects mixed-case input" {
+	run "$BITCOIN_BIN" bech32 "aBc" "qpzry"
 	[ "$status" -ne 0 ]
 }

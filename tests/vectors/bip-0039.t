@@ -39,7 +39,7 @@ shorten()
     if declare generatedExtendedKey="$(basenc --base16 -d <<<"${seed^^}" |bip32 -s m |base58 -c)"
        [[ "$generatedExtendedKey" = "$addr" ]]
     then echo "ok $n - good key generated from seed : $(shorten $seed) -> $(shorten $generatedExtendedKey)"
-    else echo "$generatedExtendedKey"
+    else echo "not ok $n - wrong key for seed $(shorten $seed): got $generatedExtendedKey, expected $addr"
     fi
   done
 } <<EOF # test vectors taken from https://github.com/trezor/python-mnemonic/blob/master/vectors.json

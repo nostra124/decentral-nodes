@@ -2,7 +2,7 @@
 id: BUG-009
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # `tests/vectors/bip-0039.t`: failure case emits raw data instead of `not ok N`

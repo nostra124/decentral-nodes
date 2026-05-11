@@ -2,7 +2,7 @@
 id: BUG-011
 type: bug
 priority: medium
-status: open
+status: done
 ---
 
 # `command:bech32` rejects all-uppercase input that BIP-173 explicitly allows

@@ -2,7 +2,7 @@
 id: BUG-010
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # `bech32-verify-checksum` calls undefined functions; `bech32-decode` always fails
