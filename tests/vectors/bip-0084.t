@@ -5,8 +5,6 @@ LANG=C
 
 declare -i n=0
 
-echo 1..13
-
 mnemonic=(abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about)
 
 seed="$(mktemp)"
@@ -111,5 +109,8 @@ else echo "not ok $n"
 fi
 
 rm "$seed"
+
+# FEAT-022: trailing TAP plan derived from the counter.
+echo "1..$n"
 
 # vi: ft=bash

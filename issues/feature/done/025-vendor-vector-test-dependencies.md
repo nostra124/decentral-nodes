@@ -2,7 +2,7 @@
 id: FEAT-025
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # Make `tests/vectors/*.t` runnable end-to-end (vendor or document the external dependencies)
@@ -74,3 +74,21 @@ This feature is the prerequisite for the "prove tests/vectors/
 passes all suites" line that lived in the original FEAT-006 and
 in `issues/ROADMAP-1.1.0.md`. With FEAT-025 filed, both of those
 references can be relaxed.
+
+## Resolution (option 2 shipped in 1.2.0)
+
+`make check-vectors` now probes for `base58`, `dc`,
+`create-mnemonic`, and `mnemonic-to-seed`. If any are missing it
+exits 0 with a clear `==> check-vectors: skipping (missing
+dependencies: …)` message that points at this file. No silent
+failures.
+
+`.rpk/depends/` already declared `crypt` (the sibling package that
+ships `base58`); we additionally declared `dc`. `create-mnemonic`
+and `mnemonic-to-seed` resolution is part of option 1 (vendoring
+proper) and is left as follow-up.
+
+The "option 1 — vendor binaries" path remains an open follow-up.
+A new feature can be filed against ROADMAP-1.3.0+ when there's
+appetite to bring `base58`, `create-mnemonic`, and
+`mnemonic-to-seed` in-tree under `libexec/bitcoin/`.

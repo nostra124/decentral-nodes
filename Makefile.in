@@ -85,7 +85,21 @@ check-unit:
 	else echo "bats not installed; skipping"; fi
 
 check-vectors:
-	@if [ -d tests/vectors ] && command -v prove >/dev/null 2>&1; then \
+	@# FEAT-025: probe for external commands the .t files invoke. If
+	# any are missing, skip cleanly with a clear message instead of
+	# letting `prove` produce a wall of `command not found` and a
+	# wrong exit code. Skipping with exit 0 is the contract documented
+	# in skills/testing.md (a clean signal beats a noisy red).
+	@missing=; \
+	for cmd in base58 dc create-mnemonic mnemonic-to-seed; do \
+		command -v $$cmd >/dev/null 2>&1 || missing="$$missing $$cmd"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "==> check-vectors: skipping (missing dependencies:$$missing)"; \
+		echo "    see issues/feature/025-vendor-vector-test-dependencies.md or issues/feature/done/025-* once shipped"; \
+		exit 0; \
+	fi; \
+	if [ -d tests/vectors ] && command -v prove >/dev/null 2>&1; then \
 		d=$$(mktemp -d); \
 		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin.sh; \
 		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin; \

@@ -227,3 +227,45 @@ teardown() {
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"ALL_DEFINED"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-022/023/024/025 meta-tests: structural assertions on the vector
+# suite. The .t files themselves run under prove, but the invariants
+# below (no literal plans, numbered TAP, deduplicated fixtures, probe
+# for missing deps) are properties of the source code that we can check
+# from bats without needing the external dependencies.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-022 — no .t file uses a literal TAP plan" {
+	failed=""
+	for f in "$BATS_TEST_DIRNAME"/../../tests/vectors/*.t; do
+		if grep -qE '^echo 1\.\.[0-9]+[[:space:]]*$' "$f"; then
+			failed="$failed $f"
+		fi
+	done
+	[ -z "$failed" ] || { echo "Files with literal TAP plan:$failed"; false; }
+}
+
+@test "FEAT-023 — bip-0085.t emits numbered ok/not-ok lines" {
+	f="$BATS_TEST_DIRNAME/../../tests/vectors/bip-0085.t"
+	# Every line that emits `ok ...` or `not ok ...` TAP output must
+	# include the counter variable $n.
+	un_numbered=""
+	while IFS= read -r line; do
+		[[ "$line" == *'$n'* ]] || un_numbered+="$line"$'\n'
+	done < <(grep -nE 'echo[[:space:]]+"(ok|not ok)' "$f" || true)
+	[ -z "$un_numbered" ] || { echo "Un-numbered TAP lines:"; printf "%s" "$un_numbered"; false; }
+}
+
+@test "FEAT-024 — bech32 vector A12UEL5L appears in exactly one source file" {
+	base="$BATS_TEST_DIRNAME/../../tests/vectors"
+	count="$(grep -l A12UEL5L "$base"/*.t "$base"/*.sh 2>/dev/null | wc -l)"
+	[ "$count" -eq 1 ]
+}
+
+@test "FEAT-025 — Makefile.in check-vectors probes for missing external deps" {
+	f="$BATS_TEST_DIRNAME/../../Makefile.in"
+	grep -q 'missing dependencies:' "$f"
+	grep -q 'base58' "$f"
+	grep -q 'create-mnemonic' "$f"
+}

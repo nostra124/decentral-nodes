@@ -2,7 +2,7 @@
 id: FEAT-022
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # Replace hard-coded TAP plan counts with derived counts in vector test files

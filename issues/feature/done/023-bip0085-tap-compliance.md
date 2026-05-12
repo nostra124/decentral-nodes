@@ -2,7 +2,7 @@
 id: FEAT-023
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # Fix `tests/vectors/bip-0085.t` TAP compliance: add test numbers and tighten assertions
