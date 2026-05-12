@@ -30,6 +30,16 @@ These two work together: local runs catch issues fast and cheap; CI
 is the team-wide invariant that the change is reproducible outside
 the author's machine. Skipping either erodes the contract.
 
+Related skills:
+- `skills/bugs.md` — when CI fails, file a BUG and write the
+  failing regression test before fixing.
+- `skills/features.md` — when adding behaviour, write the
+  acceptance tests before implementation.
+- `skills/logging.md` — every new failure branch must log enough
+  to diagnose the failure from the log alone.
+- `skills/automerging.md` — arm auto-merge once the PR is
+  review-ready; the loop on red CI lives here.
+
 ## 1. Test tiers
 
 | Tier | Location | Tooling | Scope |

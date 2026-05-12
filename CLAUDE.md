@@ -33,6 +33,14 @@ not in `bitcoin`**. Wallet verbs read the seed via
 Same as `CLAUDE.md.foundation`. **Bugs come before
 features at the same priority level.**
 
+Bug workflow is test-driven: every fix lands with a
+regression test that demonstrably failed against the
+broken code first. See `skills/bugs.md`.
+
+Feature workflow is acceptance-criteria-driven: every
+feature lands with the tests its acceptance criteria
+imply. See `skills/features.md`.
+
 ## 4. The no-shared-lib policy
 
 `bitcoin` calls only `account` and `secret` at
@@ -84,3 +92,22 @@ read it via the GitHub MCP tools.
 
 Full matrix, triage workflow, and per-tier ownership
 are in `skills/testing.md`.
+
+## 10. Logging
+
+Four levels, all written to stderr: `debug`, `info`,
+`warn`, `error`. Helpers defined per-script in
+`bin/bitcoin` and each `libexec/bitcoin/<plugin>` (no
+shared library, per §4). Every failure branch must emit
+at least one `warn` / `error` / `fatal` line that names
+the condition and the offending value. See
+`skills/logging.md`.
+
+## 11. Merge discipline
+
+Once a PR is review-ready, enable GitHub auto-merge so
+it lands the moment CI is green. If CI fails, file a
+BUG (per §3 and `skills/bugs.md`) — never bypass the
+gate or disable failing tests. See
+`skills/automerging.md` for the full contract and the
+list of forbidden bypasses.
