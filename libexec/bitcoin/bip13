@@ -34,6 +34,11 @@ warn() {
 	echo -e "$SELF: warn - \033[31;1;m$@\033[0m" >&2
 }
 
+# Log an error without exiting. See skills/logging.md.
+error() {
+	echo -e "$SELF: error - \033[31;1;m$@\033[0m" >&2
+}
+
 # checks if a certain function exists: eg. has command update
 has() {
 	local KIND=$1

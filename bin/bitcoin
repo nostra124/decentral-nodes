@@ -9,11 +9,11 @@
 # This should always be the first line of code to facilitate debugging
 [ -n "$SELF_DEBUG" ] && set -vx
 
-# Per FEAT-194: VERSION read at runtime from .rpk/version (dev tree)
-# or $PREFIX/share/bitcoin/version (installed). The hardcoded fallback
-# is used only if both files are missing.
+# Per FEAT-194: VERSION read at runtime from VERSION at the repo root
+# (dev tree) or $PREFIX/share/bitcoin/version (installed). The
+# hardcoded fallback is used only if both files are missing.
 __d="$(cd "$(dirname "$0")" && pwd)"; __s="$(basename "$0")"
-VERSION=$(cat "$__d/../.rpk/version" 2>/dev/null || cat "$__d/../share/$__s/version" 2>/dev/null || echo '1.0.0')
+VERSION=$(cat "$__d/../VERSION" 2>/dev/null || cat "$__d/../share/$__s/version" 2>/dev/null || echo '1.0.0')
 unset __d __s
 SELF=$(basename $0)
 
@@ -52,6 +52,12 @@ info() {
 
 warn() {
 	echo -e "$SELF: warn - \033[31;1;m$@\033[0m" >&2
+}
+
+# Log an error without exiting. Caller decides whether to continue
+# or to escalate to fatal/die. See skills/logging.md.
+error() {
+	echo -e "$SELF: error - \033[31;1;m$@\033[0m" >&2
 }
 
 # checks if a certain function exists: eg. has command update
@@ -221,7 +227,7 @@ command:bech32() {
 	done
 
 	local hrp="${1,,}" data="${2,,}"
-	if [[ "$1$2" =~ [A-Z] && "$hrp$data" =~ [a-z] ]]; then
+	if [[ "$1$2" =~ [A-Z] && "$1$2" =~ [a-z] ]]; then
 		return 1
 	elif (( ${#hrp} + ${#data} + 6 > 90 )); then
 		return 2
@@ -351,7 +357,7 @@ bech32-create-checksum() {
 bech32-verify-checksum() {
 	local hrp="$1"
 	shift
-	local -i pmod="$(polymod $(hrpExpand "$hrp") "$@")"
+	local -i pmod="$(bech32-polymod $(bech32-hrp-expand "$hrp") "$@")"
 	(( pmod == ${BECH32_CONST:-1} ))
 }
 
@@ -799,6 +805,12 @@ bitcoinAddress()
   else return 1
   fi
 
+
+#------------------------------------------------------------------------------
+# FEAT-006: when this file is sourced (e.g. `. bitcoin.sh`) rather than
+# executed, define all the functions above and return without running
+# any command. The same file serves both modes.
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
 #------------------------------------------------------------------------------
 # Command-line processing

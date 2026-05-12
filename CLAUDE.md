@@ -33,6 +33,14 @@ not in `bitcoin`**. Wallet verbs read the seed via
 Same as `CLAUDE.md.foundation`. **Bugs come before
 features at the same priority level.**
 
+Bug workflow is test-driven: every fix lands with a
+regression test that demonstrably failed against the
+broken code first. See `skills/bugs.md`.
+
+Feature workflow is acceptance-criteria-driven: every
+feature lands with the tests its acceptance criteria
+imply. See `skills/features.md`.
+
 ## 4. The no-shared-lib policy
 
 `bitcoin` calls only `account` and `secret` at
@@ -62,6 +70,72 @@ need address derivation.
 
 ## 8. Versioning
 
-Semver. `tests/unit/bitcoin.bats` is the contract;
-the BIP vector tests under `tests/vectors/` are the
-deeper regression baseline.
+Semver. The single semver string in `VERSION` at the
+repo root is the source of truth; `bin/bitcoin` reads
+it at runtime and `make install` copies it to
+`$DATADIR/bitcoin/version`. `tests/unit/bitcoin.bats`
+is the contract; the BIP vector tests under
+`tests/vectors/` are the deeper regression baseline.
+
+To bump the version (patch / minor / major release),
+follow `skills/version.md`.
+
+## 9. Testing
+
+Three tiers (unit / sit / pit) and three surfaces
+(manual `make check-*`, pre-push hook, GitHub Actions).
+The pre-push hook detects the environment: cloud
+sandbox runs unit only, desktop with podman runs
+unit + sit + pit. CI runs unit and posts the bats log
+as a PR comment on failure so an assistant agent can
+read it via the GitHub MCP tools.
+
+Full matrix, triage workflow, and per-tier ownership
+are in `skills/testing.md`.
+
+## 10. Logging
+
+Four levels, all written to stderr: `debug`, `info`,
+`warn`, `error`. Helpers defined per-script in
+`bin/bitcoin` and each `libexec/bitcoin/<plugin>` (no
+shared library, per §4). Every failure branch must emit
+at least one `warn` / `error` / `fatal` line that names
+the condition and the offending value. See
+`skills/logging.md`.
+
+## 11. Merge discipline
+
+A PR lands the moment CI is green. Two modes are
+documented in `skills/automerging.md`:
+
+- **Mode A** — GitHub auto-merge, when *Allow
+  auto-merge* is enabled at the repo level.
+- **Mode B** — agent subscribed via
+  `mcp__github__subscribe_pr_activity`, merges on the
+  green CI event. **This is the current default for
+  this repo** because Mode A is off at the org/repo
+  level.
+
+If CI fails, file a BUG (per §3 and `skills/bugs.md`)
+— never bypass the gate or disable failing tests. See
+`skills/automerging.md` for the full contract and the
+list of forbidden bypasses.
+
+## 12. Milestones
+
+Releases are planned by version. Each future release
+has a backlog file at `issues/ROADMAP-X.Y.Z.md` listing
+its features and bugs. One session run lands one
+complete milestone; the roadmap file is removed at
+release time (git history retains it). Items move from
+`issues/feature/` / `issues/bug/` to `done/` and stay
+there forever. See `skills/milestones.md`.
+
+## 13. Audits
+
+Every observable behavior of the shipping software
+must trace back to a closed feature or bug in `done/`.
+A regular audit (every release, or every 30 days)
+walks the surface and files backfill issues for any
+gap. Audit notes live at `issues/audit/YYYY-MM-DD.md`
+and are never deleted. See `skills/audit.md`.

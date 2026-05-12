@@ -23,13 +23,15 @@ MANDIR    = @MANDIR@
 BUILD_DIR = build/$(PACKAGE)
 
 .PHONY: all install uninstall check check-unit check-vectors \
-        check-sit check-all lint test help package clean \
-        install-skills-user uninstall-skills-user
+        check-sit check-pit check-pre-push check-all lint test help \
+        package clean install-skills-user uninstall-skills-user
 
 all: install
 
 help:
-	@echo "Targets: install, uninstall, check, lint, check-sit, check-all,"
+	@echo "Targets: install, uninstall, check, lint,"
+	@echo "         check-unit, check-vectors, check-sit, check-pit,"
+	@echo "         check-pre-push, check-all,"
 	@echo "         install-skills-user, uninstall-skills-user, package, clean"
 
 # Stow-based install builds a tree mirroring $PREFIX layout under
@@ -43,6 +45,10 @@ install:
 	          $(BUILD_DIR)$(DATADIR)/doc/$(PACKAGE) \
 	          $(BUILD_DIR)$(DATADIR)/$(PACKAGE)
 	@cp -a bin/* $(BUILD_DIR)$(BINDIR)/
+	# FEAT-006: install a `bitcoin.sh` symlink alongside the
+	# binary so vector tests can `. bitcoin.sh` from PATH.
+	# The source tree itself stays clean (no new file under bin/).
+	@ln -sf $(PACKAGE) $(BUILD_DIR)$(BINDIR)/$(PACKAGE).sh
 	@if [ -d libexec/$(PACKAGE) ]; then \
 		cp -a libexec/$(PACKAGE)/* $(BUILD_DIR)$(LIBEXECDIR)/$(PACKAGE)/; \
 	fi
@@ -57,12 +63,12 @@ install:
 		cp -a share/doc/$(PACKAGE)/* \
 		      $(BUILD_DIR)$(DATADIR)/doc/$(PACKAGE)/; \
 	fi
-	# .rpk/version → $DATADIR/<pkg>/version : the runtime version
+	# VERSION → $DATADIR/<pkg>/version : the runtime version
 	# string the binary reads (FEAT-194). The binary's two-path
 	# fallback resolves to this file when invoked as the installed
-	# entry, and to .rpk/version when invoked from a dev tree.
-	@if [ -f .rpk/version ]; then \
-		install -m 644 .rpk/version $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/version; \
+	# entry, and to ./VERSION when invoked from a dev tree.
+	@if [ -f VERSION ]; then \
+		install -m 644 VERSION $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/version; \
 	fi
 	@stow -d build -t $(PREFIX) $(PACKAGE)
 
@@ -80,7 +86,16 @@ check-unit:
 
 check-vectors:
 	@if [ -d tests/vectors ] && command -v prove >/dev/null 2>&1; then \
-		prove tests/vectors/*.t; \
+		d=$$(mktemp -d); \
+		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin.sh; \
+		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin; \
+		for p in libexec/$(PACKAGE)/*; do \
+			[ -e "$$p" ] && ln -s $$(pwd)/$$p $$d/$$(basename $$p); \
+		done; \
+		PATH=$$d:$$PATH prove tests/vectors/*.t; \
+		rc=$$?; \
+		rm -rf $$d; \
+		exit $$rc; \
 	else echo "prove or tests/vectors/ not present; skipping"; fi
 
 check-sit:
@@ -88,7 +103,20 @@ check-sit:
 		echo "==> SIT: see tests/sit/README.md"; \
 	else echo "podman not installed; soft-skipping SIT"; fi
 
-check-all: check check-sit
+check-pit:
+	@if command -v podman >/dev/null 2>&1; then \
+		if [ -d tests/pit ]; then \
+			echo "==> PIT: see tests/pit/README.md"; \
+		else echo "tests/pit/ not present; skipping"; fi; \
+	else echo "podman not installed; soft-skipping PIT"; fi
+
+# Composite gate used by .githooks/pre-push. Always runs unit;
+# adds SIT and PIT when podman is available (desktop mode).
+# See skills/testing.md for the full matrix.
+check-pre-push:
+	@.githooks/pre-push
+
+check-all: check check-sit check-pit
 
 lint:
 	@if command -v shellcheck >/dev/null 2>&1; then \
@@ -120,6 +148,11 @@ uninstall-skills-user:
 	done
 
 # Versioning (FEAT-194)
+#
+# VERSION (project root) is the source of truth read by bin/bitcoin
+# and installed to $DATADIR/<pkg>/version. .rpk/versions is the
+# per-release SHA ledger appended below. To bump, see
+# skills/version.md.
 package:
 	@if [ -z "$(VERSION)" ]; then \
 		echo "Usage: make package VERSION=x.y.z"; exit 1; \
@@ -128,8 +161,8 @@ package:
 		echo "Invalid semver: $(VERSION)"; exit 1; }
 	@printf '%s\t%s\n' "$(VERSION)" "$$(git rev-parse HEAD)" \
 		>> .rpk/versions
-	@echo "$(VERSION)" > .rpk/version
-	@git add .rpk/version .rpk/versions
+	@echo "$(VERSION)" > VERSION
+	@git add VERSION .rpk/versions
 	@git commit -m "package $(VERSION)"
 	@git tag "v$(VERSION)"
 
