@@ -120,3 +120,22 @@ If CI fails, file a BUG (per §3 and `skills/bugs.md`)
 — never bypass the gate or disable failing tests. See
 `skills/automerging.md` for the full contract and the
 list of forbidden bypasses.
+
+## 12. Milestones
+
+Releases are planned by version. Each future release
+has a backlog file at `issues/ROADMAP-X.Y.Z.md` listing
+its features and bugs. One session run lands one
+complete milestone; the roadmap file is removed at
+release time (git history retains it). Items move from
+`issues/feature/` / `issues/bug/` to `done/` and stay
+there forever. See `skills/milestones.md`.
+
+## 13. Audits
+
+Every observable behavior of the shipping software
+must trace back to a closed feature or bug in `done/`.
+A regular audit (every release, or every 30 days)
+walks the surface and files backfill issues for any
+gap. Audit notes live at `issues/audit/YYYY-MM-DD.md`
+and are never deleted. See `skills/audit.md`.

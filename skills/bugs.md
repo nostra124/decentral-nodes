@@ -44,7 +44,13 @@ If the defect surfaced via CI, the failure log is already in the
 PR comment thread (see `skills/testing.md` §2.3). Quote the
 relevant lines in the bug body.
 
-### Step 2 — file `BUG-NNN`
+### Step 2 — file `BUG-NNN` (and assign it to a milestone)
+
+Bugs, like features, are assigned to a target release via
+`issues/ROADMAP-X.Y.Z.md`. Critical bugs typically pull into the
+next patch release; lower-priority bugs go to the next minor or
+later. See `skills/milestones.md` for the assignment protocol.
+
 
 Create `issues/bug/NNN-<slug>.md` with this frontmatter and
 section structure:

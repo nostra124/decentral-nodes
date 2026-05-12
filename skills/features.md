@@ -87,6 +87,12 @@ Priority: features are always lower than the highest open bug.
 The repo policy is **bugs before features at the same priority
 level** (CLAUDE.md §3). When in doubt, file medium.
 
+Milestone assignment: every feature is also added to the
+appropriate `issues/ROADMAP-X.Y.Z.md` in the same commit as
+the feature file. See `skills/milestones.md` for the
+versioning rules and the shuffle protocol when an item moves
+between roadmaps.
+
 ### Step 3 — draft tests
 
 For each acceptance criterion, write the test(s) that will

@@ -55,6 +55,10 @@ been moved to its `done/` directory and its status flipped to
 `done`. If anything is still `open` or unmoved, stop and finish that
 work before bumping.
 
+After the bump lands, the roadmap file is removed (`git rm
+issues/ROADMAP-<target>.md`) — the milestone is complete and git
+history is the permanent record. See `skills/milestones.md` §2.5.
+
 ### Step 2 — edit `VERSION`
 
 ```sh
