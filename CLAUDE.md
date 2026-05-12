@@ -62,6 +62,12 @@ need address derivation.
 
 ## 8. Versioning
 
-Semver. `tests/unit/bitcoin.bats` is the contract;
-the BIP vector tests under `tests/vectors/` are the
-deeper regression baseline.
+Semver. The single semver string in `VERSION` at the
+repo root is the source of truth; `bin/bitcoin` reads
+it at runtime and `make install` copies it to
+`$DATADIR/bitcoin/version`. `tests/unit/bitcoin.bats`
+is the contract; the BIP vector tests under
+`tests/vectors/` are the deeper regression baseline.
+
+To bump the version (patch / minor / major release),
+follow `skills/version.md`.

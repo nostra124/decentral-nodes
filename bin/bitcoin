@@ -9,11 +9,11 @@
 # This should always be the first line of code to facilitate debugging
 [ -n "$SELF_DEBUG" ] && set -vx
 
-# Per FEAT-194: VERSION read at runtime from .rpk/version (dev tree)
-# or $PREFIX/share/bitcoin/version (installed). The hardcoded fallback
-# is used only if both files are missing.
+# Per FEAT-194: VERSION read at runtime from VERSION at the repo root
+# (dev tree) or $PREFIX/share/bitcoin/version (installed). The
+# hardcoded fallback is used only if both files are missing.
 __d="$(cd "$(dirname "$0")" && pwd)"; __s="$(basename "$0")"
-VERSION=$(cat "$__d/../.rpk/version" 2>/dev/null || cat "$__d/../share/$__s/version" 2>/dev/null || echo '1.0.0')
+VERSION=$(cat "$__d/../VERSION" 2>/dev/null || cat "$__d/../share/$__s/version" 2>/dev/null || echo '1.0.0')
 unset __d __s
 SELF=$(basename $0)
 

@@ -57,12 +57,12 @@ install:
 		cp -a share/doc/$(PACKAGE)/* \
 		      $(BUILD_DIR)$(DATADIR)/doc/$(PACKAGE)/; \
 	fi
-	# .rpk/version → $DATADIR/<pkg>/version : the runtime version
+	# VERSION → $DATADIR/<pkg>/version : the runtime version
 	# string the binary reads (FEAT-194). The binary's two-path
 	# fallback resolves to this file when invoked as the installed
-	# entry, and to .rpk/version when invoked from a dev tree.
-	@if [ -f .rpk/version ]; then \
-		install -m 644 .rpk/version $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/version; \
+	# entry, and to ./VERSION when invoked from a dev tree.
+	@if [ -f VERSION ]; then \
+		install -m 644 VERSION $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/version; \
 	fi
 	@stow -d build -t $(PREFIX) $(PACKAGE)
 
@@ -120,6 +120,11 @@ uninstall-skills-user:
 	done
 
 # Versioning (FEAT-194)
+#
+# VERSION (project root) is the source of truth read by bin/bitcoin
+# and installed to $DATADIR/<pkg>/version. .rpk/versions is the
+# per-release SHA ledger appended below. To bump, see
+# skills/version.md.
 package:
 	@if [ -z "$(VERSION)" ]; then \
 		echo "Usage: make package VERSION=x.y.z"; exit 1; \
@@ -128,8 +133,8 @@ package:
 		echo "Invalid semver: $(VERSION)"; exit 1; }
 	@printf '%s\t%s\n' "$(VERSION)" "$$(git rev-parse HEAD)" \
 		>> .rpk/versions
-	@echo "$(VERSION)" > .rpk/version
-	@git add .rpk/version .rpk/versions
+	@echo "$(VERSION)" > VERSION
+	@git add VERSION .rpk/versions
 	@git commit -m "package $(VERSION)"
 	@git tag "v$(VERSION)"
 

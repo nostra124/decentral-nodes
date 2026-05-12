@@ -48,7 +48,7 @@ This package follows the rpk per-script repo convention:
 - Per-script repo: this repo contains only `bitcoin`'s artefacts.
 - No shared library: helper boilerplate is duplicated, not factored out (see `CLAUDE.md` §4–5).
 - Stow-based install via `make install`.
-- Versioning: semver, with `.rpk/version` as the source of truth and `.rpk/versions` as the per-release SHA ledger.
+- Versioning: semver, with `VERSION` (project root) as the source of truth and `.rpk/versions` as the per-release SHA ledger. See `skills/version.md` for the bump procedure.
 
 ## License
 
