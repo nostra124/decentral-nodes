@@ -1,0 +1,52 @@
+name: tests
+
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  unit:
+    name: bats unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Run unit tests
+        id: bats
+        run: |
+          set -o pipefail
+          bats tests/unit/*.bats 2>&1 | tee bats.log
+
+      - name: Comment failure log on PR
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            printf '## CI: bats unit tests failed\n\n'
+            printf 'Workflow run: %s\n\n' "$RUN_URL"
+            printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
+            printf '```\n'
+            tail -c 60000 bats.log
+            printf '```\n'
+          } > pr-comment.md
+          gh pr comment "$PR_NUMBER" --body-file pr-comment.md
+
+      - name: Upload bats log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bats-log
+          path: bats.log
+          if-no-files-found: ignore

@@ -96,3 +96,17 @@ sed \
 	Makefile.in > Makefile
 
 echo "configured $PACKAGE $VERSION for prefix=$PREFIX"
+
+# Wire up the pre-push test gate when we are inside a git checkout
+# and the user has not already configured a hooks path. See
+# skills/testing.md for the selection matrix (cloud sandbox = unit;
+# desktop with podman = unit + sit + pit).
+if [ -d .git ] && [ -d .githooks ]; then
+	current_hooks_path="$(git config --get core.hooksPath || true)"
+	if [ -z "$current_hooks_path" ]; then
+		echo
+		echo "To run tests before every push:"
+		echo "    git config core.hooksPath .githooks"
+		echo "See skills/testing.md for the full matrix."
+	fi
+fi

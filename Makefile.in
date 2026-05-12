@@ -23,13 +23,15 @@ MANDIR    = @MANDIR@
 BUILD_DIR = build/$(PACKAGE)
 
 .PHONY: all install uninstall check check-unit check-vectors \
-        check-sit check-all lint test help package clean \
-        install-skills-user uninstall-skills-user
+        check-sit check-pit check-pre-push check-all lint test help \
+        package clean install-skills-user uninstall-skills-user
 
 all: install
 
 help:
-	@echo "Targets: install, uninstall, check, lint, check-sit, check-all,"
+	@echo "Targets: install, uninstall, check, lint,"
+	@echo "         check-unit, check-vectors, check-sit, check-pit,"
+	@echo "         check-pre-push, check-all,"
 	@echo "         install-skills-user, uninstall-skills-user, package, clean"
 
 # Stow-based install builds a tree mirroring $PREFIX layout under
@@ -88,7 +90,20 @@ check-sit:
 		echo "==> SIT: see tests/sit/README.md"; \
 	else echo "podman not installed; soft-skipping SIT"; fi
 
-check-all: check check-sit
+check-pit:
+	@if command -v podman >/dev/null 2>&1; then \
+		if [ -d tests/pit ]; then \
+			echo "==> PIT: see tests/pit/README.md"; \
+		else echo "tests/pit/ not present; skipping"; fi; \
+	else echo "podman not installed; soft-skipping PIT"; fi
+
+# Composite gate used by .githooks/pre-push. Always runs unit;
+# adds SIT and PIT when podman is available (desktop mode).
+# See skills/testing.md for the full matrix.
+check-pre-push:
+	@.githooks/pre-push
+
+check-all: check check-sit check-pit
 
 lint:
 	@if command -v shellcheck >/dev/null 2>&1; then \

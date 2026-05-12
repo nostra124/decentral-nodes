@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# pre-push — gate `git push` on the appropriate test suite for the
+# environment. Wired up by `git config core.hooksPath .githooks`
+# (see configure output and skills/testing.md).
+#
+# Selection logic:
+#   - cloud sandbox (no podman): unit tests only
+#   - desktop with podman:       unit + sit + pit (if those test
+#                                 directories exist)
+#
+# A non-zero exit aborts the push.
+
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+run() {
+	echo "==> $*" >&2
+	"$@"
+}
+
+if ! command -v bats >/dev/null 2>&1; then
+	echo "pre-push: bats not installed; cannot run unit tests" >&2
+	exit 1
+fi
+
+run bats tests/unit/*.bats
+
+if command -v podman >/dev/null 2>&1; then
+	if [ -d tests/sit ] && [ -n "$(ls -A tests/sit 2>/dev/null)" ]; then
+		run make -s check-sit
+	else
+		echo "pre-push: tests/sit/ empty or missing; skipping SIT" >&2
+	fi
+	if [ -d tests/pit ] && [ -n "$(ls -A tests/pit 2>/dev/null)" ]; then
+		run make -s check-pit
+	else
+		echo "pre-push: tests/pit/ empty or missing; skipping PIT" >&2
+	fi
+else
+	echo "pre-push: podman not present; skipping SIT/PIT (cloud-sandbox mode)" >&2
+fi

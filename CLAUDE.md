@@ -71,3 +71,16 @@ is the contract; the BIP vector tests under
 
 To bump the version (patch / minor / major release),
 follow `skills/version.md`.
+
+## 9. Testing
+
+Three tiers (unit / sit / pit) and three surfaces
+(manual `make check-*`, pre-push hook, GitHub Actions).
+The pre-push hook detects the environment: cloud
+sandbox runs unit only, desktop with podman runs
+unit + sit + pit. CI runs unit and posts the bats log
+as a PR comment on failure so an assistant agent can
+read it via the GitHub MCP tools.
+
+Full matrix, triage workflow, and per-tier ownership
+are in `skills/testing.md`.
