@@ -45,6 +45,10 @@ install:
 	          $(BUILD_DIR)$(DATADIR)/doc/$(PACKAGE) \
 	          $(BUILD_DIR)$(DATADIR)/$(PACKAGE)
 	@cp -a bin/* $(BUILD_DIR)$(BINDIR)/
+	# FEAT-006: install a `bitcoin.sh` symlink alongside the
+	# binary so vector tests can `. bitcoin.sh` from PATH.
+	# The source tree itself stays clean (no new file under bin/).
+	@ln -sf $(PACKAGE) $(BUILD_DIR)$(BINDIR)/$(PACKAGE).sh
 	@if [ -d libexec/$(PACKAGE) ]; then \
 		cp -a libexec/$(PACKAGE)/* $(BUILD_DIR)$(LIBEXECDIR)/$(PACKAGE)/; \
 	fi
@@ -82,7 +86,16 @@ check-unit:
 
 check-vectors:
 	@if [ -d tests/vectors ] && command -v prove >/dev/null 2>&1; then \
-		prove tests/vectors/*.t; \
+		d=$$(mktemp -d); \
+		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin.sh; \
+		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin; \
+		for p in libexec/$(PACKAGE)/*; do \
+			[ -e "$$p" ] && ln -s $$(pwd)/$$p $$d/$$(basename $$p); \
+		done; \
+		PATH=$$d:$$PATH prove tests/vectors/*.t; \
+		rc=$$?; \
+		rm -rf $$d; \
+		exit $$rc; \
 	else echo "prove or tests/vectors/ not present; skipping"; fi
 
 check-sit:

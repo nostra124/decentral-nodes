@@ -2,7 +2,7 @@
 id: FEAT-020
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # Fix bats test environment isolation: pin `SELF_LIBEXEC` and read version from source

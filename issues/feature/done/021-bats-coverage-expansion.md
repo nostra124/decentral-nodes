@@ -2,7 +2,7 @@
 id: FEAT-021
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # Expand `tests/unit/bitcoin.bats` coverage: modules, exit codes, negative cases, bech32-decode

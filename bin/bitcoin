@@ -807,6 +807,12 @@ bitcoinAddress()
 
 
 #------------------------------------------------------------------------------
+# FEAT-006: when this file is sourced (e.g. `. bitcoin.sh`) rather than
+# executed, define all the functions above and return without running
+# any command. The same file serves both modes.
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
+
+#------------------------------------------------------------------------------
 # Command-line processing
 if [[ $# == 0 ]]; then
 	command:help
