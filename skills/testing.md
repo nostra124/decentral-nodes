@@ -125,19 +125,36 @@ step is `Comment failure log on PR` in the workflow file — keep its
 If you add new test tiers to CI, mirror the comment-on-failure step
 for each one so failure surfaces stay machine-readable.
 
+### 2.3.1 CI completion is always a reaction event
+
+An agent watching the PR (per `skills/automerging.md` Mode B) **must
+react to every CI completion webhook — green and red.** Treat the
+arrival of a `<github-webhook-activity>` event with a terminal
+conclusion (`success`, `failure`, `cancelled`, `timed_out`,
+`action_required`) as a turn that requires output. Silently waiting
+on a red event is a session hang; the user has no way to tell
+whether the watcher is alive.
+
+The full both-completions contract — including the one-line
+acknowledgement requirement and the per-conclusion reaction matrix —
+lives in `skills/automerging.md` §3b.1.
+
 ## 3. Triage workflow when CI fails
 
-1. Open the PR; the most recent failure comment is at the bottom.
-2. The comment includes: workflow-run URL, commit SHA, last ~60 KB
+1. Acknowledge the failure webhook in the conversation (run id,
+   conclusion, commit SHA). See `skills/automerging.md` §3b.2.
+2. Open the PR; the most recent failure comment is at the bottom.
+3. The comment includes: workflow-run URL, commit SHA, last ~60 KB
    of `bats.log`.
-3. If the log is truncated, click the workflow-run URL or
+4. If the log is truncated, click the workflow-run URL or
    `gh run view --log-failed <run-id>` for the full output. The
    workflow also uploads `bats.log` as an artifact.
-4. Reproduce locally with the same command the workflow ran:
+5. Reproduce locally with the same command the workflow ran:
    `bats tests/unit/*.bats`.
-5. Fix, commit, push. The hook re-runs unit tests before the push;
-   CI re-runs and (on green) the failure comment becomes historical
-   context.
+6. File `BUG-NNN` per `skills/bugs.md`, write the failing
+   regression test *before* the fix, then fix, commit, push. The
+   pre-push hook re-runs unit tests before the push; CI re-runs
+   and the next webhook event arrives (back to §2.3.1).
 
 ## 4. Adding a new test
 

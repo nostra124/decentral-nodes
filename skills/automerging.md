@@ -114,6 +114,48 @@ Setup, in order:
 5. On a red CI event, agent goes to §4 (the CI-fail loop). The
    subscription stays live across re-pushes; do not re-subscribe.
 
+### 3b.1 The "both completions" rule (critical)
+
+**The watcher MUST react to every CI completion event — green and
+red.** Failing to react on red is the single biggest session-hang
+antipattern: the agent looks like it is "still waiting" when in
+reality the CI gate has already resolved and the next move is the
+agent's.
+
+When a CI run completes, the agent receives a single
+`<github-webhook-activity>` event for that run. The agent's
+obligations are:
+
+| Outcome | Required action |
+|---|---|
+| green (`conclusion: success`) | Call `merge_pull_request`. End the turn after merging. |
+| red (`conclusion: failure`, `cancelled`, `timed_out`, `action_required`) | Read the PR-comment failure log (§4.1); enter the CI-fail loop (§4). End the turn after pushing the fix, *not* before. |
+| skipped (`conclusion: skipped`, `neutral`) | Treat as "no signal yet"; do not merge. Investigate why CI was skipped (usually a path filter); fix and push, or if intentional, document and end the turn explaining the state. |
+| pending → still in progress | This is not a completion event. Continue waiting. |
+
+There is no fourth option. **The agent never silently ignores a
+completion event.** If the event is ambiguous (e.g. a partial
+check-run completion in a multi-job matrix), explicitly note the
+ambiguity in the conversation before continuing to wait — the user
+must always be able to see that the agent is reacting.
+
+### 3b.2 Acknowledging the event
+
+Every reaction begins with a one-line acknowledgement in the
+conversation: which run completed, what status, which commit. This
+gives the user a clear signal that the watcher is alive and the
+event was received. Example:
+
+> CI run `25748947510` on `fcee2ac` completed: **success**. Merging
+> via squash.
+
+or
+
+> CI run `25748947510` on `fcee2ac` completed: **failure**. Reading
+> the PR-comment log, then filing BUG-NNN per skills/bugs.md.
+
+### 3b.3 Session resumption
+
 If the agent's session ends before CI completes, re-subscribing on
 resume picks the stream back up — the contract is the same.
 
@@ -130,37 +172,45 @@ convenient.
 ## 4. When CI fails
 
 This is the loop that keeps the contract honest. **No bypass.**
+It is entered *every time* a red CI completion event arrives —
+never deferred, never ignored. See §3b.1 for why.
 
 ```
-CI red  ──►  read the PR-comment failure log  ──►  file BUG-NNN
-                                                        │
-                                                        ▼
-   push  ◄──  test green locally  ◄──  fix  ◄──  failing regression test
-    │
-    ▼
-   CI re-runs automatically  ──►  green?  ──► auto-merge fires
-                                    │
-                                    └──► red → back to top of loop
+CI red  ──►  acknowledge in conversation  ──►  read PR-comment log
+   │                                                       │
+   ▼                                                       ▼
+file BUG-NNN  ──►  failing regression test  ──►  fix  ──►  push
+                                                            │
+                                                            ▼
+   CI re-runs automatically  ──►  next webhook event arrives
+                                          │
+                          ┌───────────────┴───────────────┐
+                          ▼                               ▼
+                       green: merge                    red: loop
 ```
 
-Detail per step:
+### 4.1 Detail per step
 
-1. **Read the PR comment.** The workflow posts the last ~60 KB of
+1. **Acknowledge the event** in the conversation per §3b.2. This
+   step is non-negotiable — silence here is the hang.
+2. **Read the PR comment.** The workflow posts the last ~60 KB of
    `bats.log` as a PR comment on failure (see `skills/testing.md`
    §2.3). That comment is the diagnostic surface — read it first.
-2. **File BUG-NNN.** Follow `skills/bugs.md`. Even if the fix is
+3. **File BUG-NNN.** Follow `skills/bugs.md`. Even if the fix is
    one line, the bug must exist so the regression is traceable.
    Acceptable shortcut: if the CI failure is *only* due to an
    unrelated flake that has happened before and you have already
    filed it, link the existing bug instead of filing a duplicate.
-3. **Write the failing regression test.** Per `skills/bugs.md` §3,
+4. **Write the failing regression test.** Per `skills/bugs.md` §3,
    commit the test *before* the fix.
-4. **Fix.** Minimum change. No drive-by refactors.
-5. **Push.** The pre-push hook re-runs unit tests locally. CI
+5. **Fix.** Minimum change. No drive-by refactors.
+6. **Push.** The pre-push hook re-runs unit tests locally. CI
    re-runs automatically.
-6. **Wait.** Mode A: auto-merge stays armed across pushes; no
-   re-arming needed. Mode B: the PR-activity subscription stays
-   live; the agent receives the next CI event automatically.
+7. **Wait for the next webhook event.** Mode A: auto-merge stays
+   armed across pushes; no re-arming needed. Mode B: the
+   PR-activity subscription stays live; the agent receives the
+   next CI completion event (green or red) automatically and
+   re-enters §3b.1.
 
 ## 5. Disarming
 
@@ -208,6 +258,8 @@ following — stop and read this section.
 | Re-run the same red CI and hope it flips green | Hides intermittent failures that bite later. | File a flake bug. Don't merge until you understand it. |
 | Disable the failing test | The test is the contract. Disabling it changes the contract silently. | Either the code is wrong or the test is wrong — fix one, justify which. |
 | Merge a "trivial fix" without a regression test | This is exactly the path that causes the bug to come back. | Write the test first (`skills/bugs.md`). |
+| Silently ignore a red CI webhook ("user didn't ask me to react") | The session hangs. The user assumes the watcher is alive; it is not, in any meaningful sense. | Acknowledge the event per §3b.2, then enter §4. |
+| Wait for a green event without acknowledging the red one first | Same hang, different shape. | Always acknowledge *every* completion event. |
 
 ## 8. Checklist (use when arming the merge, either mode)
 
@@ -228,11 +280,12 @@ Mode B (current default for this repo):
       long enough to receive the CI completion event
 ```
 
-After CI runs:
+After **every** CI completion event (green OR red — never skip):
 
 ```
+- [ ] Event acknowledged in conversation (run id, conclusion, commit)
 - [ ] CI green: PR merged (Mode A: by GitHub; Mode B: by agent
       via merge_pull_request); PR closed
 - [ ] CI red:   BUG-NNN filed, failing test committed, fix pushed,
-                loop until green
+                loop until next event (back to top of this block)
 ```
