@@ -4,13 +4,31 @@ description: |
   Run the right test suite at the right point in the change
   lifecycle (local edit → pre-push → CI). Three test tiers
   (unit / sit / pit) and three execution surfaces (manual,
-  pre-push hook, GitHub Actions). Trigger when the user wants
-  to "run the tests", "set up CI", "add a pre-push hook",
-  diagnose a failed run, or understand which suite covers
-  which contract.
+  pre-push hook, GitHub Actions). Local tests are the
+  priority; CI is the mandatory merge gate. Trigger when
+  the user wants to "run the tests", "set up CI", "add a
+  pre-push hook", diagnose a failed run, or understand which
+  suite covers which contract.
 ---
 
 # `testing` skill
+
+## 0. Two non-negotiables
+
+1. **Local-first.** Every change must be validated by running tests
+   *on the developer's machine* before it leaves the checkout. The
+   pre-push hook enforces this — never bypass it (`--no-verify` is
+   forbidden on this repo). If you need to push WIP, use a draft PR
+   so CI carries the load instead.
+2. **CI is mandatory for merge.** No PR may be merged with a red or
+   missing CI run. The `tests / bats unit tests` workflow is the
+   merge gate; failing or skipped runs block merge regardless of how
+   green the local run was. If CI is broken, the fix is to repair
+   CI — not to merge around it.
+
+These two work together: local runs catch issues fast and cheap; CI
+is the team-wide invariant that the change is reproducible outside
+the author's machine. Skipping either erodes the contract.
 
 ## 1. Test tiers
 
@@ -66,9 +84,20 @@ debugging.
 `configure` prints the one-time `git config core.hooksPath` hint
 when it detects an unwired checkout.
 
-### 2.3 GitHub Actions (`.github/workflows/test.yml`)
+### 2.3 GitHub Actions (`.github/workflows/test.yml`) — mandatory merge gate
 
 Runs on every `pull_request` and on `push` to `master` / `main`.
+**A green run of `tests / bats unit tests` is mandatory for merge.**
+Treat a red or missing CI run as a hard merge blocker — no
+exceptions, no "but it works on my machine".
+
+Note that CI is the *second* safety net, not the first. Local tests
+(§2.1 / §2.2) catch ~all preventable failures before they reach
+the remote. CI exists to prove the change is reproducible *off* the
+author's machine — same dependencies, clean checkout, deterministic
+environment. If CI fails on a change that passed locally, something
+about the change depends on the local environment; fix that, don't
+retry the run.
 
 Currently the workflow runs **unit tests only** — SIT and PIT need
 podman-in-podman which the default runner doesn't ship. When that
@@ -125,10 +154,23 @@ desktop with `make check-all`, not just `make check-pit`).
 
 ## 6. Checklist (copy into PR description for any test-touching change)
 
+In order. Each row is a prerequisite for the next — do not skip
+ahead. The local-first rows are non-negotiable; the CI row is the
+mandatory merge gate.
+
 ```
-- [ ] `make check-unit` passes locally
-- [ ] If podman is available: `make check-all` passes
-- [ ] Pre-push hook wired (`git config core.hooksPath .githooks`)
-- [ ] CI green on the PR (workflow: tests / bats unit tests)
-- [ ] If CI failed, the failure comment is resolved (fix landed, not muted)
+Local (do these first, in order):
+- [ ] Pre-push hook wired: git config core.hooksPath .githooks
+- [ ] make check-unit passes on the dev machine
+- [ ] If podman is available: make check-all passes (adds sit + pit)
+- [ ] git push succeeds (the pre-push hook re-runs unit tests)
+
+CI (mandatory merge gate, must be green):
+- [ ] Workflow tests / bats unit tests is green on the PR head commit
+- [ ] No outstanding failure comment from a prior red run (if there
+      was one, the fix landed — comment is historical context, not
+      a deferred TODO)
 ```
+
+**Do not merge** with any local item unchecked or with CI red /
+missing / pending.
