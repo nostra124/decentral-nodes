@@ -5,6 +5,32 @@ priority: medium
 status: open
 ---
 
+## Progress (1.7.0 shipped — decode only)
+
+Decode landed; encode + sign still open.
+
+- `bitcoin psbt decode` reads hex from stdin, validates the BIP-174
+  magic + separator (`70736274ff`), and walks the wire format
+  emitting one TSV line per key-value record:
+    section=<n> type=<hex> key=<hex> value=<hex>
+- Helpers (`psbt:_take`, `psbt:_take_varint`) use global state
+  rather than command substitution so the per-byte position
+  pointer survives the parse loop (subshells would silently lose
+  it — a real bug found and fixed during implementation).
+- 4 bats tests cover: known BIP-174 vector emits records; bad
+  magic rejected; empty input rejected; help cites BIP-174.
+- `share/doc/bitcoin/bips/bip-0174.mediawiki` vendored at the same
+  pinned commit as the other BIPs.
+
+### Deferred to ROADMAP-1.8.0
+
+- `bitcoin psbt encode` — reverse of decode; build the wire format
+  from a small inputs/outputs description.
+- `bitcoin psbt sign` — SIGHASH preimage + ECDSA over secp256k1.
+  The dc-script for EC math is already in `bin/bitcoin` (see
+  `$secp256k1`); the missing piece is the SIGHASH algorithm + the
+  signing-key plumbing.
+
 # PSBT (BIP-174) encode, decode, and sign
 
 ## Description

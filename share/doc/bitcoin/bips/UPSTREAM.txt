@@ -6,6 +6,7 @@ files:
   bip-0032.mediawiki
   bip-0039.mediawiki
   bip-0173.mediawiki
+  bip-0174.mediawiki
   bip-0350.mediawiki
   bip-0380.mediawiki
   bip-0381.mediawiki
