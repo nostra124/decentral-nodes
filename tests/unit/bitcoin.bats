@@ -568,3 +568,34 @@ curl_fixture() {
 	run "$BATS_TEST_DIRNAME/../../libexec/bitcoin/mnemonic-to-seed" only three words
 	[ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# BUG-013 regression — `bip32 derive` referenced undefined helper
+# functions (isPrivate/isPublic) and BIP32_-prefixed version-code
+# variables that the plugin never sets. End-to-end derive failed with
+# "command not found" + "version is neither private nor public?!".
+# This test exercises the full seed → child-key chain.
+# ---------------------------------------------------------------------------
+
+@test "BUG-013 — bip32 derive resolves end-to-end from a seed (non-hardened path)" {
+	repo_root="$BATS_TEST_DIRNAME/../../"
+	PATH="$repo_root/bin:$repo_root/libexec/bitcoin:$PATH" \
+	XDG_SHARE_HOME="$repo_root/share" \
+	SELF_LIBEXEC="$repo_root/libexec" \
+	run bash -c '
+		mnemonic-to-seed abandon abandon abandon abandon abandon abandon abandon \
+		                 abandon abandon abandon abandon about \
+		  | basenc --base16 -w0 \
+		  | bip32 create -s 2>/dev/null \
+		  | bitcoin bip13 base58-decode \
+		  | bip32 derive m/0
+	'
+	[ "$status" -eq 0 ]
+	# Non-empty output (a derived xkey serialisation, ~78 bytes binary
+	# or its base58 equivalent — we only care that the pipeline ran).
+	[ -n "$output" ]
+	# The two undefined-function errors must not appear.
+	[[ "$output" != *"isPrivate"* ]]
+	[[ "$output" != *"isPublic"* ]]
+	[[ "$output" != *"version is neither private nor public"* ]]
+}
