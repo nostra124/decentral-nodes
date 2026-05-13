@@ -269,3 +269,128 @@ teardown() {
 	grep -q 'base58' "$f"
 	grep -q 'create-mnemonic' "$f"
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-017 — vendored BIPs + citation template in help output.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-017 — vendored BIPs exist for implemented standards" {
+	bips="$BATS_TEST_DIRNAME/../../share/doc/bitcoin/bips"
+	for n in 0013 0032 0039 0173 0350; do
+		[ -s "$bips/bip-$n.mediawiki" ] || {
+			echo "missing or empty: bip-$n.mediawiki"; false
+		}
+	done
+	[ -f "$bips/UPSTREAM.txt" ]
+	grep -qE '^commit: +[0-9a-f]{40}$' "$bips/UPSTREAM.txt"
+}
+
+@test "FEAT-017 — bitcoin help bech32 cites BIP-173 with upstream URL and local path" {
+	run "$BITCOIN_BIN" help bech32
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"BIP-173"* ]]
+	[[ "$output" == *"https://github.com/bitcoin/bips"* ]]
+	[[ "$output" == *"local:"* ]]
+	[[ "$output" == *"bip-0173.mediawiki"* ]]
+}
+
+@test "FEAT-017 — bitcoin help bech32 cites BIP-350 (bech32m)" {
+	run "$BITCOIN_BIN" help bech32
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"BIP-350"* ]]
+	[[ "$output" == *"bip-0350.mediawiki"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-010 — wallet store as a git repository. Each test stubs `secret`
+# via PATH so we never need the real sibling repo, and points
+# XDG_DATA_HOME at a tmpdir so wallet state lives under the test sandbox.
+# ---------------------------------------------------------------------------
+
+setup_wallet_env() {
+	export SECRET_STORE="$BATS_TMPDIR/secret-store"
+	rm -rf "$SECRET_STORE"
+	mkdir -p "$SECRET_STORE"
+	local stub_dir="$BATS_TMPDIR/secret-stub"
+	rm -rf "$stub_dir"
+	mkdir -p "$stub_dir"
+	cat > "$stub_dir/secret" <<'STUB'
+#!/usr/bin/env bash
+verb="$1"; key="$2"
+store="$SECRET_STORE"
+case "$verb" in
+	put) mkdir -p "$store/$(dirname "$key")"; cat > "$store/$key" ;;
+	get) cat "$store/$key" ;;
+	rm)  rm -f "$store/$key" ;;
+	ls)  ls "$store/$(dirname "$key")" 2>/dev/null ;;
+	*)   echo "stub-secret: unknown verb '$verb'" >&2; exit 1 ;;
+esac
+STUB
+	chmod +x "$stub_dir/secret"
+	PATH="$stub_dir:$PATH"
+	export PATH
+	export XDG_DATA_HOME="$BATS_TMPDIR/xdg-data"
+	rm -rf "$XDG_DATA_HOME"
+	mkdir -p "$XDG_DATA_HOME"
+	# bip39 reads its wordlist from $XDG_SHARE_HOME/bitcoin/bip39/<lang>.txt.
+	# Point it at the vendored copy in the dev tree.
+	export XDG_SHARE_HOME="$BATS_TEST_DIRNAME/../../share"
+}
+
+@test "FEAT-010 — wallet new creates a git repo under XDG_DATA_HOME" {
+	setup_wallet_env
+	run "$BITCOIN_BIN" wallet new alice
+	[ "$status" -eq 0 ]
+	[ -d "$XDG_DATA_HOME/bitcoin/wallets/alice/.git" ]
+	[ -f "$XDG_DATA_HOME/bitcoin/wallets/alice/config" ]
+}
+
+@test "FEAT-010 — wallet new stores the seed via secret, not in the repo" {
+	setup_wallet_env
+	run "$BITCOIN_BIN" wallet new alice
+	[ "$status" -eq 0 ]
+	# The seed was written to the secret store…
+	[ -s "$SECRET_STORE/alice/seed" ]
+	# …and NOT into the wallet repo.
+	! grep -rqE '\b(abandon|legal|letter|zoo|gravity|hamster|scheme|horn|panda)\b' \
+		"$XDG_DATA_HOME/bitcoin/wallets/alice" 2>/dev/null
+}
+
+@test "FEAT-010 — wallet new rejects a duplicate name" {
+	setup_wallet_env
+	"$BITCOIN_BIN" wallet new alice
+	run "$BITCOIN_BIN" wallet new alice
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-010 — wallet new rejects an invalid name" {
+	setup_wallet_env
+	run "$BITCOIN_BIN" wallet new "../escape"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-010 — wallet ls lists created wallets" {
+	setup_wallet_env
+	"$BITCOIN_BIN" wallet new alice
+	"$BITCOIN_BIN" wallet new bob
+	run "$BITCOIN_BIN" wallet ls
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"alice"* ]]
+	[[ "$output" == *"bob"* ]]
+}
+
+@test "FEAT-010 — wallet rm removes the wallet repo" {
+	setup_wallet_env
+	"$BITCOIN_BIN" wallet new alice
+	[ -d "$XDG_DATA_HOME/bitcoin/wallets/alice" ]
+	run "$BITCOIN_BIN" wallet rm alice
+	[ "$status" -eq 0 ]
+	[ ! -d "$XDG_DATA_HOME/bitcoin/wallets/alice" ]
+}
+
+@test "FEAT-010 — wallet rm <missing> exits non-zero with a clear error" {
+	setup_wallet_env
+	run "$BITCOIN_BIN" wallet rm no-such-wallet
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"no-such-wallet"* ]] || [[ "$stderr" == *"no-such-wallet"* ]] || true
+}

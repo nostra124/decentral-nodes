@@ -2,7 +2,7 @@
 id: FEAT-010
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # Wallet store as a git repository, seed managed by `secret`

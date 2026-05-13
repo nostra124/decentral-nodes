@@ -60,6 +60,34 @@ error() {
 	echo -e "$SELF: error - \033[31;1;m$@\033[0m" >&2
 }
 
+# FEAT-017: print the citation block for a BIP. Used from help:*
+# functions. Resolves the local mediawiki path against the install
+# prefix or the dev tree.
+cite() {
+	local num="$1" title="$2"
+	local file
+	printf -v file 'bip-%04d.mediawiki' "$num"
+	local self_dir local_path=""
+	self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	for cand in \
+		"$self_dir/../share/doc/bitcoin/bips/$file" \
+		"$HOME/.local/share/doc/bitcoin/bips/$file" \
+		"/usr/local/share/doc/bitcoin/bips/$file" \
+		"/usr/share/doc/bitcoin/bips/$file"; do
+		if [ -f "$cand" ]; then
+			local_path="$cand"
+			break
+		fi
+	done
+	cat <<-EOF
+
+	Implements:
+	  BIP-$num  $title
+	  https://github.com/bitcoin/bips/blob/master/$file
+	  local:   ${local_path:-<not installed>}
+	EOF
+}
+
 # checks if a certain function exists: eg. has command update
 has() {
 	local KIND=$1
@@ -194,6 +222,161 @@ sP[[[INFINITY]nLIs@q]SI3Rd0=I_3RLIs@IO_5R_5Rlfx1d+d+d*doi2 100^d
 # This file requires extended globs to be parsed
 shopt -s extglob
 
+# ---------------------------------------------------------------------------
+# FEAT-010: wallet store as a git repository.
+#
+# A wallet is a per-name git repo at
+# $XDG_DATA_HOME/bitcoin/wallets/<name>/ holding the *signing context*
+# (config, descriptors, ledger). The seed phrase lives in `secret`, not
+# here — `bitcoin wallet new` calls `secret put <name>/seed` with the
+# generated BIP-39 mnemonic so the wallet repo can be pushed (FEAT-011)
+# without leaking the seed.
+# ---------------------------------------------------------------------------
+
+wallet:_root() {
+	echo "${XDG_DATA_HOME:-$HOME/.local/var}/bitcoin/wallets"
+}
+
+wallet:_path() {
+	echo "$(wallet:_root)/$1"
+}
+
+wallet:_valid_name() {
+	[[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+}
+
+command:wallet() {
+	local sub="${1:-help}"
+	shift 2>/dev/null || true
+	case "$sub" in
+		new|ls|rm|help) wallet:"$sub" "$@" ;;
+		*)
+			error "unknown wallet subcommand: '$sub'"
+			wallet:help >&2
+			return 2
+			;;
+	esac
+}
+
+help:wallet() {
+	wallet:help
+	cite 39 "Mnemonic seed phrases"
+}
+
+wallet:help() {
+	cat <<-ENDHELP
+	Usage: $SELF wallet <subcommand> [args]
+
+	  new <name>        create a new wallet at $(wallet:_root)/<name>
+	                    generates a BIP-39 mnemonic and stores it via
+	                    'secret put <name>/seed'
+	  ls                list existing wallets
+	  rm [-f] <name>    remove a wallet (-f also removes secret/<name>/seed)
+	  help              this message
+
+	A wallet is a git repository. The seed phrase is held by 'secret',
+	not by this repo, so 'bitcoin wallet push' (FEAT-011) is safe by
+	construction.
+	ENDHELP
+}
+
+wallet:new() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet new: name required"
+		return 2
+	fi
+	if ! wallet:_valid_name "$name"; then
+		error "wallet new: invalid name '$name' (must match [A-Za-z0-9][A-Za-z0-9_-]*)"
+		return 3
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ -e "$path" ]; then
+		error "wallet new: '$name' already exists at $path"
+		return 4
+	fi
+	if ! command -v secret >/dev/null 2>&1; then
+		error "wallet new: 'secret' not found in PATH (install nostra124/secret)"
+		return 5
+	fi
+	if [ ! -x "$SELF_LIBEXEC/$SELF/bip39" ]; then
+		error "wallet new: 'bip39' libexec plugin not found at $SELF_LIBEXEC/$SELF/bip39"
+		return 6
+	fi
+
+	local mnemonic
+	if ! mnemonic="$("$SELF_LIBEXEC/$SELF/bip39" create 256 2>/dev/null)"; then
+		error "wallet new: bip39 create failed"
+		return 7
+	fi
+	if [ -z "$mnemonic" ]; then
+		error "wallet new: bip39 create produced empty mnemonic"
+		return 8
+	fi
+
+	if ! printf '%s\n' "$mnemonic" | secret put "$name/seed"; then
+		error "wallet new: 'secret put $name/seed' failed"
+		return 9
+	fi
+
+	mkdir -p "$path" || { error "wallet new: mkdir $path failed"; return 10; }
+	(
+		cd "$path" || exit 1
+		git init -q -b main || git init -q
+		cat > config <<-CFG
+		# bitcoin wallet '$name' — FEAT-010
+		name=$name
+		network=testnet
+		CFG
+		: > descriptors
+		git add config descriptors
+		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+			commit -q -m "wallet new: $name"
+	) || { error "wallet new: failed to initialise repo at $path"; return 11; }
+
+	info "wallet '$name' created at $path"
+}
+
+wallet:ls() {
+	local root; root="$(wallet:_root)"
+	if [ ! -d "$root" ]; then
+		return 0
+	fi
+	find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+}
+
+wallet:rm() {
+	local force=0
+	while [ $# -gt 0 ]; do
+		case "${1:-}" in
+			-f|--force) force=1; shift ;;
+			--) shift; break ;;
+			-*) error "wallet rm: unknown flag '$1'"; return 2 ;;
+			*) break ;;
+		esac
+	done
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet rm: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet rm: no such wallet '$name' at $path"
+		return 3
+	fi
+	rm -rf "$path"
+	if (( force )); then
+		if command -v secret >/dev/null 2>&1; then
+			secret rm "$name/seed" 2>/dev/null \
+				|| warn "wallet rm: 'secret rm $name/seed' failed (continuing)"
+		else
+			warn "wallet rm: 'secret' not in PATH; skipped seed removal"
+		fi
+	fi
+	info "wallet '$name' removed"
+}
+
 command:bip49-create() {
   BIP32_MAINNET_PUBLIC_VERSION_CODE=0x049d7cb2 \
   BIP32_MAINNET_PRIVATE_VERSION_CODE=0x049d7878 \
@@ -283,6 +466,8 @@ The -m option creates a bech32m string:
 $ bech32 -m this-part-is-readable-by-a-human qpzry
 this-part-is-readable-by-a-human1qpzry2tuzaz
 ENDHELP
+	cite 173 "Bech32 segwit address format"
+	cite 350 "Bech32m for v1+ witness addresses"
 }
 
 command:bech32-verify() {
@@ -317,6 +502,8 @@ good checksum
 $ $SELF bech32-verify -m this-part-is-readable-by-a-human1qpzry2tuzaz && echo good checksum
 good checksum
 ENDHELP
+	cite 173 "Bech32 segwit address format"
+	cite 350 "Bech32m for v1+ witness addresses"
 }
 
 bech32-polymod() {
@@ -384,6 +571,7 @@ usage: $SELF bech32-encode [-m] human-readable-part text
 
 Encodes the text together with the human-readable-part to a bech32 string.
 ENDHELP
+	cite 173 "Bech32 segwit address format"
 }
 
 command:bech32-decode() {
