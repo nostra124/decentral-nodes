@@ -2,7 +2,7 @@
 id: FEAT-030
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # `bip39` plugin origin — mnemonic seed phrases

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# tools/lint-cmd-names — catch the BUG-013 / BUG-014 / BUG-016 defect
+# family: a script body invokes `command:<name>` but no
+# `command:<name>()` definition exists in the same file.
+#
+# Per FEAT-032 / audit 2026-05-13's hardening proposal. Bash doesn't
+# error on undefined-function calls at parse time — only at runtime
+# of the failing branch. This script does the cheap static check.
+#
+# Usage:
+#   tools/lint-cmd-names <file> [file ...]   — lint specific files
+#   tools/lint-cmd-names                     — default file set:
+#                                                bin/* and
+#                                                libexec/bitcoin/*
+#
+# Exits 0 if every `command:<name>` call has a matching definition
+# in its file; exits 1 with a one-line-per-offence report on stderr
+# otherwise. Skill: skills/logging.md §3 (name the condition + the
+# offending value).
+#
+# Note: this is a single-file analysis. Cross-file dispatch (the
+# `command:base58-encode` defined in `libexec/bitcoin/bip13` and
+# invoked from `bin/bitcoin` via `$SELF bip13 base58-encode`) is
+# NOT a `command:base58-encode` invocation inside bin/bitcoin —
+# it's a shell command, no `command:` prefix in the source — so
+# this check doesn't false-positive on it.
+
+set -e
+
+SELF="$(basename "$0")"
+
+if [ $# -eq 0 ]; then
+	repo="$(cd "$(dirname "$0")/.." && pwd)"
+	mapfile -t files < <(
+		printf '%s\n' "$repo"/bin/* "$repo"/libexec/bitcoin/* \
+		| grep -v '/$' | sort -u
+	)
+else
+	files=( "$@" )
+fi
+
+# Returns 0 iff $f is a shell file (.sh / no extension with #!bash).
+is_shell() {
+	local f="$1"
+	[ -f "$f" ] || return 1
+	case "$f" in
+		*.md|*.txt|*.mediawiki|*.json|*.yml|*.yaml) return 1 ;;
+	esac
+	# Heuristic: first line shebang names bash or sh.
+	head -1 "$f" 2>/dev/null | grep -qE '^#!.*(bash|sh)\b'
+}
+
+errors=0
+for f in "${files[@]}"; do
+	is_shell "$f" || continue
+
+	# Collect command:<name> definitions in this file.
+	declare -A defs=()
+	while read -r name; do
+		[ -n "$name" ] && defs["$name"]=1
+	done < <(
+		grep -oE '^command:[A-Za-z0-9_:-]+[[:space:]]*\(\)' "$f" \
+			| sed 's/[[:space:]]*().*//'
+	)
+
+	# Collect command:<name> invocations (outside comments,
+	# definition lines, and quoted strings).
+	# Strip quoted content (single- and double-quoted) before
+	# matching, so log messages like `debug "executing command:foo"`
+	# don't false-positive.
+	declare -A calls=()
+	while read -r name; do
+		[ -n "$name" ] && calls["$name"]=1
+	done < <(
+		grep -v '^[[:space:]]*#' "$f" \
+			| sed -E 's/"[^"]*"//g;'" s/'[^']*'//g" \
+			| grep -v '^command:[A-Za-z0-9_:-]\+[[:space:]]*()' \
+			| grep -oE '\bcommand:[A-Za-z0-9_:-]+' \
+			| sort -u
+	)
+
+	for name in "${!calls[@]}"; do
+		if [ -z "${defs[$name]:-}" ]; then
+			echo "$SELF: $f: '$name' invoked but no '$name()' definition in same file" >&2
+			(( ++errors ))
+		fi
+	done
+
+	unset defs calls
+done
+
+if (( errors > 0 )); then
+	echo "$SELF: $errors undefined-command-call(s) detected" >&2
+	exit 1
+fi

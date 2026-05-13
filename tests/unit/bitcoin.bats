@@ -744,6 +744,53 @@ psbt_vec1() {
 # remain as the user-facing path.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# FEAT-032 — lint-cmd-names catches the BUG-013/014/016 defect family.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-032 — lint-cmd-names passes on the current project" {
+	run "$BATS_TEST_DIRNAME/../../tools/lint-cmd-names"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-032 — lint-cmd-names flags an undefined command:<name> call" {
+	# Build a minimal fixture script that calls command:foo but
+	# doesn't define it.
+	bad="$BATS_TMPDIR/badscript-$BATS_TEST_NUMBER"
+	cat > "$bad" <<'BAD'
+#!/usr/bin/env bash
+command:foo "$@"
+BAD
+	chmod +x "$bad"
+	run "$BATS_TEST_DIRNAME/../../tools/lint-cmd-names" "$bad"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"command:foo"* ]] || true
+}
+
+@test "FEAT-032 — lint-cmd-names passes on a fixture where the call is defined" {
+	good="$BATS_TMPDIR/goodscript-$BATS_TEST_NUMBER"
+	cat > "$good" <<'GOOD'
+#!/usr/bin/env bash
+command:foo() { echo hi; }
+command:foo "$@"
+GOOD
+	chmod +x "$good"
+	run "$BATS_TEST_DIRNAME/../../tools/lint-cmd-names" "$good"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-032 — lint-cmd-names doesn't false-positive on command:<name> inside a log string" {
+	fix="$BATS_TMPDIR/logscript-$BATS_TEST_NUMBER"
+	cat > "$fix" <<'STR'
+#!/usr/bin/env bash
+debug() { echo "$@" >&2; }
+debug "executing command:undefined-but-only-in-a-log-string"
+STR
+	chmod +x "$fix"
+	run "$BATS_TEST_DIRNAME/../../tools/lint-cmd-names" "$fix"
+	[ "$status" -eq 0 ]
+}
+
 @test "BUG-016 — bitcoin bip49-create no longer exists as a broken dispatcher entry" {
 	# After the fix, `bitcoin bip49-create` falls through to the
 	# help fallback (unknown subcommand), NOT a fatal

@@ -2,7 +2,7 @@
 id: FEAT-028
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # `bip13` plugin origin — Base58 / Base58Check encoding for P2SH addresses

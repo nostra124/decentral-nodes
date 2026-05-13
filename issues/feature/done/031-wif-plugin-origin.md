@@ -2,7 +2,7 @@
 id: FEAT-031
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # `wif` plugin origin — Wallet Import Format
