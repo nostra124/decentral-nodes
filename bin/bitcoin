@@ -608,6 +608,151 @@ help:backend() {
 	backend:help
 }
 
+# ---------------------------------------------------------------------------
+# FEAT-008 (partial): psbt decode.
+#
+# Reads a PSBT from stdin (hex format), validates the BIP-174 magic +
+# separator, and walks the wire format emitting one line per
+# key-value record:
+#
+#     section=<n>  type=<hex>  key=<hex>  value=<hex>
+#
+# Section starts at 0 (global) and increments at each 0x00 separator.
+# Per-section interpretation (global vs input[i] vs output[j]) is the
+# caller's job; we just walk and report.
+#
+# encode + sign land in ROADMAP-1.8.0.
+# ---------------------------------------------------------------------------
+
+# psbt:_take <n> — read 2*n hex chars at $psbt_pos; advance.
+# Returns 1 if not enough bytes left. Writes the hex into $PSBT_LAST_HEX
+# (NOT stdout) so callers don't pay the fork-per-byte cost of
+# command substitution. State (psbt_pos) survives because we don't
+# subshell. Same convention for psbt:_take_varint which writes the
+# parsed integer into $PSBT_LAST_VINT.
+psbt:_take() {
+	local n=$1
+	local need=$(( n * 2 ))
+	if (( psbt_pos + need > psbt_len )); then
+		return 1
+	fi
+	PSBT_LAST_HEX="${psbt_hex:psbt_pos:need}"
+	(( psbt_pos += need ))
+}
+
+psbt:_take_varint() {
+	psbt:_take 1 || return 1
+	local v=$((0x$PSBT_LAST_HEX))
+	if (( v < 0xfd )); then
+		PSBT_LAST_VINT=$v
+	elif (( v == 0xfd )); then
+		psbt:_take 1 || return 1; local lo=$PSBT_LAST_HEX
+		psbt:_take 1 || return 1; local hi=$PSBT_LAST_HEX
+		PSBT_LAST_VINT=$(( (0x$hi << 8) | 0x$lo ))
+	elif (( v == 0xfe )); then
+		psbt:_take 1 || return 1; local b0=$PSBT_LAST_HEX
+		psbt:_take 1 || return 1; local b1=$PSBT_LAST_HEX
+		psbt:_take 1 || return 1; local b2=$PSBT_LAST_HEX
+		psbt:_take 1 || return 1; local b3=$PSBT_LAST_HEX
+		PSBT_LAST_VINT=$(( (0x$b3 << 24) | (0x$b2 << 16) | (0x$b1 << 8) | 0x$b0 ))
+	else
+		error "psbt: varint > 4 bytes not supported (key/value can't exceed 2^32 bytes)"
+		return 2
+	fi
+}
+
+command:psbt() {
+	local sub="${1:-help}"
+	shift 2>/dev/null || true
+	case "$sub" in
+		decode) psbt:decode "$@" ;;
+		help)   psbt:help ;;
+		*)
+			error "unknown psbt subcommand: '$sub'"
+			psbt:help >&2
+			return 2
+			;;
+	esac
+}
+
+psbt:help() {
+	cat <<-ENDHELP
+	Usage: $SELF psbt <subcommand>
+
+	  decode            read a PSBT (hex) from stdin and emit one line
+	                    per key-value record:
+	                      section=<n> type=<hex> key=<hex> value=<hex>
+	  help              this message
+
+	encode and sign are tracked in ROADMAP-1.8.0 (FEAT-008 remainder).
+	ENDHELP
+}
+
+help:psbt() {
+	psbt:help
+	cite 174 "Partially Signed Bitcoin Transactions"
+}
+
+psbt:decode() {
+	# Slurp stdin, normalise to lower-case hex.
+	local raw; raw="$(cat | tr -d '[:space:]' | tr A-F a-f)"
+	if [ -z "$raw" ]; then
+		error "psbt decode: empty input (expected hex-encoded PSBT on stdin)"
+		return 2
+	fi
+	if [[ ! "$raw" =~ ^[0-9a-f]+$ ]]; then
+		error "psbt decode: input is not hex"
+		return 3
+	fi
+	if (( ${#raw} % 2 != 0 )); then
+		error "psbt decode: hex length is odd (${#raw} chars); truncated input?"
+		return 4
+	fi
+
+	# Globals used by psbt:_take* helpers in the same shell (no subshells).
+	psbt_hex="$raw"
+	local -gi psbt_len=${#psbt_hex} psbt_pos=0
+	PSBT_LAST_HEX=""
+	PSBT_LAST_VINT=0
+
+	psbt:_take 5 || { error "psbt decode: input shorter than 5 bytes (no magic)"; return 5; }
+	if [[ "$PSBT_LAST_HEX" != "70736274ff" ]]; then
+		error "psbt decode: bad magic '$PSBT_LAST_HEX' (expected '70736274ff' per BIP-174 §Specification)"
+		return 6
+	fi
+
+	local -i section=0 keylen vallen
+	local key type val
+	while (( psbt_pos < psbt_len )); do
+		if ! psbt:_take_varint; then
+			error "psbt decode: truncated keylen varint at byte offset $((psbt_pos/2))"
+			return 7
+		fi
+		keylen=$PSBT_LAST_VINT
+		if (( keylen == 0 )); then
+			(( section++ ))
+			continue
+		fi
+		if ! psbt:_take "$keylen"; then
+			error "psbt decode: truncated key (need $keylen bytes) at offset $((psbt_pos/2))"
+			return 8
+		fi
+		key="$PSBT_LAST_HEX"
+		type="${key:0:2}"
+		if ! psbt:_take_varint; then
+			error "psbt decode: truncated value-length varint at offset $((psbt_pos/2))"
+			return 9
+		fi
+		vallen=$PSBT_LAST_VINT
+		if ! psbt:_take "$vallen"; then
+			error "psbt decode: truncated value (need $vallen bytes) at offset $((psbt_pos/2))"
+			return 10
+		fi
+		val="$PSBT_LAST_HEX"
+		printf 'section=%d\ttype=%s\tkey=%s\tvalue=%s\n' "$section" "$type" "$key" "$val"
+	done
+}
+
 command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
