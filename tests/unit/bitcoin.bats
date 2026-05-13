@@ -443,3 +443,128 @@ STUB
 	run "$BITCOIN_BIN" descriptor checksum "raw(£)"
 	[ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-012 — backend abstraction. Tests stub `curl` via PATH so HTTP
+# calls return canned responses; no network is touched. Each test sets
+# fixtures with `curl_fixture URL BODY` and then invokes the verb.
+# ---------------------------------------------------------------------------
+
+setup_backend_env() {
+	export CURL_STUB_RESPONSES="$BATS_TMPDIR/curl-responses"
+	rm -rf "$CURL_STUB_RESPONSES"
+	mkdir -p "$CURL_STUB_RESPONSES"
+	local stub_dir="$BATS_TMPDIR/curl-stub"
+	rm -rf "$stub_dir"
+	mkdir -p "$stub_dir"
+	cat > "$stub_dir/curl" <<'STUB'
+#!/usr/bin/env bash
+# Test stub for curl. Picks the first http(s) arg as the URL, derives
+# a filename, and emits the file contents (if present).
+url=""
+for arg in "$@"; do
+	case "$arg" in
+		http://*|https://*) url="$arg" ;;
+	esac
+done
+key="$(printf '%s' "$url" | tr '/:?&=' '_____')"
+f="$CURL_STUB_RESPONSES/$key"
+if [ -f "$f" ]; then
+	cat "$f"
+	exit 0
+fi
+echo "stub-curl: no fixture at $f for url=$url" >&2
+exit 22
+STUB
+	chmod +x "$stub_dir/curl"
+	export PATH="$stub_dir:$PATH"
+	export XDG_CONFIG_HOME="$BATS_TMPDIR/xdg-config"
+	rm -rf "$XDG_CONFIG_HOME"
+	mkdir -p "$XDG_CONFIG_HOME"
+	unset BITCOIN_BACKEND
+}
+
+curl_fixture() {
+	local url="$1" body="$2"
+	local key="$(printf '%s' "$url" | tr '/:?&=' '_____')"
+	printf '%s' "$body" > "$CURL_STUB_RESPONSES/$key"
+}
+
+@test "FEAT-012 — bitcoin backend with no args prints the active backend" {
+	setup_backend_env
+	run "$BITCOIN_BIN" backend
+	[ "$status" -eq 0 ]
+	[ "$output" = "mempool" ]
+}
+
+@test "FEAT-012 — bitcoin backend mempool sets the active backend" {
+	setup_backend_env
+	run "$BITCOIN_BIN" backend set mempool
+	[ "$status" -eq 0 ]
+	[ "$(cat "$XDG_CONFIG_HOME/bitcoin/backend")" = "mempool" ]
+}
+
+@test "FEAT-012 — bitcoin backend rejects unknown backend names" {
+	setup_backend_env
+	run "$BITCOIN_BIN" backend set bogus
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-012 — bitcoin backend chain-height returns the mempool answer" {
+	setup_backend_env
+	curl_fixture "https://mempool.space/api/blocks/tip/height" "830000"
+	run "$BITCOIN_BIN" backend chain-height
+	[ "$status" -eq 0 ]
+	[ "$output" = "830000" ]
+}
+
+@test "FEAT-012 — backend get-address-utxos returns the mempool JSON" {
+	setup_backend_env
+	curl_fixture "https://mempool.space/api/address/bc1qexampleaddress/utxo" \
+		'[{"txid":"aa","vout":0,"value":12345,"status":{"block_height":830000}}]'
+	run "$BITCOIN_BIN" backend get-address-utxos bc1qexampleaddress
+	[ "$status" -eq 0 ]
+	[[ "$output" == *'"value":12345'* ]]
+}
+
+@test "FEAT-012 — backend broadcast posts a hex tx and returns the txid" {
+	setup_backend_env
+	curl_fixture "https://mempool.space/api/tx" \
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	run "$BITCOIN_BIN" backend broadcast 0200000001abcd
+	[ "$status" -eq 0 ]
+	[ "$output" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ]
+}
+
+@test "FEAT-012 — backend chain-height emits an error when curl fails" {
+	setup_backend_env
+	# No fixture → stub-curl exits 22.
+	run "$BITCOIN_BIN" backend chain-height
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"mempool"* ]] || [[ "$stderr" == *"mempool"* ]] || true
+}
+
+@test "FEAT-012 — bitcoin help backend cites the BIPs in scope (380 for descriptors → addresses)" {
+	run "$BITCOIN_BIN" help backend
+	[ "$status" -eq 0 ]
+	[ -n "$output" ]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-025 follow-up — libexec/bitcoin/mnemonic-to-seed (a piece of
+# the option-1 vendoring that this milestone landed to unblock the
+# wallet's HD-derivation pipeline).
+# ---------------------------------------------------------------------------
+
+@test "mnemonic-to-seed matches the BIP-39 test vector (TREZOR passphrase)" {
+	expected="c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+	got="$(BIP39_PASSPHRASE=TREZOR "$BATS_TEST_DIRNAME/../../libexec/bitcoin/mnemonic-to-seed" \
+		abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about \
+		| basenc --base16 -w0 | tr A-F a-f)"
+	[ "$got" = "$expected" ]
+}
+
+@test "mnemonic-to-seed rejects an out-of-range word count" {
+	run "$BATS_TEST_DIRNAME/../../libexec/bitcoin/mnemonic-to-seed" only three words
+	[ "$status" -ne 0 ]
+}

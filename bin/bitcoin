@@ -413,6 +413,201 @@ command:descriptor() {
 	esac
 }
 
+# ---------------------------------------------------------------------------
+# FEAT-012: backend abstraction. A thin verb layer dispatches to one
+# of three implementations (mempool.space REST shipped here;
+# bitcoind RPC and blockstream.info REST are scaffolded as stubs and
+# tracked in a follow-up FEAT once we have something to test them
+# against in this sandbox).
+#
+# Active backend resolution: $BITCOIN_BACKEND env var, then the
+# config file at $XDG_CONFIG_HOME/bitcoin/backend, then 'mempool'.
+# ---------------------------------------------------------------------------
+
+backend:_config_file() {
+	echo "${XDG_CONFIG_HOME:-$HOME/.config}/bitcoin/backend"
+}
+
+backend:_active() {
+	if [ -n "${BITCOIN_BACKEND:-}" ]; then
+		echo "$BITCOIN_BACKEND"
+		return
+	fi
+	local cfg; cfg="$(backend:_config_file)"
+	if [ -f "$cfg" ]; then
+		cat "$cfg"
+	else
+		echo mempool
+	fi
+}
+
+backend:_valid() {
+	case "$1" in
+		mempool|bitcoind|blockstream) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+backend:set() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "backend set: name required (mempool|bitcoind|blockstream)"
+		return 2
+	fi
+	if ! backend:_valid "$name"; then
+		error "backend set: unknown backend '$name' (use mempool, bitcoind, or blockstream)"
+		return 3
+	fi
+	local cfg; cfg="$(backend:_config_file)"
+	mkdir -p "$(dirname "$cfg")" || { error "backend set: cannot mkdir $(dirname "$cfg")"; return 4; }
+	echo "$name" > "$cfg"
+	info "backend set to: $name"
+}
+
+backend:auto() {
+	if command -v bitcoin-cli >/dev/null 2>&1 \
+	   && bitcoin-cli getblockcount >/dev/null 2>&1; then
+		backend:set bitcoind
+	else
+		warn "bitcoin-cli not reachable; falling back to mempool.space (chain state is trusted to a third party)"
+		backend:set mempool
+	fi
+}
+
+# --- verbs --------------------------------------------------------------------
+
+backend:chain-height() {
+	local b; b="$(backend:_active)"
+	backend:"$b":chain-height
+}
+
+backend:get-address-utxos() {
+	local b; b="$(backend:_active)"
+	backend:"$b":get-address-utxos "$@"
+}
+
+backend:broadcast() {
+	local b; b="$(backend:_active)"
+	backend:"$b":broadcast "$@"
+}
+
+# --- mempool.space implementation --------------------------------------------
+
+: "${BITCOIN_MEMPOOL_URL:=https://mempool.space}"
+
+backend:mempool:chain-height() {
+	local url="$BITCOIN_MEMPOOL_URL/api/blocks/tip/height"
+	local out
+	if ! out="$(curl -sfL "$url")"; then
+		error "mempool: GET $url failed (curl exit $?)"
+		return 1
+	fi
+	printf '%s\n' "$out"
+}
+
+backend:mempool:get-address-utxos() {
+	local addr="${1:-}"
+	if [ -z "$addr" ]; then
+		error "backend get-address-utxos: address required"
+		return 2
+	fi
+	local url="$BITCOIN_MEMPOOL_URL/api/address/$addr/utxo"
+	local out
+	if ! out="$(curl -sfL "$url")"; then
+		error "mempool: GET $url failed (curl exit $?)"
+		return 1
+	fi
+	printf '%s\n' "$out"
+}
+
+backend:mempool:broadcast() {
+	local hex="${1:-}"
+	if [ -z "$hex" ]; then
+		error "backend broadcast: tx hex required"
+		return 2
+	fi
+	local url="$BITCOIN_MEMPOOL_URL/api/tx"
+	local out
+	if ! out="$(curl -sfL -X POST --data "$hex" "$url")"; then
+		error "mempool: POST $url failed (curl exit $?)"
+		return 1
+	fi
+	printf '%s\n' "$out"
+}
+
+# --- bitcoind / blockstream stubs --------------------------------------------
+#
+# Scaffolded so `bitcoin backend set bitcoind|blockstream` doesn't
+# break the dispatcher; verbs return "not implemented" with a clear
+# error. Filling these out is FEAT-NNN follow-up.
+
+backend:bitcoind:chain-height() {
+	error "backend bitcoind: not implemented in this release (use mempool)"
+	return 99
+}
+backend:bitcoind:get-address-utxos() { backend:bitcoind:chain-height; }
+backend:bitcoind:broadcast()         { backend:bitcoind:chain-height; }
+
+backend:blockstream:chain-height() {
+	error "backend blockstream: not implemented in this release (use mempool)"
+	return 99
+}
+backend:blockstream:get-address-utxos() { backend:blockstream:chain-height; }
+backend:blockstream:broadcast()         { backend:blockstream:chain-height; }
+
+# --- dispatcher --------------------------------------------------------------
+
+command:backend() {
+	local action="${1:-view}"
+	shift 2>/dev/null || true
+	case "$action" in
+		view|"")
+			backend:_active ;;
+		set)
+			backend:set "$@" ;;
+		auto)
+			backend:auto ;;
+		mempool|bitcoind|blockstream)
+			# Shorthand: `bitcoin backend mempool` = `backend set mempool`
+			backend:set "$action" ;;
+		chain-height|get-address-utxos|broadcast)
+			backend:"$action" "$@" ;;
+		help)
+			backend:help ;;
+		*)
+			error "unknown backend action: '$action'"
+			backend:help >&2
+			return 2
+			;;
+	esac
+}
+
+backend:help() {
+	cat <<-ENDHELP
+	Usage: $SELF backend [<action> [args]]
+
+	  view (default)            print the active backend
+	  set <name>                set active backend (mempool|bitcoind|blockstream)
+	  auto                      pick bitcoind if reachable, else mempool
+	  <name>                    shorthand for 'set <name>'
+
+	  chain-height              current chain tip height (integer)
+	  get-address-utxos <addr>  UTXOs at <addr> as backend-native JSON
+	  broadcast <hex>           POST a raw tx; print the txid
+
+	Active backend in this shell:
+	  BITCOIN_BACKEND env var, then $(backend:_config_file), then 'mempool'.
+
+	Only the mempool.space implementation ships in this release.
+	bitcoind and blockstream are scaffolded; calling their verbs
+	returns a clear "not implemented" error.
+	ENDHELP
+}
+
+help:backend() {
+	backend:help
+}
+
 command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
