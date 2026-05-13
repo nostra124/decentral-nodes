@@ -394,3 +394,52 @@ STUB
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"no-such-wallet"* ]] || [[ "$stderr" == *"no-such-wallet"* ]] || true
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-009 — output descriptors. The checksum is BIP-380's polymod over
+# the descriptor's INPUT_CHARSET; the test vector is from the spec.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-009 — bitcoin help descriptor cites BIP-380/381/386" {
+	run "$BITCOIN_BIN" help descriptor
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"BIP-380"* ]]
+	[[ "$output" == *"bip-0380.mediawiki"* ]]
+}
+
+@test "FEAT-009 — descriptor checksum matches BIP-380 test vector" {
+	# Spec test vector: raw(deadbeef) → raw(deadbeef)#89f8spxm
+	run "$BITCOIN_BIN" descriptor checksum "raw(deadbeef)"
+	[ "$status" -eq 0 ]
+	[ "$output" = "raw(deadbeef)#89f8spxm" ]
+}
+
+@test "FEAT-009 — descriptor checksum is idempotent on an already-checksummed string" {
+	# Passing a string that already ends in `#<8 chars>` should
+	# replace the suffix with the freshly-computed checksum.
+	run "$BITCOIN_BIN" descriptor checksum "raw(deadbeef)#00000000"
+	[ "$status" -eq 0 ]
+	[ "$output" = "raw(deadbeef)#89f8spxm" ]
+}
+
+@test "FEAT-009 — descriptor verify accepts a valid checksum" {
+	run "$BITCOIN_BIN" descriptor verify "raw(deadbeef)#89f8spxm"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-009 — descriptor verify rejects a tampered checksum" {
+	# Flip one char of a known-good checksum.
+	run "$BITCOIN_BIN" descriptor verify "raw(deadbeef)#89f8spxq"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-009 — descriptor verify rejects a missing checksum" {
+	run "$BITCOIN_BIN" descriptor verify "raw(deadbeef)"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-009 — descriptor checksum rejects a non-INPUT_CHARSET character" {
+	# £ is outside BIP-380's INPUT_CHARSET (ASCII-only).
+	run "$BITCOIN_BIN" descriptor checksum "raw(£)"
+	[ "$status" -ne 0 ]
+}
