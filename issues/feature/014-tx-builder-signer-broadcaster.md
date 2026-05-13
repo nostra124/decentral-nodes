@@ -5,6 +5,30 @@ priority: high
 status: open
 ---
 
+## Progress (1.8.0 shipped — `wallet broadcast` only)
+
+`bitcoin wallet broadcast <name>` reads raw transaction hex from
+stdin, validates it as hex, and forwards to the active backend's
+broadcast verb (FEAT-012). Returns the txid the backend
+produced. Three bats tests cover happy path, empty stdin, and
+non-hex rejection.
+
+The `<name>` argument is currently a docs hint — per-wallet
+backend selection is still deferred from FEAT-012, so the active
+backend is global. Once per-wallet backend lands, this verb will
+resolve to the wallet's chosen backend without an interface
+change.
+
+### Deferred (ROADMAP-1.9.0 and beyond)
+
+- `wallet build <name> <addr> <sats>` — coin selection + tx
+  serialisation + PSBT-wrap. ROADMAP-1.9.0.
+- `wallet sign <name>` — SIGHASH preimage + ECDSA via the
+  secp256k1 dc-script. ROADMAP-1.10.0+ (paired with FEAT-008
+  `psbt sign`).
+- `wallet send <name> <addr> <sats>` — composes build + sign +
+  broadcast. ROADMAP-1.10.0+.
+
 # Transaction builder, signer, and broadcaster
 
 ## Description

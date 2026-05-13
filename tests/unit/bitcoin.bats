@@ -700,6 +700,35 @@ setup_wallet_derive_env() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-014 (partial) — wallet broadcast. Wires the active backend
+# (FEAT-012) so a tx signed elsewhere can be pushed to the network
+# through this wallet's chosen backend. Builder + signer live on
+# ROADMAP-1.9.0+.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-014 — wallet broadcast forwards stdin hex to the backend and prints the txid" {
+	setup_wallet_derive_env
+	# Stub backend broadcast: any POST to /api/tx returns this txid.
+	curl_fixture "https://mempool.space/api/tx" \
+		"4242424242424242424242424242424242424242424242424242424242424242"
+	run bash -c "echo '0200000001abcd' | '$BITCOIN_BIN' wallet broadcast alice"
+	[ "$status" -eq 0 ]
+	[ "$output" = "4242424242424242424242424242424242424242424242424242424242424242" ]
+}
+
+@test "FEAT-014 — wallet broadcast rejects empty stdin" {
+	setup_wallet_derive_env
+	run bash -c "echo '' | '$BITCOIN_BIN' wallet broadcast alice"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-014 — wallet broadcast rejects non-hex input" {
+	setup_wallet_derive_env
+	run bash -c "echo 'this is not hex' | '$BITCOIN_BIN' wallet broadcast alice"
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # FEAT-008 (partial) — psbt decode. The fixture is the first valid PSBT
 # from BIP-174's test vectors (one P2PKH input, two outputs).
 # ---------------------------------------------------------------------------
