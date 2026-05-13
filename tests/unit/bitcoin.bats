@@ -327,7 +327,10 @@ case "$verb" in
 esac
 STUB
 	chmod +x "$stub_dir/secret"
-	PATH="$stub_dir:$PATH"
+	# bin/ on PATH because libexec plugins shell out to the parent
+	# `bitcoin` dispatcher (e.g. `bip32 create` does
+	# `... | bitcoin bip13 base58-encode`).
+	PATH="$BATS_TEST_DIRNAME/../../bin:$stub_dir:$PATH"
 	export PATH
 	export XDG_DATA_HOME="$BATS_TMPDIR/xdg-data"
 	rm -rf "$XDG_DATA_HOME"
@@ -605,6 +608,96 @@ curl_fixture() {
 # BUG-013, missed by the earlier patch because BUG-013's regression
 # test didn't exercise the `/N` neutering branch.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# FEAT-013 — wallet derive / addresses / label / balance.
+#
+# These tests pre-seed a wallet whose secret-stub returns the canonical
+# abandon…about test mnemonic, so `wallet derive` produces a known
+# vector address. Backend queries are stubbed via the same curl shim
+# the FEAT-012 tests use.
+# ---------------------------------------------------------------------------
+
+setup_wallet_derive_env() {
+	setup_wallet_env
+	setup_backend_env
+	# Reseed the secret store with the canonical abandon-mnemonic.
+	mkdir -p "$SECRET_STORE/alice"
+	echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" \
+		> "$SECRET_STORE/alice/seed"
+	# Create the wallet repo (skip the random-seed generation by
+	# initialising the directory ourselves; we only want the ledger
+	# structure, not a fresh seed).
+	local wpath="$XDG_DATA_HOME/bitcoin/wallets/alice"
+	rm -rf "$wpath" && mkdir -p "$wpath"
+	(
+		cd "$wpath"
+		git init -q -b main 2>/dev/null || git init -q
+		: > config; : > descriptors; : > addresses
+		git add . && git -c user.email=t@t -c user.name=t \
+		                  -c commit.gpgsign=false \
+		                  commit -q -m init
+	)
+}
+
+@test "FEAT-013 — wallet derive emits the canonical BIP-84 first receive address" {
+	setup_wallet_derive_env
+	run "$BITCOIN_BIN" wallet derive alice
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"* ]]
+}
+
+@test "FEAT-013 — wallet derive appends to the addresses ledger and commits" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	[ -s "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses" ]
+	grep -q "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu" \
+		"$XDG_DATA_HOME/bitcoin/wallets/alice/addresses"
+	# One commit added on top of the init commit (= 2 total).
+	(( $(cd "$XDG_DATA_HOME/bitcoin/wallets/alice" && git rev-list --count HEAD) == 2 ))
+}
+
+@test "FEAT-013 — wallet derive bumps the index on the second call" {
+	setup_wallet_derive_env
+	first="$("$BITCOIN_BIN" wallet derive alice)"
+	second="$("$BITCOIN_BIN" wallet derive alice)"
+	[ "$first" != "$second" ]
+	# Both lines in the ledger.
+	(( $(wc -l < "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses") == 2 ))
+}
+
+@test "FEAT-013 — wallet addresses lists the derived ledger" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	run "$BITCOIN_BIN" wallet addresses alice
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"bc1q"* ]]
+	[ "$(echo "$output" | wc -l)" -ge 2 ]
+}
+
+@test "FEAT-013 — wallet label sets the label and commits" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	run "$BITCOIN_BIN" wallet label alice "$addr" "donations"
+	[ "$status" -eq 0 ]
+	grep -q "donations" "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses"
+	# Two commits added on top of init: derive + label.
+	(( $(cd "$XDG_DATA_HOME/bitcoin/wallets/alice" && git rev-list --count HEAD) == 3 ))
+}
+
+@test "FEAT-013 — wallet balance sums UTXOs from the backend" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	# Two UTXOs, total 12345 + 6789 = 19134 sats.
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" \
+		'[{"txid":"aa","vout":0,"value":12345,"status":{"block_height":830000}},{"txid":"bb","vout":1,"value":6789,"status":{"block_height":830001}}]'
+	run "$BITCOIN_BIN" wallet balance alice
+	[ "$status" -eq 0 ]
+	[ "$output" = "19134" ]
+}
 
 @test "BUG-014 — bip32 derive m/.../N (neutering) resolves" {
 	repo_root="$BATS_TEST_DIRNAME/../../"
