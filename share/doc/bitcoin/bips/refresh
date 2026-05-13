@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+#
+# share/doc/bitcoin/bips/refresh — re-vendor BIP source documents
+# from upstream.
+#
+# Usage:
+#   refresh             — fetch from current HEAD of bitcoin/bips
+#   refresh <commit>    — fetch from a specific commit SHA
+#
+# Updates UPSTREAM.txt and the vendored .mediawiki files. Run
+# manually; not invoked from make. After running, review the diff
+# and commit per FEAT-017's "the diff is reviewable" criterion.
+#
+# Per CLAUDE.md §10 (logging): every failure branch emits a clear
+# warn/error line that names the condition.
+
+set -e
+
+UPSTREAM_REPO="https://github.com/bitcoin/bips"
+UPSTREAM_RAW="https://raw.githubusercontent.com/bitcoin/bips"
+SELF=$(basename "$0")
+
+die() {
+	echo "$SELF: error - $1" >&2
+	exit "${2:-1}"
+}
+
+warn() {
+	echo "$SELF: warn - $1" >&2
+}
+
+info() {
+	[ -n "$SELF_QUIET" ] || echo "$SELF: info - $1" >&2
+}
+
+# Resolve target commit: explicit argument, or current HEAD.
+if [ $# -ge 1 ]; then
+	COMMIT="$1"
+else
+	info "resolving HEAD of $UPSTREAM_REPO"
+	COMMIT=$(git ls-remote "$UPSTREAM_REPO" HEAD 2>/dev/null | cut -f1) \
+		|| die "git ls-remote failed; check network or supply commit explicitly"
+	[ -n "$COMMIT" ] || die "could not resolve HEAD; supply commit SHA as argument"
+fi
+
+info "target commit: $COMMIT"
+
+cd "$(dirname "$0")"
+
+# Read the BIP list from UPSTREAM.txt (the existing manifest).
+mapfile -t bips < <(
+	grep -oE 'bip-[0-9]+\.mediawiki' UPSTREAM.txt 2>/dev/null | sort -u
+)
+
+if [ ${#bips[@]} -eq 0 ]; then
+	die "no bip-*.mediawiki entries in UPSTREAM.txt; nothing to refresh"
+fi
+
+ok=0 missed=()
+for f in "${bips[@]}"; do
+	url="$UPSTREAM_RAW/$COMMIT/$f"
+	if curl -sLf -m 30 -o "$f.new" "$url"; then
+		mv "$f.new" "$f"
+		(( ++ok ))
+	else
+		warn "fetch failed for $f from $url"
+		rm -f "$f.new"
+		missed+=("$f")
+	fi
+done
+
+if [ ${#missed[@]} -gt 0 ]; then
+	die "refresh incomplete; ${#missed[@]} file(s) not fetched: ${missed[*]}"
+fi
+
+{
+	printf 'upstream:  %s\n' "$UPSTREAM_REPO"
+	printf 'commit:    %s\n' "$COMMIT"
+	printf 'fetched:   %s\n' "$(date -u +%Y-%m-%d)"
+	printf 'files:\n'
+	for f in "${bips[@]}"; do printf '  %s\n' "$f"; done
+} > UPSTREAM.txt
+
+info "refreshed $ok file(s); UPSTREAM.txt updated"
+info "review the diff: git diff -- share/doc/bitcoin/bips/"

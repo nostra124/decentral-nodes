@@ -1,0 +1,9 @@
+upstream:  https://github.com/bitcoin/bips
+commit:    622e47722cd35514e96da37ae89f868e18d581e4
+fetched:   2026-05-13
+files:
+  bip-0013.mediawiki
+  bip-0032.mediawiki
+  bip-0039.mediawiki
+  bip-0173.mediawiki
+  bip-0350.mediawiki

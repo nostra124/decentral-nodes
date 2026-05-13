@@ -63,6 +63,13 @@ install:
 		cp -a share/doc/$(PACKAGE)/* \
 		      $(BUILD_DIR)$(DATADIR)/doc/$(PACKAGE)/; \
 	fi
+	# share/$(PACKAGE)/* — runtime assets read at runtime by
+	# plugins (bip39 wordlists, future descriptors templates, …)
+	@if [ -d share/$(PACKAGE) ]; then \
+		mkdir -p $(BUILD_DIR)$(DATADIR)/$(PACKAGE); \
+		cp -a share/$(PACKAGE)/* \
+		      $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/; \
+	fi
 	# VERSION → $DATADIR/<pkg>/version : the runtime version
 	# string the binary reads (FEAT-194). The binary's two-path
 	# fallback resolves to this file when invoked as the installed
