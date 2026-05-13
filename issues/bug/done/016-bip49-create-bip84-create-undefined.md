@@ -2,8 +2,28 @@
 id: BUG-016
 type: bug
 priority: medium
-status: open
+status: done
 ---
+
+## Resolution (shipped in 1.7.1)
+
+Path **(2) — remove the wrappers**. The dispatcher entries had
+been dead since the repo's extraction (calling never-defined
+`command:bip32-create`). The bash-function wrappers `bip49()` /
+`bip84()` later in `bin/bitcoin` remain as the canonical user
+surface and are unaffected.
+
+Two new bats regression tests assert `bitcoin bip49-create` /
+`bitcoin bip84-create` no longer emit `command:bip32-create:
+command not found` (they now fall through to the dispatcher help
+fallback with status 127).
+
+The latent issue with `bip49()` / `bip84()`'s BIP32_-prefixed env
+vars (the bip32 plugin reads unprefixed `*_VERSION_CODE`) is
+**not** fixed here — the wallet flow doesn't need the BIP-84
+zprv encoding, only the BIP-84 derivation path, which works
+against the plain BIP-32 version codes. Audit follow-up remains
+open.
 
 # `command:bip49-create` / `command:bip84-create` call undefined `command:bip32-create`
 
