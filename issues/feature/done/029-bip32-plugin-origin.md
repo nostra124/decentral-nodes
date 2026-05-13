@@ -2,7 +2,7 @@
 id: FEAT-029
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # `bip32` plugin origin — Hierarchical Deterministic Wallets

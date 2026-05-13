@@ -23,8 +23,8 @@ MANDIR    = @MANDIR@
 BUILD_DIR = build/$(PACKAGE)
 
 .PHONY: all install uninstall check check-unit check-vectors \
-        check-sit check-pit check-pre-push check-all lint test help \
-        package clean install-skills-user uninstall-skills-user
+        check-sit check-pit check-pre-push check-all lint lint-cmd-names \
+        test help package clean install-skills-user uninstall-skills-user
 
 all: install
 
@@ -139,10 +139,15 @@ check-pre-push:
 
 check-all: check check-sit check-pit
 
-lint:
+lint: lint-cmd-names
 	@if command -v shellcheck >/dev/null 2>&1; then \
 		shellcheck -S warning bin/* $$(find libexec/$(PACKAGE) -type f 2>/dev/null); \
 	else echo "shellcheck not installed; skipping"; fi
+
+# FEAT-032: catch the BUG-013/014/016 defect family — `command:<name>`
+# invocations with no matching definition in the same file.
+lint-cmd-names:
+	@tools/lint-cmd-names
 
 test: check
 

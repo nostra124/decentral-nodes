@@ -2,7 +2,7 @@
 id: FEAT-032
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # Lint: detect `command:<name>` invocations where `<name>` isn't defined in the same file

@@ -2,7 +2,7 @@
 id: FEAT-027
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # Dispatcher contract (help / version / modules)
