@@ -226,8 +226,8 @@ MAINNET_PRIVATE_VERSION_CODE=0x0488ADE4
 TESTNET_PUBLIC_VERSION_CODE=0x043587CF
 TESTNET_PRIVATE_VERSION_CODE=0x04358394
 
-command:is-secret() (( $1 == BIP32_TESTNET_PRIVATE_VERSION_CODE || $1 == BIP32_MAINNET_PRIVATE_VERSION_CODE ))
-command:is-public() (( $1 == BIP32_TESTNET_PUBLIC_VERSION_CODE || $1 == BIP32_MAINNET_PUBLIC_VERSION_CODE ))
+command:is-secret() (( $1 == TESTNET_PRIVATE_VERSION_CODE || $1 == MAINNET_PRIVATE_VERSION_CODE ))
+command:is-public() (( $1 == TESTNET_PUBLIC_VERSION_CODE || $1 == MAINNET_PUBLIC_VERSION_CODE ))
 
 command:create() {
 	while getopts "st" flag; do
@@ -346,9 +346,9 @@ command:derive() {
 							$((TESTNET_PUBLIC_VERSION_CODE))) ;;
 							$((MAINNET_PUBLIC_VERSION_CODE))) ;;
 							$((MAINNET_PRIVATE_VERSION_CODE)))
-								version=$BIP32_MAINNET_PUBLIC_VERSION_CODE;;&
+								version=$MAINNET_PUBLIC_VERSION_CODE;;&
 							$((TESTNET_PRIVATE_VERSION_CODE)))
-								version=$BIP32_TESTNET_PUBLIC_VERSION_CODE;;&
+								version=$TESTNET_PUBLIC_VERSION_CODE;;&
 							*)
 								echo "4d*doilgx${key^^}l;xlex" >&"${DC[1]}"
 								read key <&"${DC[0]}"
@@ -362,7 +362,7 @@ command:derive() {
 						if [[ ! "$operator" =~ h$ ]]; then
 							child_number=operator
 						fi
-						if isPrivate "$version"; then
+						if command:is-secret "$version"; then
 							echo "4d*doilgx${key^^}l;xlex" >&"${DC[1]}"
 							read parent_id <&"${DC[0]}"
 							{
@@ -381,7 +381,7 @@ command:derive() {
 									echo "4d*doi$right ${key^^} $left+ln%p"
 								}
 							} >&"${DC[1]}"
-						elif isPublic "$version"; then
+						elif command:is-public "$version"; then
 							parent_id="$key"
 							if (( child_number >= (1 << 31) )); then
 								fatal "extented public key can't produce a hardened child" 4

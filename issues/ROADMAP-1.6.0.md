@@ -8,9 +8,10 @@ limit scan, address labels.
 FEAT-013 moved here when 1.5.0 was tightened to FEAT-012 only.
 The previous 1.6.0 (write path) moves forward to ROADMAP-1.7.0.
 
-Depends on 1.5.0 (FEAT-012 backend) and 1.3.0
-(FEAT-010 wallet store, FEAT-017 BIP citations) and the
-`mnemonic-to-seed` plugin from 1.5.0.
+Depends on:
+- 1.3.0 (FEAT-010 wallet store, FEAT-017 BIP citations)
+- 1.5.0 (FEAT-012 backend, `mnemonic-to-seed` plugin)
+- 1.5.1 (BUG-013 — `bip32 derive` actually works end-to-end)
 
 ---
 
