@@ -2,8 +2,6 @@
 
 . bitcoin.sh
 
-echo 1..5
-
 declare -i n=0
 
 # Example 6 from the bitcoin book, chap. 04
@@ -40,5 +38,9 @@ if [[ "$(basenc --base16 -d <<<"${prv^^}"|wif)" = KyBsPXxTuVD82av65KZkrGrWi5qLMa
 then echo ok $n
 else echo not ok $n
 fi
+
+# FEAT-022: trailing TAP plan derived from the counter. Add or remove
+# a test and the plan adjusts itself.
+echo "1..$n"
 
 # vi: ft=bash

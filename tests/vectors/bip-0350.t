@@ -27,16 +27,11 @@
 
 
 . bitcoin.sh
+# FEAT-024: shared vectors live in _bech32_common.sh (single source
+# of truth across bip-0173.t and bip-0350.t).
+. "$(dirname "$BASH_SOURCE")/_bech32_common.sh"
 
-declare -a valid_checksum_bech32=(
-  A12UEL5L
-  a12uel5l
-  an83characterlonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1tt5tgs
-  abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw
-  11qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqc8247j
-  split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w
-  ?1ezyfcl
-)
+declare -a valid_checksum_bech32=( "${BECH32_VALID[@]}" )
 
 declare -a valid_checksum_bech32m=(
   A1LQFN3A
@@ -49,18 +44,15 @@ declare -a valid_checksum_bech32m=(
 )
 
 declare -a invalid_checksum_bech32=(
+  # FEAT-024: 8 entries shared with bip-0173.t come from
+  # _bech32_common.sh. The 4 below are bip-0350-specific (binary
+  # characters at start / mid / end).
   " 1nwldj5"
   $'\x7f1axkwrx'
   $'\x801eym55h'
-  an84characterslonghumanreadablepartthatcontainsthenumber1andtheexcludedcharactersbio1569pvx
-  pzry9x0s0muk
-  1pzry9x0s0muk
-  x1b4n0q5v
-  li1dgmt3
+  "${BECH32_INVALID_BASIC[@]:0:5}"
   $'de1lg7wt\xff'
-  A1G7SGD8
-  10a06t8
-  1qzzfhee
+  "${BECH32_INVALID_BASIC[@]:5}"
 )
 
 declare -a invalid_checksum_bech32m=(
@@ -111,8 +103,6 @@ declare -a invalid_address=(
 
 declare -i n=0
 declare t
-
-echo 1..79
 
 for t in "${valid_checksum_bech32[@]}"
 do
@@ -197,5 +187,8 @@ do
   else echo "not ok $n - failed to detect error for $address"
   fi
 done
+
+# FEAT-022: trailing TAP plan derived from the counter.
+echo "1..$n"
 
 # vi: ft=bash

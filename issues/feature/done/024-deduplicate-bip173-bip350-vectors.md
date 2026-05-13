@@ -2,7 +2,7 @@
 id: FEAT-024
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # Deduplicate shared bech32 vectors between `bip-0173.t` and `bip-0350.t`
