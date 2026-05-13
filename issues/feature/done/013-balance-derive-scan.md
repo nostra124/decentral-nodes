@@ -2,8 +2,43 @@
 id: FEAT-013
 type: feature
 priority: high
-status: open
+status: done
 ---
+
+## Resolution (shipped in 1.6.0)
+
+Partial — derive / addresses / label / balance shipped. `wallet
+scan` (the gap-limit recovery loop) and the `~/.cache/...` UTXO
+cache are deferred to a follow-up FEAT.
+
+- `bitcoin wallet derive <name>` reads `secret get <name>/seed`,
+  runs it through `mnemonic-to-seed | bip32 create | base58-decode
+  | bip32 derive m/84h/0h/0h/0/<idx>/N | tail -c 33`, hashes the
+  pubkey to a P2WPKH address, appends a `<idx>\t<addr>\t<label>`
+  line to the wallet's `addresses` ledger, and commits.
+- `bitcoin wallet addresses <name>` prints the ledger.
+- `bitcoin wallet label <name> <addr> <text>` rewrites the line
+  for `<addr>` and commits.
+- `bitcoin wallet balance <name>` walks the ledger, queries the
+  active backend's `get-address-utxos`, and sums the `.value`
+  fields via `jq`.
+
+6 new bats tests cover derive (vector match, ledger append,
+index bump), addresses listing, label update with commit, and
+balance summing against stubbed backend JSON.
+
+Wallet-internal commits use `-c commit.gpgsign=false` because the
+user's wallet repo is separate from the project repo and signing
+isn't assumed configured.
+
+### Deferred
+
+- `wallet scan` (gap-limit recovery) — follow-up FEAT once the
+  read-path UX is exercised.
+- `~/.cache/bitcoin/<wallet>/utxos.tsv` and the `--refresh` flag
+  — follow-up; current balance does a live query every call.
+- BIP-32 / 44 / 49 / 84 / 86 citation blocks in `bitcoin help
+  wallet *` — follow-up FEAT-026 will tighten the help surface.
 
 # Balance, address derivation, and gap-limit scanner
 

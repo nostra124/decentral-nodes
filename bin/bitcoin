@@ -612,7 +612,7 @@ command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		new|ls|rm|help) wallet:"$sub" "$@" ;;
+		new|ls|rm|help|derive|addresses|label|balance) wallet:"$sub" "$@" ;;
 		*)
 			error "unknown wallet subcommand: '$sub'"
 			wallet:help >&2
@@ -635,12 +635,169 @@ wallet:help() {
 	                    'secret put <name>/seed'
 	  ls                list existing wallets
 	  rm [-f] <name>    remove a wallet (-f also removes secret/<name>/seed)
+	  derive <name>     derive next BIP-84 receive address; append to ledger
+	  addresses <name>  list every derived address (with index + label)
+	  label <name> <addr> <text>
+	                    set/clear the label on a derived address
+	  balance <name>    sum UTXO values for all derived addresses via the
+	                    active backend (skills/automerging.md §3b -- mempool)
 	  help              this message
 
 	A wallet is a git repository. The seed phrase is held by 'secret',
 	not by this repo, so 'bitcoin wallet push' (FEAT-011) is safe by
 	construction.
 	ENDHELP
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-013 helpers
+# ---------------------------------------------------------------------------
+
+# Read the next derivation index from the ledger (0-based; line count).
+wallet:_next_index() {
+	local ledger="$1"
+	if [ -s "$ledger" ]; then
+		wc -l < "$ledger" | tr -d ' '
+	else
+		echo 0
+	fi
+}
+
+# Derive the BIP-84 receive address at <name>'s index <i> via the
+# mnemonic in secret. Returns just the bc1q… address on stdout.
+wallet:_derive_address() {
+	local name="$1" idx="$2"
+	if ! command -v secret >/dev/null 2>&1; then
+		error "wallet derive: 'secret' not in PATH (cannot read seed)"
+		return 5
+	fi
+	# Resolve libexec for the bip32/bip13/mnemonic-to-seed plugins.
+	# When sourced, SELF_LIBEXEC must be set by caller; when dispatched,
+	# the parent bin/bitcoin sets it.
+	local libexec="${SELF_LIBEXEC:?wallet derive: SELF_LIBEXEC must be set}"
+	local pubkey
+	pubkey="$(
+		secret get "$name/seed" |
+		"$libexec/${SELF:-bitcoin}/mnemonic-to-seed" |
+		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/0/$idx/N" 2>/dev/null |
+		tail -c 33 |
+		basenc --base16 -w0 |
+		tr A-F a-f
+	)"
+	if [[ ! "$pubkey" =~ ^0[23][[:xdigit:]]{64}$ ]]; then
+		error "wallet derive: pubkey derivation produced unexpected output '$pubkey'"
+		return 6
+	fi
+	p2wpkh "$pubkey"
+}
+
+wallet:derive() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet derive: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet derive: no such wallet '$name' at $path"
+		return 3
+	fi
+	local ledger="$path/addresses"
+	[ -f "$ledger" ] || : > "$ledger"
+	local idx; idx="$(wallet:_next_index "$ledger")"
+	local addr; addr="$(wallet:_derive_address "$name" "$idx")" || return $?
+	# Append as: <index><tab><address><tab><label>  (label initially empty)
+	printf '%d\t%s\t\n' "$idx" "$addr" >> "$ledger"
+	(
+		cd "$path"
+		git add addresses
+		# commit.gpgsign=false: wallet-internal commits run on the
+		# user's wallet repo, not on this project's repo. We don't
+		# assume the user has signing keys set up for their wallet.
+		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+		    -c commit.gpgsign=false \
+			commit -q -m "wallet derive: $name/$idx -> $addr"
+	) || { error "wallet derive: commit failed"; return 7; }
+	printf '%s\n' "$addr"
+}
+
+wallet:addresses() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet addresses: name required"
+		return 2
+	fi
+	local ledger; ledger="$(wallet:_path "$name")/addresses"
+	if [ ! -f "$ledger" ]; then
+		error "wallet addresses: no ledger at $ledger"
+		return 3
+	fi
+	cat "$ledger"
+}
+
+wallet:label() {
+	local name="${1:-}" addr="${2:-}" label="${3:-}"
+	if [ -z "$name" ] || [ -z "$addr" ]; then
+		error "wallet label: usage: wallet label <name> <address> <label>"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	local ledger="$path/addresses"
+	if [ ! -f "$ledger" ]; then
+		error "wallet label: no ledger at $ledger"
+		return 3
+	fi
+	if ! grep -q -F "	$addr	" "$ledger"; then
+		error "wallet label: address '$addr' not in $name's ledger"
+		return 4
+	fi
+	# Rewrite the line: <idx>\t<addr>\t<label>\n
+	local tmp="$ledger.tmp"
+	awk -v a="$addr" -v l="$label" -F '\t' 'BEGIN{OFS="\t"} {
+		if ($2 == a) print $1, $2, l;
+		else        print $0;
+	}' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
+	(
+		cd "$path"
+		git add addresses
+		# commit.gpgsign=false: wallet-internal commits run on the
+		# user's wallet repo, not on this project's repo. We don't
+		# assume the user has signing keys set up for their wallet.
+		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+		    -c commit.gpgsign=false \
+			commit -q -m "wallet label: $name $addr -> '$label'"
+	) || { error "wallet label: commit failed"; return 5; }
+	info "label set for $addr"
+}
+
+wallet:balance() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet balance: name required"
+		return 2
+	fi
+	local ledger; ledger="$(wallet:_path "$name")/addresses"
+	if [ ! -f "$ledger" ]; then
+		error "wallet balance: no ledger at $ledger"
+		return 3
+	fi
+	local -i total=0
+	local addr utxo_json sum
+	while IFS=$'\t' read -r _idx addr _label; do
+		[ -z "$addr" ] && continue
+		if ! utxo_json="$(backend:get-address-utxos "$addr")"; then
+			warn "wallet balance: backend get-utxos failed for $addr (continuing)"
+			continue
+		fi
+		# Sum the .value fields. jq is in .rpk/depends; available on CI.
+		sum="$(printf '%s' "$utxo_json" | jq -r '[.[].value] | add // 0' 2>/dev/null)"
+		if [[ "$sum" =~ ^[0-9]+$ ]]; then
+			(( total += sum ))
+		fi
+	done < "$ledger"
+	echo "$total"
 }
 
 wallet:new() {
@@ -693,7 +850,11 @@ wallet:new() {
 		CFG
 		: > descriptors
 		git add config descriptors
+		# commit.gpgsign=false: wallet-internal commits run on the
+		# user's wallet repo, not on this project's repo. We don't
+		# assume the user has signing keys set up for their wallet.
 		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+		    -c commit.gpgsign=false \
 			commit -q -m "wallet new: $name"
 	) || { error "wallet new: failed to initialise repo at $path"; return 11; }
 
@@ -991,6 +1152,21 @@ command:bech32-decode() {
 }
 
 # bip-0173/bip-0350 code starts here {{{
+
+# hash160(stdin) — SHA-256 then RIPEMD-160 of stdin bytes; emits the
+# 20-byte hash. Delegates to the bip32 libexec plugin so we don't
+# duplicate the implementation (per CLAUDE.md §4 no-shared-lib: the
+# plugin owns hash160; sourceable mode wraps it).
+hash160() {
+	if [ -n "${SELF_LIBEXEC:-}" ] && [ -x "$SELF_LIBEXEC/${SELF:-bitcoin}/bip32" ]; then
+		"$SELF_LIBEXEC/${SELF:-bitcoin}/bip32" hash160
+	elif command -v bip32 >/dev/null 2>&1; then
+		bip32 hash160
+	else
+		echo "hash160: bip32 plugin not on PATH and SELF_LIBEXEC not set" >&2
+		return 1
+	fi
+}
 
 p2wpkh() { segwitAddress -p "$1"; }
 
