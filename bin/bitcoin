@@ -245,6 +245,174 @@ wallet:_valid_name() {
 	[[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
 }
 
+# ---------------------------------------------------------------------------
+# FEAT-009: BIP-380 descriptor checksum + verify.
+#
+# Per BIP-380 §Checksum: the descriptor body is expanded into 5-bit
+# symbols against INPUT_CHARSET (95 chars, 3 groups of 32 + 31 with
+# special-case packing), passed through a polymod with five 40-bit
+# generator constants, and the resulting 40-bit checksum is rendered
+# as 8 chars from CHECKSUM_CHARSET (the bech32 charset).
+# ---------------------------------------------------------------------------
+
+# INPUT_CHARSET — 95 chars. Position in string == symbol value.
+declare -gr BIP380_INPUT_CHARSET=$'0123456789()[],\'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#"\\ '
+
+declare -gr BIP380_CHECKSUM_CHARSET="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+descriptor:_polymod() {
+	local -a generator=(0xf5dee51989 0xa9fdca3312 0x1bab10e32d 0x3706b1677a 0x644d626ffd)
+	local -i chk=1 v top i
+	for v; do
+		(( top = chk >> 35,
+		   chk = (chk & 0x7ffffffff) << 5 ^ v ))
+		for i in 0 1 2 3 4; do
+			(( ((top >> i) & 1) && (chk ^= generator[i]) )) || true
+		done
+	done
+	echo $chk
+}
+
+descriptor:_expand() {
+	local s="$1"
+	local -ai groups=() symbols=()
+	local -i i v idx j
+	local c
+	for ((i=0; i<${#s}; i++)); do
+		c="${s:i:1}"
+		idx=-1
+		for ((j=0; j<${#BIP380_INPUT_CHARSET}; j++)); do
+			if [[ "${BIP380_INPUT_CHARSET:j:1}" == "$c" ]]; then
+				idx=$j
+				break
+			fi
+		done
+		(( idx < 0 )) && return 1
+		v=$idx
+		symbols+=( $(( v & 31 )) )
+		groups+=( $(( v >> 5 )) )
+		if (( ${#groups[@]} == 3 )); then
+			symbols+=( $(( groups[0] * 9 + groups[1] * 3 + groups[2] )) )
+			groups=()
+		fi
+	done
+	if (( ${#groups[@]} == 1 )); then
+		symbols+=( ${groups[0]} )
+	elif (( ${#groups[@]} == 2 )); then
+		symbols+=( $(( groups[0] * 3 + groups[1] )) )
+	fi
+	printf '%s\n' "${symbols[@]}"
+}
+
+descriptor:_create() {
+	local body="$1"
+	local -a expanded
+	mapfile -t expanded < <(descriptor:_expand "$body") \
+		|| { error "descriptor: invalid character in '$body'"; return 1; }
+	if (( ${#expanded[@]} == 0 )) && [ -n "$body" ]; then
+		error "descriptor: invalid character in '$body'"
+		return 1
+	fi
+	local -i chk
+	chk=$(descriptor:_polymod "${expanded[@]}" 0 0 0 0 0 0 0 0)
+	(( chk ^= 1 ))
+	local -i i val
+	local out="$body#"
+	for i in 0 1 2 3 4 5 6 7; do
+		(( val = (chk >> (5 * (7 - i))) & 31 ))
+		out+="${BIP380_CHECKSUM_CHARSET:val:1}"
+	done
+	printf '%s\n' "$out"
+}
+
+descriptor:checksum() {
+	local s="${1:-}"
+	[ -n "$s" ] || { error "descriptor checksum: argument required"; return 2; }
+	# If the input already ends in `#<8 chars>`, strip and re-compute.
+	if (( ${#s} > 9 )) && [[ "${s: -9: 1}" == "#" ]]; then
+		s="${s:0: ${#s}-9}"
+	fi
+	descriptor:_create "$s"
+}
+
+descriptor:verify() {
+	local s="${1:-}"
+	[ -n "$s" ] || { error "descriptor verify: argument required"; return 2; }
+	if (( ${#s} < 10 )) || [[ "${s: -9: 1}" != "#" ]]; then
+		error "descriptor verify: no '#' separator + 8-char checksum suffix"
+		return 3
+	fi
+	local body="${s:0: ${#s}-9}"
+	local chksum="${s: -8}"
+	local -i i j
+	local c
+	# Every checksum char must be in BIP380_CHECKSUM_CHARSET.
+	for ((i=0; i<8; i++)); do
+		c="${chksum:i:1}"
+		case "$BIP380_CHECKSUM_CHARSET" in
+			*"$c"*) ;;
+			*) error "descriptor verify: checksum char '$c' not in bech32 set"; return 4 ;;
+		esac
+	done
+	local -a expanded
+	mapfile -t expanded < <(descriptor:_expand "$body") \
+		|| { error "descriptor verify: invalid character in body"; return 5; }
+	local -ai cksym=()
+	for ((i=0; i<8; i++)); do
+		c="${chksum:i:1}"
+		for ((j=0; j<32; j++)); do
+			if [[ "${BIP380_CHECKSUM_CHARSET:j:1}" == "$c" ]]; then
+				cksym+=( $j )
+				break
+			fi
+		done
+	done
+	local -i chk
+	chk=$(descriptor:_polymod "${expanded[@]}" "${cksym[@]}")
+	if (( chk == 1 )); then
+		return 0
+	else
+		error "descriptor verify: checksum mismatch (got polymod=$chk, expected 1)"
+		return 6
+	fi
+}
+
+descriptor:help() {
+	cat <<-ENDHELP
+	Usage: $SELF descriptor <subcommand> [args]
+
+	  checksum <s>      append a BIP-380 checksum to the descriptor body;
+	                    if <s> already ends in '#<8 chars>', replace it
+	  verify <s>        verify a descriptor's checksum; exit 0 on success
+	  help              this message
+
+	BIP-380 §Checksum defines an 8-character polymod-based suffix after
+	a '#' separator: descriptor body, '#', 8 bech32-charset chars.
+	ENDHELP
+}
+
+help:descriptor() {
+	descriptor:help
+	cite 380 "Output script descriptors (general)"
+	cite 381 "Non-segwit output script descriptors"
+	cite 386 "tr() output script descriptor"
+}
+
+command:descriptor() {
+	local sub="${1:-help}"
+	shift 2>/dev/null || true
+	case "$sub" in
+		checksum) descriptor:checksum "$@" ;;
+		verify)   descriptor:verify   "$@" ;;
+		help)     descriptor:help ;;
+		*)
+			error "unknown descriptor subcommand: '$sub'"
+			descriptor:help >&2
+			return 2
+			;;
+	esac
+}
+
 command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true

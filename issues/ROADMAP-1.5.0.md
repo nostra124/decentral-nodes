@@ -1,78 +1,62 @@
 # Roadmap — 1.5.0 (minor)
 
-The wallet learns to spend. With 1.3.0's wallet repo and 1.4.0's
-backend + read path in place, 1.5.0 adds PSBT (the cold-signing
-interchange format) and the end-to-end builder/signer/broadcaster.
+Backend abstraction + read path. With FEAT-009's descriptors in
+place (1.4.0), 1.5.0 lets the wallet actually query the chain:
+pluggable backends (bitcoind / mempool.space / blockstream.info),
+balance, address derivation, and the gap-limit scanner.
 
-After this release, the wallet is actually a wallet: receive,
-balance, send. From here on, further milestones are about
-broadening (Taproot, descriptors-via-other-wallets, push/pull) and
-polishing (docs, agent skill, SIT regtest), not about reaching
-basic functionality.
+**Re-scoped from the original 1.5.0 draft.** The first 1.5.0
+bundled FEAT-008 (PSBT) + FEAT-014 (tx builder) — that work is now
+ROADMAP-1.6.0. FEAT-012 + FEAT-013 moved here from the original
+1.4.0 (which kept just FEAT-009).
 
-Depends on 1.4.0 (FEAT-012 backend, FEAT-013 balance/derive,
-FEAT-009 descriptors).
+Depends on 1.4.0 (FEAT-009 descriptors).
 
 ---
 
-## FEAT-008 — PSBT (BIP-174) encode, decode, sign
-**File:** `issues/feature/008-psbt-bip174.md`
-**Effort:** ~1–2 days
-Read, write, and partially sign PSBTs. Required for the
-cold-storage flow: online wallet builds an unsigned PSBT, offline
-signer adds signatures, online wallet broadcasts. Also the natural
-interchange format for FEAT-011 push/pull (commit a PSBT under
-`psbts/`, push, sign on the cold side, pull and broadcast).
-
-## FEAT-014 — Transaction builder, signer, broadcaster
-**File:** `issues/feature/014-tx-builder-signer-broadcaster.md`
+## FEAT-012 — Backend abstraction (bitcoind / mempool / blockstream)
+**File:** `issues/feature/012-backend-abstraction.md`
 **Effort:** ~2 days
-End-to-end happy path: `bitcoin wallet send <name> <addr> <amount>
-[--fee-rate sat/vB]`. Coin selection, change derivation,
-signing-via-`secret`, broadcast via the backend. Also the
-PSBT-only paths: `wallet build`, `wallet sign`, `wallet broadcast`
-for the cold-storage workflow.
+A thin verb layer (`backend_chain_height`, `backend_get_tx`,
+`backend_get_utxos`, `backend_estimate_fee`, `backend_broadcast`)
+with three implementations. Per-wallet selection stored in the
+wallet repo.
+
+## FEAT-013 — Balance, address derivation, gap-limit scanner
+**File:** `issues/feature/013-balance-derive-scan.md`
+**Effort:** ~1–2 days on top of 010 + 012
+`bitcoin wallet balance / addresses / derive / scan / label`.
+Implements BIP-44 gap-limit recovery.
 
 ---
 
 ## Recommended order
 
 ```
-FEAT-008  (PSBT — the interchange format builder/signer use)
-FEAT-014  (builder/signer/broadcaster — uses PSBT internally)
+FEAT-012  (backend layer first — FEAT-013 depends on it)
+FEAT-013  (queries via the backend)
 ```
-
-Internally these can interleave: implement PSBT decode first
-(needed by `wallet sign` and `wallet broadcast`); then PSBT encode
-(needed by `wallet build`); then the high-level `wallet send`
-verb that composes build + sign + broadcast.
 
 ## Release gate
 
-- `bitcoin wallet send <name> <addr> <sats>` constructs, signs,
-  and broadcasts a single-output spend; returns the txid.
-- `bitcoin wallet build <name> <addr> <sats> > tx.psbt` writes an
-  unsigned PSBT.
-- `bitcoin wallet sign <name> < tx.psbt > tx.signed.psbt` adds
-  signatures using the wallet's seed (via `secret`).
-- `bitcoin wallet broadcast < tx.signed.psbt` posts the finalised
-  transaction via the configured backend.
-- `bitcoin psbt decode < tx.psbt` prints a human-readable summary
-  (inputs, outputs, fee, sighash flags).
-- Coin-selection emits a `warn` line when it falls back from BnB
-  to single-random-draw, naming why (per `skills/logging.md`).
-- Insufficient-funds, no-such-wallet, and broadcast-rejected paths
-  exit non-zero with a clear `error` line.
-- bats coverage: at least 8 new tests covering encode/decode round
-  trips, sign-then-broadcast on regtest (skip if no bitcoind), the
-  cold-flow end-to-end (build → sign → broadcast across two wallet
-  copies).
+- `bitcoin wallet balance <name>` returns a numeric satoshi balance
+  on at least one backend (mempool.space, since the cloud sandbox
+  has no bitcoind).
+- `bitcoin wallet derive <name>` returns a fresh address each call;
+  the wallet repo gains one commit per call.
+- `bitcoin wallet scan <name>` walks the gap-limit and updates the
+  address ledger.
+- Backend selection: `bitcoin backend bitcoind|mempool|blockstream`
+  switches, `bitcoin backend auto` falls back to mempool with a
+  one-time `warn` line per `skills/logging.md` §4.
+- Every backend HTTP/RPC failure emits an `error` line that names
+  the host, URL, and status code.
+- bats coverage: at least 6 new tests with the backends stubbed via
+  a local HTTP test server.
 - Pre-push hook + CI green on the milestone PR.
 
 ## Out of scope (future roadmaps)
 
-- Taproot / Schnorr signing (FEAT-007, planned 1.6.0+ — Taproot
-  spends still go through the legacy ecdsa path until then)
-- Push/pull (FEAT-011, planned 1.6.0+)
-- Tx index + labels (FEAT-018, planned 1.7.0+)
-- SIT regtest harness (FEAT-016, planned 2.0.0)
+- PSBT + tx builder (FEAT-008 + FEAT-014, ROADMAP-1.6.0)
+- Push/pull (FEAT-011, ROADMAP-1.7.0+)
+- Tx index + labels (FEAT-018, ROADMAP-1.7.0+)
