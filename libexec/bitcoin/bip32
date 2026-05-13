@@ -327,9 +327,9 @@ command:derive() {
 			fatal "key parent has to be between 0 and 0xffffffff" 10
 		elif ((child_number < 0 || child_number > 0xffffffff)); then
 			fatal "key child number has to be between 0 and 0xffffffff" 11
-		elif command:bip32-is-public  $version && [[ "$key" =~ ^00    ]]; then
+		elif command:is-public  $version && [[ "$key" =~ ^00    ]]; then
 			fatal "key is not a valid public key" 12
-		elif command:bip32-is-secret $version && [[ "$key" =~ ^0[23] ]]; then
+		elif command:is-secret $version && [[ "$key" =~ ^0[23] ]]; then
 			fatal "key is not a valid private key" 13
 		fi
 		

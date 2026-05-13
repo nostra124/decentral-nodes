@@ -599,3 +599,27 @@ curl_fixture() {
 	[[ "$output" != *"isPublic"* ]]
 	[[ "$output" != *"version is neither private nor public"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# BUG-014 regression — the same "undefined function name" pattern as
+# BUG-013, missed by the earlier patch because BUG-013's regression
+# test didn't exercise the `/N` neutering branch.
+# ---------------------------------------------------------------------------
+
+@test "BUG-014 — bip32 derive m/.../N (neutering) resolves" {
+	repo_root="$BATS_TEST_DIRNAME/../../"
+	PATH="$repo_root/bin:$repo_root/libexec/bitcoin:$PATH" \
+	XDG_SHARE_HOME="$repo_root/share" \
+	SELF_LIBEXEC="$repo_root/libexec" \
+	run bash -c '
+		mnemonic-to-seed abandon abandon abandon abandon abandon abandon abandon \
+		                 abandon abandon abandon abandon about \
+		  | basenc --base16 -w0 \
+		  | bip32 create -s 2>/dev/null \
+		  | bitcoin bip13 base58-decode \
+		  | bip32 derive m/84h/0h/0h/0/0/N
+	'
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"bip32-is-public"* ]]
+	[[ "$output" != *"bip32-is-secret"* ]]
+}
