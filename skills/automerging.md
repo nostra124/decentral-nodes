@@ -154,10 +154,55 @@ or
 > CI run `25748947510` on `fcee2ac` completed: **failure**. Reading
 > the PR-comment log, then filing BUG-NNN per skills/bugs.md.
 
-### 3b.3 Session resumption
+### 3b.3 Session resumption — poll on resume
 
-If the agent's session ends before CI completes, re-subscribing on
-resume picks the stream back up — the contract is the same.
+Webhook delivery into the conversation is **not reliable across
+gaps**. A pause of any kind (the user typing a new message, an MCP
+server reconnect, the agent yielding control mid-turn, the session
+itself ending and resuming) can swallow the completion event for a
+PR the agent was watching. After the gap, the watcher looks alive
+but isn't reacting — that is the session-hang failure mode.
+
+The rule: **on any resumption, the watcher's first action for each
+PR it is subscribed to is to call `get_check_runs` and react to
+the current state.** Do not wait for another webhook; webhooks
+are an optimisation over polling, not a replacement.
+
+Concretely, resume triggers include:
+
+| Trigger | Action |
+|---|---|
+| Agent receives a new user message | For every PR subscribed in this session, `get_check_runs`; act per §3b.1 on any completed run. |
+| An MCP server (especially `github`) reconnects | Same. |
+| The agent itself completes a turn and is invoked again later | Same. |
+| Session resumes after compression / context window cycling | Same. |
+
+If `get_check_runs` shows the run is still in progress, the
+watcher's next move is the same as before — wait passively. The
+poll only costs a tool call when there's nothing to do.
+
+Subscribing twice to the same PR is harmless; if uncertain whether
+the subscription survived a resume, re-call
+`mcp__github__subscribe_pr_activity`.
+
+This rule exists because this exact pattern has hung the watcher
+multiple times — green CI lands during a gap, the agent never
+calls `get_check_runs` on resume, and the PR sits open while the
+user can plainly see that CI is done. The poll-on-resume rule is
+non-negotiable for Mode B; treat skipping it the same as silently
+ignoring a red webhook (§7).
+
+Re-subscribing on resume is also safe: if the prior subscription
+was dropped, the new call restores webhook delivery for any future
+events. So the conservative resume sequence is:
+
+```
+on resume:
+    for each watched PR:
+        get_check_runs                  # catch missed completions
+        act per §3b.1 / §3b.2 / §4
+        if still in_progress: subscribe_pr_activity   # restore stream
+```
 
 Why this mode is acceptable: the merge action still gates on
 "green CI on the PR head commit" and still emits a normal merge
@@ -260,6 +305,7 @@ following — stop and read this section.
 | Merge a "trivial fix" without a regression test | This is exactly the path that causes the bug to come back. | Write the test first (`skills/bugs.md`). |
 | Silently ignore a red CI webhook ("user didn't ask me to react") | The session hangs. The user assumes the watcher is alive; it is not, in any meaningful sense. | Acknowledge the event per §3b.2, then enter §4. |
 | Wait for a green event without acknowledging the red one first | Same hang, different shape. | Always acknowledge *every* completion event. |
+| Resume the session without polling CI ("I'm subscribed, the webhook will arrive") | Webhooks can be lost across gaps (user message, MCP reconnect, turn boundary). The most common hang. | On every resume, `get_check_runs` first for each watched PR. See §3b.3. |
 
 ## 8. Checklist (use when arming the merge, either mode)
 
@@ -278,6 +324,9 @@ Mode B (current default for this repo):
 - [ ] subscribe_pr_activity called for this PR
 - [ ] Agent session will remain live (or will be re-subscribed)
       long enough to receive the CI completion event
+- [ ] On any resumption (new user message, MCP reconnect, turn
+      boundary), call `get_check_runs` BEFORE waiting for the
+      next webhook (§3b.3 — poll-on-resume rule)
 ```
 
 After **every** CI completion event (green OR red — never skip):
