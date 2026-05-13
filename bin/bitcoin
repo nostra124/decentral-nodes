@@ -757,7 +757,7 @@ command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		new|ls|rm|help|derive|addresses|label|balance) wallet:"$sub" "$@" ;;
+		new|ls|rm|help|derive|addresses|label|balance|broadcast) wallet:"$sub" "$@" ;;
 		*)
 			error "unknown wallet subcommand: '$sub'"
 			wallet:help >&2
@@ -915,6 +915,35 @@ wallet:label() {
 			commit -q -m "wallet label: $name $addr -> '$label'"
 	) || { error "wallet label: commit failed"; return 5; }
 	info "label set for $addr"
+}
+
+# FEAT-014 (partial, 1.8.0): wallet broadcast. Reads a raw hex
+# transaction from stdin and forwards to the active backend. The
+# <name> argument is currently a docs hint — per-wallet backend
+# resolution is deferred until FEAT-012's per-wallet config lands.
+wallet:broadcast() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet broadcast: name required (currently a docs hint; per-wallet backend deferred)"
+		return 2
+	fi
+	local hex
+	hex="$(cat | tr -d '[:space:]')"
+	if [ -z "$hex" ]; then
+		error "wallet broadcast: empty stdin (expected raw transaction hex)"
+		return 3
+	fi
+	if [[ ! "$hex" =~ ^[0-9a-fA-F]+$ ]]; then
+		error "wallet broadcast: stdin is not hex"
+		return 4
+	fi
+	if (( ${#hex} % 2 != 0 )); then
+		error "wallet broadcast: hex length is odd (${#hex} chars); truncated input?"
+		return 5
+	fi
+	# Normalise to lowercase.
+	hex="${hex,,}"
+	backend:broadcast "$hex"
 }
 
 wallet:balance() {
