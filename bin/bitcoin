@@ -1046,21 +1046,14 @@ wallet:rm() {
 	info "wallet '$name' removed"
 }
 
-command:bip49-create() {
-  BIP32_MAINNET_PUBLIC_VERSION_CODE=0x049d7cb2 \
-  BIP32_MAINNET_PRIVATE_VERSION_CODE=0x049d7878 \
-  BIP32_TESTNET_PUBLIC_VERSION_CODE=0x044a5262 \
-  BIP32_TESTNET_PRIVATE_VERSION_CODE=0x044a4e28 \
-  command:bip32-create "$@"
-}
-
-command:bip84-create() {
-  BIP32_MAINNET_PUBLIC_VERSION_CODE=0x04b24746 \
-  BIP32_MAINNET_PRIVATE_VERSION_CODE=0x04b2430c \
-  BIP32_TESTNET_PUBLIC_VERSION_CODE=0x045f1cf6 \
-  BIP32_TESTNET_PRIVATE_VERSION_CODE=0x045f18bc \
-  command:bip32-create "$@"
-}
+# BUG-016 (1.7.1): the previous `command:bip49-create` and
+# `command:bip84-create` dispatcher entries here called a
+# never-defined `command:bip32-create` and had been dead since the
+# repo's extraction. Removed; the bash-function wrappers `bip49()`
+# / `bip84()` later in this file are the canonical user surface.
+# A latent issue with their BIP32_-prefixed env vars (the bip32
+# plugin reads unprefixed `*_VERSION_CODE`) is tracked as an open
+# audit follow-up; not in scope here.
 
 # bip173 (segregated witness outputs address format) commands
 command:bech32() {

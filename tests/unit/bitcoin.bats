@@ -737,6 +737,28 @@ psbt_vec1() {
 	[[ "$output" == *"bip-0174.mediawiki"* ]]
 }
 
+# ---------------------------------------------------------------------------
+# BUG-016 regression — `command:bip49-create` and `command:bip84-create`
+# were dispatcher entries calling undefined `command:bip32-create`.
+# Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`
+# remain as the user-facing path.
+# ---------------------------------------------------------------------------
+
+@test "BUG-016 — bitcoin bip49-create no longer exists as a broken dispatcher entry" {
+	# After the fix, `bitcoin bip49-create` falls through to the
+	# help fallback (unknown subcommand), NOT a fatal
+	# "command:bip32-create: command not found".
+	run "$BITCOIN_BIN" bip49-create
+	[[ "$output" != *"command:bip32-create"* ]]
+	[[ "$output" != *"command not found"* ]]
+}
+
+@test "BUG-016 — bitcoin bip84-create no longer exists as a broken dispatcher entry" {
+	run "$BITCOIN_BIN" bip84-create
+	[[ "$output" != *"command:bip32-create"* ]]
+	[[ "$output" != *"command not found"* ]]
+}
+
 @test "BUG-014 — bip32 derive m/.../N (neutering) resolves" {
 	repo_root="$BATS_TEST_DIRNAME/../../"
 	PATH="$repo_root/bin:$repo_root/libexec/bitcoin:$PATH" \
