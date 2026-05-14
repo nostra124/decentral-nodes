@@ -5,7 +5,7 @@ priority: high
 status: open
 ---
 
-## Progress (1.11.0 shipped — `wallet broadcast` + `wallet build`)
+## Progress (1.12.0 shipped — `broadcast` + `build` + `build` reads `backend estimate-fee`)
 
 `bitcoin wallet broadcast <name>` (1.8.0) reads raw transaction
 hex from stdin, validates it as hex, and forwards to the active
@@ -20,8 +20,14 @@ BIP-141 unsigned transaction, wraps it as a single-record PSBT
 (global `PSBT_GLOBAL_UNSIGNED_TX` only) and prints the hex.
 
 The fee estimate is the educational simple model: vsize ≈ 10 +
-68·n_in + 31·n_out at the supplied (default 1) sat/vB rate. If
-the computed change exceeds the 546-sat dust floor a new change
+68·n_in + 31·n_out at the chosen sat/vB rate. **In 1.12.0** the
+default rate stopped being a hard-coded 1 and instead reads
+`backend estimate-fee 3` (half-hour bucket on mempool); on any
+backend failure (network, JSON parse, stub backend) it falls back
+to 1 sat/vB with a `warn` line per skills/logging.md §4. The
+explicit `--fee-rate N` flag still wins when supplied.
+
+If the computed change exceeds the 546-sat dust floor a new change
 address is derived from the wallet (committed to the ledger like
 any normal derivation) and a second output is added; otherwise
 the dust is folded into the fee and a single output is emitted.
@@ -36,6 +42,14 @@ insufficient-balance rejection, invalid-address rejection, no-
 such-wallet rejection, and P2TR (v1) rejection. The 1.8.0
 `wallet broadcast` tests (3) remain.
 
+**1.12.0** adds three more `build` tests that pin the fee-source
+resolution: backend estimate is read when `--fee-rate` is absent,
+`--fee-rate` overrides the backend estimate, and a missing
+estimate-fee response triggers the 1-sat/vB fallback with the
+expected `warn` line on stderr. The pre-1.12.0 happy-path tests
+were tightened to pass `--fee-rate 1` explicitly so the fee-math
+comments inside them stay honest under the new default.
+
 The `<name>` argument to `broadcast` is still a docs hint —
 per-wallet backend selection is deferred from FEAT-012, so the
 active backend is global. `wallet build` reads per-wallet ledger
@@ -44,15 +58,15 @@ global backend for UTXO queries; both verbs will resolve to the
 wallet's chosen backend without an interface change once the
 per-wallet backend lands.
 
-### Deferred (ROADMAP-1.12.0 and beyond)
+### Deferred (ROADMAP-1.13.0 and beyond)
 
 - `wallet sign <name>` — SIGHASH preimage + ECDSA via the
   secp256k1 dc-script. Paired with FEAT-008 `psbt sign`.
 - `wallet send <name> <addr> <sats>` — composes build + sign +
   broadcast.
 - Taproot signing (FEAT-007) and a v1+ address path for `build`.
-- Fee estimation via `backend estimate-fee` (currently a fixed
-  `--fee-rate` flag).
+- ~~Fee estimation via `backend estimate-fee`~~ — shipped in
+  1.12.0.
 
 # Transaction builder, signer, and broadcaster
 
