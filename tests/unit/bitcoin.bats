@@ -706,6 +706,75 @@ setup_wallet_derive_env() {
 # ROADMAP-1.9.0+.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# FEAT-011 (partial) — wallet remote add / push / pull. Tests use a
+# local bare repo as the "remote" so no network or sibling `account`
+# repo is required.
+# ---------------------------------------------------------------------------
+
+setup_wallet_remote_env() {
+	setup_wallet_derive_env
+	# Make the wallet have a commit to push.
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	# Spin up a bare repo that will play the role of the remote.
+	export REMOTE_BARE="$BATS_TMPDIR/remote-bare-$BATS_TEST_NUMBER"
+	rm -rf "$REMOTE_BARE"
+	git init --bare -q -b main "$REMOTE_BARE"
+}
+
+@test "FEAT-011 — wallet remote add configures a git remote on the wallet repo" {
+	setup_wallet_remote_env
+	run "$BITCOIN_BIN" wallet remote add alice origin "$REMOTE_BARE"
+	[ "$status" -eq 0 ]
+	got="$(cd "$XDG_DATA_HOME/bitcoin/wallets/alice" && git remote get-url origin)"
+	[ "$got" = "$REMOTE_BARE" ]
+}
+
+@test "FEAT-011 — wallet push uploads the wallet's branch to the remote" {
+	setup_wallet_remote_env
+	"$BITCOIN_BIN" wallet remote add alice origin "$REMOTE_BARE" >/dev/null
+	run "$BITCOIN_BIN" wallet push alice
+	[ "$status" -eq 0 ]
+	# The bare repo should now hold the wallet's current branch.
+	(cd "$REMOTE_BARE" && git log --oneline | head -1) | grep -qE 'wallet derive: alice/0'
+}
+
+@test "FEAT-011 — wallet pull --rebase brings remote commits into the wallet" {
+	setup_wallet_remote_env
+	"$BITCOIN_BIN" wallet remote add alice origin "$REMOTE_BARE" >/dev/null
+	"$BITCOIN_BIN" wallet push alice >/dev/null
+	# Make a peer clone, add a commit, push it back.
+	peer="$BATS_TMPDIR/peer-clone-$BATS_TEST_NUMBER"
+	rm -rf "$peer"
+	git clone -q "$REMOTE_BARE" "$peer"
+	(
+		cd "$peer"
+		echo "from-peer" > peer-marker
+		git add peer-marker
+		git -c user.email=peer@bitcoin -c user.name=peer \
+		    -c commit.gpgsign=false \
+		    commit -qm "peer adds a marker"
+		git push -q origin main
+	)
+	# Wallet pulls the peer's commit.
+	run "$BITCOIN_BIN" wallet pull alice
+	[ "$status" -eq 0 ]
+	[ -f "$XDG_DATA_HOME/bitcoin/wallets/alice/peer-marker" ]
+}
+
+@test "FEAT-011 — wallet push exits non-zero when the wallet has no remote configured" {
+	setup_wallet_remote_env
+	# Don't `wallet remote add`. Push should fail clearly.
+	run "$BITCOIN_BIN" wallet push alice
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-011 — wallet remote add rejects a missing wallet" {
+	setup_wallet_env
+	run "$BITCOIN_BIN" wallet remote add no-such-wallet origin /tmp/whatever
+	[ "$status" -ne 0 ]
+}
+
 @test "FEAT-014 — wallet broadcast forwards stdin hex to the backend and prints the txid" {
 	setup_wallet_derive_env
 	# Stub backend broadcast: any POST to /api/tx returns this txid.
