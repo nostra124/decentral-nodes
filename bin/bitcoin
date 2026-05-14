@@ -666,6 +666,7 @@ command:psbt() {
 	shift 2>/dev/null || true
 	case "$sub" in
 		decode) psbt:decode "$@" ;;
+		encode) psbt:encode "$@" ;;
 		help)   psbt:help ;;
 		*)
 			error "unknown psbt subcommand: '$sub'"
@@ -682,9 +683,16 @@ psbt:help() {
 	  decode            read a PSBT (hex) from stdin and emit one line
 	                    per key-value record:
 	                      section=<n> type=<hex> key=<hex> value=<hex>
+	  encode            read TSV records (decode's output shape) from
+	                    stdin and emit a hex PSBT. Tracks section bumps
+	                    and inserts 0x00 terminators between sections;
+	                    one final 0x00 closes the last section. Empty
+	                    trailing sections aren't representable — the
+	                    encoded byte count equals (max section + 2)
+	                    terminators.
 	  help              this message
 
-	encode and sign are tracked in ROADMAP-1.8.0 (FEAT-008 remainder).
+	psbt sign lands in ROADMAP-1.10.0+ (FEAT-008 remainder).
 	ENDHELP
 }
 
@@ -751,6 +759,73 @@ psbt:decode() {
 		val="$PSBT_LAST_HEX"
 		printf 'section=%d\ttype=%s\tkey=%s\tvalue=%s\n' "$section" "$type" "$key" "$val"
 	done
+}
+
+# psbt:_emit_varint <n> — print the BIP-174 compact-size varint for
+# n as lowercase hex (no newline). Errors on n > 2^32.
+psbt:_emit_varint() {
+	local -i n=$1
+	if (( n < 0xfd )); then
+		printf '%02x' "$n"
+	elif (( n <= 0xffff )); then
+		printf 'fd%02x%02x' $((n & 0xff)) $(((n >> 8) & 0xff))
+	elif (( n <= 0xffffffff )); then
+		printf 'fe%02x%02x%02x%02x' \
+			$((n & 0xff)) $(((n >> 8) & 0xff)) \
+			$(((n >> 16) & 0xff)) $(((n >> 24) & 0xff))
+	else
+		error "psbt encode: varint > 2^32 not supported"
+		return 1
+	fi
+}
+
+psbt:encode() {
+	local -i cur_section=0
+	local out="70736274ff"   # magic + separator
+	local line f_sec f_type f_key f_val sec key val
+	local -i sec_i
+
+	while IFS=$'\t' read -r f_sec f_type f_key f_val; do
+		# Skip blank lines.
+		[ -z "$f_sec$f_type$f_key$f_val" ] && continue
+		# Each field is "name=value".
+		sec="${f_sec#section=}"
+		key="${f_key#key=}"
+		val="${f_val#value=}"
+		if [[ ! "$sec" =~ ^[0-9]+$ ]]; then
+			error "psbt encode: malformed section field '$f_sec'"
+			return 2
+		fi
+		sec_i=$sec
+		if (( sec_i < cur_section )); then
+			error "psbt encode: section field went backwards ($cur_section → $sec_i)"
+			return 3
+		fi
+		# Emit 0x00 terminators to skip ahead to the right section.
+		while (( cur_section < sec_i )); do
+			out+="00"
+			(( cur_section++ ))
+		done
+		if [[ ! "$key" =~ ^[0-9a-fA-F]*$ ]]; then
+			error "psbt encode: non-hex key '$key' at section $sec_i"
+			return 4
+		fi
+		if [[ ! "$val" =~ ^[0-9a-fA-F]*$ ]]; then
+			error "psbt encode: non-hex value at section $sec_i (len=${#val})"
+			return 5
+		fi
+		if (( ${#key} % 2 != 0 )) || (( ${#val} % 2 != 0 )); then
+			error "psbt encode: odd-length hex at section $sec_i"
+			return 6
+		fi
+		out+="$(psbt:_emit_varint $((${#key} / 2)))"
+		out+="${key,,}"
+		out+="$(psbt:_emit_varint $((${#val} / 2)))"
+		out+="${val,,}"
+	done
+	# One final 0x00 closes the last section.
+	out+="00"
+	printf '%s\n' "$out"
 }
 
 command:wallet() {

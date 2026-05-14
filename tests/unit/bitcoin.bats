@@ -836,6 +836,58 @@ psbt_vec1() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-008 (partial, 1.10.0) — psbt encode. Reverse of decode: read TSV
+# records on stdin and emit a hex PSBT. Empty trailing sections aren't
+# representable (decoded TSV doesn't record them); see the help text
+# for the limitation.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-008 — psbt encode emits the BIP-174 magic + final terminator for empty input" {
+	run bash -c "echo '' | '$BITCOIN_BIN' psbt encode"
+	[ "$status" -eq 0 ]
+	[ "$output" = "70736274ff00" ]
+}
+
+@test "FEAT-008 — psbt encode emits the expected wire format for a single-record global section" {
+	# Global section, type=00, key=00, value=deadbeef.
+	# Expected: magic(70736274ff) + varint(1)=01 + key(00)
+	#                            + varint(4)=04 + value(deadbeef)
+	#                            + section-close 00.
+	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=deadbeef\n' | '$BITCOIN_BIN' psbt encode"
+	[ "$status" -eq 0 ]
+	[ "$output" = "70736274ff010004deadbeef00" ]
+}
+
+@test "FEAT-008 — psbt encode bumps sections with 0x00 terminators" {
+	# Two records in different sections.
+	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=aa\nsection=1\ttype=00\tkey=00\tvalue=bb\n' \
+		| '$BITCOIN_BIN' psbt encode"
+	[ "$status" -eq 0 ]
+	# magic + (01 00 01 aa) + 00(close 0) + (01 00 01 bb) + 00(close 1)
+	[ "$output" = "70736274ff010001aa00010001bb00" ]
+}
+
+@test "FEAT-008 — psbt encode | psbt decode round-trips a TSV with records in every section" {
+	tsv=$(printf 'section=0\ttype=00\tkey=00\tvalue=aa\nsection=1\ttype=00\tkey=00\tvalue=bb\nsection=2\ttype=00\tkey=00\tvalue=cc\n')
+	encoded=$(printf '%s\n' "$tsv" | "$BITCOIN_BIN" psbt encode)
+	decoded=$(echo "$encoded" | "$BITCOIN_BIN" psbt decode)
+	# Decode emits trailing newline; tsv has none. Compare after
+	# trimming.
+	[ "$(printf '%s\n' "$tsv")" = "$(printf '%s\n' "$decoded")" ]
+}
+
+@test "FEAT-008 — psbt encode rejects non-hex values" {
+	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=notHex!\n' | '$BITCOIN_BIN' psbt encode"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-008 — psbt encode rejects a section field that goes backwards" {
+	run bash -c "printf 'section=1\ttype=00\tkey=00\tvalue=aa\nsection=0\ttype=00\tkey=00\tvalue=bb\n' \
+		| '$BITCOIN_BIN' psbt encode"
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`

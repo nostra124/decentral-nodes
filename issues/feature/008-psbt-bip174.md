@@ -22,10 +22,32 @@ Decode landed; encode + sign still open.
 - `share/doc/bitcoin/bips/bip-0174.mediawiki` vendored at the same
   pinned commit as the other BIPs.
 
-### Deferred to ROADMAP-1.8.0
+### 1.10.0 shipped — encode
 
-- `bitcoin psbt encode` — reverse of decode; build the wire format
-  from a small inputs/outputs description.
+`bitcoin psbt encode` is the reverse of decode. Reads TSV records
+on stdin (same shape decode emits — `section=<n> type=<hex>
+key=<hex> value=<hex>`), tracks section bumps and inserts the
+BIP-174 0x00 terminators between sections, emits one final 0x00
+to close the last section, and prints the result as hex.
+
+`psbt:_emit_varint` writes BIP-174 compact-size varints
+(1/3/5 bytes); decode's `_take_varint` is the reverse.
+
+6 new bats tests: empty input → just magic + terminator;
+single-record global → known hex; two-record two-section →
+known hex with section terminator in the middle; round-trip
+encode→decode→same-TSV; non-hex value rejected; backwards
+section field rejected. Total now: 86 bats tests.
+
+Known limitation: empty trailing sections aren't representable
+(decode's TSV doesn't record them either, so round-trip is
+asymmetric for PSBTs whose last record is followed by empty
+maps — like the BIP-174 "outputs are empty" test vector). A
+future `--sections N` flag (or explicit `section-end` markers
+in the TSV format) would close the asymmetry; not in scope here.
+
+### Deferred to ROADMAP-1.11.0+
+
 - `bitcoin psbt sign` — SIGHASH preimage + ECDSA over secp256k1.
   The dc-script for EC math is already in `bin/bitcoin` (see
   `$secp256k1`); the missing piece is the SIGHASH algorithm + the
