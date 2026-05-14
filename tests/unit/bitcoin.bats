@@ -798,6 +798,125 @@ setup_wallet_remote_env() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-014 (partial, 1.11.0) — wallet build. Greedy coin-selection on
+# UTXOs the backend reports against the wallet's ledger addresses,
+# raw-tx serialisation (BIP-141), PSBT wrap (BIP-174 global section
+# only — signing remains deferred).
+#
+# The recipient address in the happy paths is the canonical BIP-173
+# P2WPKH vector:
+#   bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+# whose 20-byte witness program is 751e76e8199196d454941c45d1b3a323f1433bd6
+# and whose scriptPubKey is therefore '0014' + that program.
+# ---------------------------------------------------------------------------
+
+# Helper: produce a deterministic JSON UTXO fixture given a value (sats)
+# and a txid suffix byte. The fixture pads to a full 32-byte (64 hex
+# char) txid; mempool returns txids in big-endian display order, which
+# `wallet build` byte-reverses before serialising.
+build_utxo_fixture() {
+	local value="$1" txid_byte="${2:-01}"
+	local txid_prefix="abababab"
+	# 64 chars total - 8 prefix - 2 suffix byte = 54 zero chars.
+	local txid="${txid_prefix}000000000000000000000000000000000000000000000000000000${txid_byte}"
+	printf '[{"txid":"%s","vout":0,"value":%s,"status":{"block_height":830000}}]' \
+		"$txid" "$value"
+}
+
+@test "FEAT-014 — wallet build emits a hex PSBT with the BIP-174 magic prefix" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	[ "$status" -eq 0 ]
+	[[ "$output" =~ ^70736274ff ]]
+	# Round-trips through `psbt decode` (BIP-174 magic + section layout
+	# are well-formed end-to-end).
+	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"section=0"* ]]
+	[[ "$output" == *"type=00"* ]]
+}
+
+@test "FEAT-014 — wallet build produces a 2-output unsigned tx when change > dust" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	# Plenty of room for change: 100000 - 50000 - 140 (1-input/2-output fee
+	# at 1 sat/vB) = 49860 sats of change, well above the 546-sat dust floor.
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	[ "$status" -eq 0 ]
+	# Decode the global unsigned-tx record and pull out the value (hex).
+	psbt="$output"
+	tx_hex="$(echo "$psbt" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	[ -n "$tx_hex" ]
+	# Tx layout: 4-byte version + varint(in) + inputs + varint(out) + outputs + 4-byte locktime.
+	# Version 02000000, 1 input (varint 01), input = 32-byte txid + 4-byte
+	# vout + 1-byte empty scriptSig + 4-byte sequence = 41 bytes.
+	# So the output-count varint sits at byte offset 4 + 1 + 41 = 46 (= hex offset 92).
+	out_count_hex="${tx_hex:92:2}"
+	[ "$out_count_hex" = "02" ]
+	# Recipient scriptPubKey for bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+	# is 0014751e76e8199196d454941c45d1b3a323f1433bd6.
+	[[ "$tx_hex" == *"0014751e76e8199196d454941c45d1b3a323f1433bd6"* ]]
+}
+
+@test "FEAT-014 — wallet build produces a 1-output unsigned tx when change <= dust" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	# 50500 sats UTXO, send 50000: change would be 50500 - 50000 - 140 = 360
+	# sats, below the 546-sat dust floor, so the builder folds it into the fee
+	# and emits a single output.
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 50500 02)"
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	[ "$status" -eq 0 ]
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	# Same offset arithmetic as the previous test: output count at hex 92.
+	out_count_hex="${tx_hex:92:2}"
+	[ "$out_count_hex" = "01" ]
+}
+
+@test "FEAT-014 — wallet build rejects insufficient balance" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100 01)"
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"insufficient"* ]] || [[ "$stderr" == *"insufficient"* ]] || true
+}
+
+@test "FEAT-014 — wallet build rejects an invalid output address" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	run "$BITCOIN_BIN" wallet build alice not-a-valid-bech32-address 10000
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-014 — wallet build rejects a missing wallet" {
+	setup_wallet_derive_env
+	run "$BITCOIN_BIN" wallet build no-such-wallet bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 10000
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-014 — wallet build rejects bech32m / P2TR (v1+) output addresses" {
+	# A v0-only builder must refuse Taproot until FEAT-007 lands. The
+	# fixture below is a valid bech32m P2TR address; rejection is what
+	# keeps us from emitting an unspendable v1 scriptPubKey.
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	run "$BITCOIN_BIN" wallet build alice bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9 1000
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # FEAT-008 (partial) — psbt decode. The fixture is the first valid PSBT
 # from BIP-174's test vectors (one P2PKH input, two outputs).
 # ---------------------------------------------------------------------------

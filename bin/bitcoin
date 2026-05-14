@@ -832,7 +832,7 @@ command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		new|ls|rm|help|derive|addresses|label|balance|broadcast|remote|push|pull) wallet:"$sub" "$@" ;;
+		new|ls|rm|help|derive|addresses|label|balance|broadcast|build|remote|push|pull) wallet:"$sub" "$@" ;;
 		*)
 			error "unknown wallet subcommand: '$sub'"
 			wallet:help >&2
@@ -861,6 +861,17 @@ wallet:help() {
 	                    set/clear the label on a derived address
 	  balance <name>    sum UTXO values for all derived addresses via the
 	                    active backend (skills/automerging.md §3b -- mempool)
+	  build <name> <addr> <sats> [--fee-rate sat/vB]
+	                    greedy-select wallet UTXOs, build an unsigned tx that
+	                    pays <sats> to <addr>, wrap as a PSBT, print as hex.
+	                    Default --fee-rate 1 sat/vB. P2WPKH/P2WSH outputs only.
+	  broadcast <name>  POST raw-tx hex from stdin to the active backend
+	  remote add <name> <remote> <url>
+	                    set/replace a git remote on the wallet repo
+	  push <name> [<remote>]
+	                    git push the wallet (default remote: origin)
+	  pull <name> [<remote>]
+	                    git pull --rebase the wallet (default remote: origin)
 	  help              this message
 
 	A wallet is a git repository. The seed phrase is held by 'secret',
@@ -1019,6 +1030,276 @@ wallet:broadcast() {
 	# Normalise to lowercase.
 	hex="${hex,,}"
 	backend:broadcast "$hex"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-014 (partial, 1.11.0): wallet build. Walk the addresses ledger,
+# query the active backend for UTXOs at each, greedy-select (largest
+# first) until input total covers <sats> + estimated fee, serialise a
+# BIP-141 unsigned tx, wrap in a single-record PSBT and print as hex.
+#
+# Signing and end-to-end send remain deferred to ROADMAP-1.12.0+.
+# ---------------------------------------------------------------------------
+
+# Reverse a hex string byte-by-byte. Used for little-endian txid + vout
+# serialisation in the raw tx body.
+wallet:_reverse_hex() {
+	local hex="$1"
+	local out="" i
+	for ((i=${#hex}-2; i>=0; i-=2)); do
+		out+="${hex:i:2}"
+	done
+	printf '%s' "$out"
+}
+
+# Encode a non-negative integer as 4-byte little-endian hex.
+wallet:_le32() {
+	local -i n=$1
+	printf '%02x%02x%02x%02x' \
+		$((n & 0xff)) \
+		$(((n >> 8) & 0xff)) \
+		$(((n >> 16) & 0xff)) \
+		$(((n >> 24) & 0xff))
+}
+
+# Encode a non-negative integer as 8-byte little-endian hex. Bitcoin
+# satoshi values fit in 51 bits (21M * 1e8) so 63-bit bash arithmetic
+# is sufficient — no need for arbitrary-precision shells here.
+wallet:_le64() {
+	local -i n=$1
+	printf '%02x%02x%02x%02x%02x%02x%02x%02x' \
+		$((n & 0xff)) \
+		$(((n >> 8) & 0xff)) \
+		$(((n >> 16) & 0xff)) \
+		$(((n >> 24) & 0xff)) \
+		$(((n >> 32) & 0xff)) \
+		$(((n >> 40) & 0xff)) \
+		$(((n >> 48) & 0xff)) \
+		$(((n >> 56) & 0xff))
+}
+
+# Convert a v0 segwit bech32 address (bc1q.../tb1q...) to its
+# scriptPubKey hex (00 <len> <program>). Returns non-zero on a bad
+# checksum, wrong HRP, non-v0 witness version, or wrong program length.
+# v1+ (P2TR / bech32m) is intentionally rejected here; signing those
+# outputs is FEAT-007, not ROADMAP-1.11.0.
+wallet:_address_to_script() {
+	local addr="$1"
+	if [ -z "$addr" ]; then
+		return 1
+	fi
+	local out
+	if ! out="$(command:bech32-decode "$addr" 2>/dev/null)"; then
+		# Fall through to bech32m so we can emit a clearer "v1+ not
+		# supported" error rather than a cryptic checksum failure.
+		if ! out="$(command:bech32-decode -m "$addr" 2>/dev/null)"; then
+			return 2
+		fi
+	fi
+	local -a lines
+	mapfile -t lines <<< "$out"
+	if (( ${#lines[@]} < 3 )); then
+		return 3
+	fi
+	local hrp="${lines[0]}" version="${lines[1]}"
+	if [[ ! "$hrp" =~ ^(bc|tb)$ ]]; then
+		return 4
+	fi
+	if [[ ! "$version" =~ ^[0-9]+$ ]]; then
+		return 5
+	fi
+	if (( version != 0 )); then
+		return 6
+	fi
+	local prog_decimals
+	if ! prog_decimals="$(
+		for ((i=2; i<${#lines[@]}; i++)); do echo "${lines[i]}"; done | convertbits 5 8 0
+	)"; then
+		return 7
+	fi
+	local prog="" b
+	for b in $prog_decimals; do
+		prog+="$(printf '%02x' "$b")"
+	done
+	local -i prog_len=$(( ${#prog} / 2 ))
+	if (( prog_len != 20 && prog_len != 32 )); then
+		return 8
+	fi
+	printf '00%02x%s' "$prog_len" "$prog"
+}
+
+wallet:build() {
+	local name="" addr="" sats=""
+	local -i fee_rate=1
+	while [ $# -gt 0 ]; do
+		case "${1:-}" in
+			--fee-rate)
+				if [ -z "${2:-}" ]; then
+					error "wallet build: --fee-rate requires an argument"
+					return 2
+				fi
+				if [[ ! "$2" =~ ^[0-9]+$ ]]; then
+					error "wallet build: --fee-rate must be a positive integer (sat/vB), got '$2'"
+					return 2
+				fi
+				fee_rate="$2"
+				shift 2
+				;;
+			--) shift; break ;;
+			-*)
+				error "wallet build: unknown flag '$1'"
+				return 2
+				;;
+			*)
+				if [ -z "$name" ]; then name="$1"
+				elif [ -z "$addr" ]; then addr="$1"
+				elif [ -z "$sats" ]; then sats="$1"
+				else
+					error "wallet build: too many positional arguments (saw '$1')"
+					return 2
+				fi
+				shift
+				;;
+		esac
+	done
+	if [ -z "$name" ] || [ -z "$addr" ] || [ -z "$sats" ]; then
+		error "wallet build: usage: wallet build <name> <addr> <sats> [--fee-rate sat/vB]"
+		return 2
+	fi
+	if [[ ! "$sats" =~ ^[1-9][0-9]*$ ]]; then
+		error "wallet build: <sats> must be a positive integer, got '$sats'"
+		return 3
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet build: no such wallet '$name' at $path"
+		return 4
+	fi
+	local ledger="$path/addresses"
+	if [ ! -s "$ledger" ]; then
+		error "wallet build: wallet '$name' has no derived addresses (run 'wallet derive')"
+		return 5
+	fi
+
+	local out_script
+	if ! out_script="$(wallet:_address_to_script "$addr")"; then
+		error "wallet build: invalid output address '$addr' (only v0 P2WPKH/P2WSH supported in this release)"
+		return 6
+	fi
+
+	# Collect UTXOs from every address in the wallet's ledger. The
+	# backend returns a JSON array per address; we flatten via jq.
+	local -a utxos_txid=() utxos_vout=() utxos_value=()
+	local _idx addr_ledger _label utxo_json txid vout value
+	while IFS=$'\t' read -r _idx addr_ledger _label; do
+		[ -z "$addr_ledger" ] && continue
+		if ! utxo_json="$(backend:get-address-utxos "$addr_ledger" 2>/dev/null)"; then
+			warn "wallet build: backend get-utxos failed for $addr_ledger (continuing)"
+			continue
+		fi
+		while IFS=$'\t' read -r txid vout value; do
+			[ -z "$txid" ] && continue
+			utxos_txid+=( "$txid" )
+			utxos_vout+=( "$vout" )
+			utxos_value+=( "$value" )
+		done < <(printf '%s' "$utxo_json" | jq -r '.[] | [.txid, .vout, .value] | @tsv' 2>/dev/null)
+	done < "$ledger"
+
+	if (( ${#utxos_txid[@]} == 0 )); then
+		error "wallet build: no UTXOs available for wallet '$name'"
+		return 7
+	fi
+
+	# Sort UTXO indexes by value descending (largest-first selection).
+	local -a order
+	mapfile -t order < <(
+		local i
+		for ((i=0; i<${#utxos_value[@]}; i++)); do
+			printf '%d\t%s\n' "${utxos_value[i]}" "$i"
+		done | sort -k1,1 -nr | cut -f2
+	)
+
+	# Greedy-select. Fee estimate assumes P2WPKH inputs (~68 vbytes
+	# each, post-segwit-discount) and 2 outputs (~31 vbytes each) +
+	# 10 vbytes of overhead — conservative so we don't fall short
+	# when change is added. This is the educational simple-fee model;
+	# RBF / branch-and-bound coin selection are out of scope.
+	local -a sel=()
+	local -i selected_total=0 n_in=0 fee_estimate=0 needed=$sats ix
+	for ix in "${order[@]}"; do
+		sel+=( "$ix" )
+		(( selected_total += utxos_value[ix] ))
+		(( n_in++ ))
+		(( fee_estimate = (10 + 68 * n_in + 31 * 2) * fee_rate ))
+		(( needed = sats + fee_estimate ))
+		(( selected_total >= needed )) && break
+	done
+	if (( selected_total < needed )); then
+		error "wallet build: insufficient balance: have $selected_total sats, need $needed (sats=$sats, fee~$fee_estimate at $fee_rate sat/vB)"
+		return 8
+	fi
+
+	# Change handling. Dust threshold for P2WPKH is ~294 sats at 3
+	# sat/vB; we use 546 (the legacy P2PKH dust limit) as a generous
+	# floor — anything smaller gets folded into the fee instead.
+	local -i dust=546 change=0 n_out=1
+	local change_script=""
+	(( change = selected_total - sats - fee_estimate ))
+	if (( change > dust )); then
+		local change_addr
+		if ! change_addr="$(wallet:derive "$name" 2>/dev/null)"; then
+			error "wallet build: failed to derive change address for '$name'"
+			return 9
+		fi
+		# wallet derive may emit other lines (info etc. go to stderr,
+		# but be defensive); take the last line as the address.
+		change_addr="$(printf '%s\n' "$change_addr" | tail -n1)"
+		if ! change_script="$(wallet:_address_to_script "$change_addr")"; then
+			error "wallet build: failed to compute change scriptPubKey for '$change_addr'"
+			return 10
+		fi
+		n_out=2
+	fi
+
+	# --- serialise the BIP-141 unsigned transaction -----------------
+	local raw_tx=""
+	raw_tx+="02000000"                              # version (4 B LE)
+	raw_tx+="$(psbt:_emit_varint "$n_in")"          # input count
+	for ix in "${sel[@]}"; do
+		txid="${utxos_txid[ix]}"
+		vout="${utxos_vout[ix]}"
+		raw_tx+="$(wallet:_reverse_hex "$txid")"    # 32-B prev_txid (LE)
+		raw_tx+="$(wallet:_le32 "$vout")"           #  4-B prev_vout (LE)
+		raw_tx+="00"                                # empty scriptSig
+		raw_tx+="feffffff"                          # sequence 0xfffffffe (RBF off, locktime on)
+	done
+	raw_tx+="$(psbt:_emit_varint "$n_out")"         # output count
+	raw_tx+="$(wallet:_le64 "$sats")"               # recipient value
+	raw_tx+="$(psbt:_emit_varint $(( ${#out_script} / 2 )))"
+	raw_tx+="$out_script"
+	if (( n_out == 2 )); then
+		raw_tx+="$(wallet:_le64 "$change")"
+		raw_tx+="$(psbt:_emit_varint $(( ${#change_script} / 2 )))"
+		raw_tx+="$change_script"
+	fi
+	raw_tx+="00000000"                              # locktime
+
+	# --- wrap as a PSBT ---------------------------------------------
+	# Magic + global UNSIGNED_TX record + section terminator, then one
+	# empty terminator per input map and per output map. The psbt
+	# encode TSV interface can't represent purely-empty trailing
+	# sections (see psbt:help), so we emit the wire format directly.
+	local psbt="70736274ff"
+	psbt+="01"                                      # global keylen=1
+	psbt+="00"                                      # key = PSBT_GLOBAL_UNSIGNED_TX
+	psbt+="$(psbt:_emit_varint $(( ${#raw_tx} / 2 )))"
+	psbt+="$raw_tx"
+	psbt+="00"                                      # close global
+	local i
+	for ((i=0; i<n_in; i++));  do psbt+="00"; done  # empty input maps
+	for ((i=0; i<n_out; i++)); do psbt+="00"; done  # empty output maps
+
+	printf '%s\n' "$psbt"
 }
 
 # ---------------------------------------------------------------------------
