@@ -757,7 +757,7 @@ command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		new|ls|rm|help|derive|addresses|label|balance|broadcast) wallet:"$sub" "$@" ;;
+		new|ls|rm|help|derive|addresses|label|balance|broadcast|remote|push|pull) wallet:"$sub" "$@" ;;
 		*)
 			error "unknown wallet subcommand: '$sub'"
 			wallet:help >&2
@@ -944,6 +944,95 @@ wallet:broadcast() {
 	# Normalise to lowercase.
 	hex="${hex,,}"
 	backend:broadcast "$hex"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-011 (partial, 1.9.0): wallet remote / push / pull. Thin
+# wrappers around git's own remote machinery so a wallet repo can move
+# between machines (the cold-storage flow). The original FEAT-011 spec
+# routes through `account` to resolve SSH endpoints — that's deferred;
+# the URL is taken directly here. The custom merge resolvers
+# (addresses-union, psbts-last-writer-wins, descriptors-conflict-as-
+# error) are also deferred.
+# ---------------------------------------------------------------------------
+
+wallet:remote() {
+	local action="${1:-}"
+	shift 2>/dev/null || true
+	if [ "$action" != "add" ]; then
+		error "wallet remote: only 'add' is supported in this release (sub-actions deferred)"
+		return 2
+	fi
+	local name="${1:-}" rname="${2:-}" url="${3:-}"
+	if [ -z "$name" ] || [ -z "$rname" ] || [ -z "$url" ]; then
+		error "wallet remote add: usage: wallet remote add <wallet> <remote-name> <url>"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path/.git" ]; then
+		error "wallet remote add: no such wallet '$name' at $path"
+		return 3
+	fi
+	(
+		cd "$path"
+		# Replace existing remote with the new URL idempotently.
+		if git remote get-url "$rname" >/dev/null 2>&1; then
+			git remote set-url "$rname" "$url"
+		else
+			git remote add "$rname" "$url"
+		fi
+	) || { error "wallet remote add: git remote configuration failed"; return 4; }
+	info "wallet '$name' remote '$rname' -> $url"
+}
+
+wallet:push() {
+	local name="${1:-}" rname="${2:-origin}"
+	if [ -z "$name" ]; then
+		error "wallet push: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path/.git" ]; then
+		error "wallet push: no such wallet '$name' at $path"
+		return 3
+	fi
+	if ! ( cd "$path" && git remote get-url "$rname" >/dev/null 2>&1 ); then
+		error "wallet push: '$name' has no '$rname' remote configured (use 'wallet remote add')"
+		return 4
+	fi
+	(
+		cd "$path"
+		local branch
+		branch="$(git symbolic-ref --short HEAD 2>/dev/null)" || branch=main
+		git push -q "$rname" "$branch"
+	) || { error "wallet push: git push failed"; return 5; }
+	info "wallet '$name' pushed to '$rname'"
+}
+
+wallet:pull() {
+	local name="${1:-}" rname="${2:-origin}"
+	if [ -z "$name" ]; then
+		error "wallet pull: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path/.git" ]; then
+		error "wallet pull: no such wallet '$name' at $path"
+		return 3
+	fi
+	if ! ( cd "$path" && git remote get-url "$rname" >/dev/null 2>&1 ); then
+		error "wallet pull: '$name' has no '$rname' remote configured (use 'wallet remote add')"
+		return 4
+	fi
+	(
+		cd "$path"
+		local branch
+		branch="$(git symbolic-ref --short HEAD 2>/dev/null)" || branch=main
+		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+		    -c commit.gpgsign=false \
+			pull --rebase -q "$rname" "$branch"
+	) || { error "wallet pull: git pull failed"; return 5; }
+	info "wallet '$name' pulled from '$rname'"
 }
 
 wallet:balance() {

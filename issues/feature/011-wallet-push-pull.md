@@ -5,6 +5,44 @@ priority: medium
 status: open
 ---
 
+## Progress (1.9.0 shipped — push/pull/remote-add only)
+
+Three remote-management verbs landed:
+
+- `bitcoin wallet remote add <wallet> <remote-name> <url>` —
+  configures a git remote on the wallet repo (idempotent: replaces
+  the URL if `<remote-name>` already exists).
+- `bitcoin wallet push <wallet> [<remote>]` — `git push` the
+  wallet's current branch to `<remote>` (default `origin`).
+- `bitcoin wallet pull <wallet> [<remote>]` — `git pull --rebase`
+  from `<remote>`, with the same `commit.gpgsign=false` hygiene
+  the rest of the wallet code uses.
+
+5 new bats tests use a local bare git repo as the "remote" — no
+network or sibling tooling needed in the test sandbox. Every
+failure path emits an `error` line per `skills/logging.md` §4.
+
+### Deferred
+
+- **`account` integration.** Original spec routed remote URLs
+  through `bitcoin account get-ssh <name>`. This release takes
+  the URL directly so the verbs work without the sibling
+  package. A follow-up FEAT can wrap `account` once it's
+  installable in the dev sandbox; the existing surface
+  (`wallet remote add <wallet> <name> <url>`) is forward-
+  compatible with `<url>` becoming an opt-out flag.
+- **`wallet sync <wallet>`.** Pull-then-push to every configured
+  remote. Trivial wrapper over the verbs that shipped, but
+  deferred so this milestone stays focused on the primitives.
+- **Custom merge resolvers.** The original spec called for
+  `addresses`-union, `psbts/<id>` last-writer-wins, and
+  `descriptors` as a hard-error conflict. These are useful
+  *policy* layered on top of the *plumbing* this release ships.
+  A follow-up FEAT can add a `.gitattributes` + custom merge
+  driver.
+- **`account` declared in `.rpk/depends/`.** Held until the
+  account-resolved-SSH path actually lands.
+
 # `bitcoin wallet push` / `pull` between accounts
 
 ## Description

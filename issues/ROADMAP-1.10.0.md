@@ -1,11 +1,12 @@
-# Roadmap — 1.9.0 (minor)
+# Roadmap — 1.10.0 (minor)
 
 `psbt encode` + `wallet build`. Mirror of 1.7.0's psbt decode plus
 the unsigned-transaction builder. After this release the wallet
 can construct a spend that's ready to be signed offline.
 
-**Was bundled into the previous 1.8.0 draft.** Split out when
-1.8.0 was tightened to `wallet broadcast` only.
+**Was the previous ROADMAP-1.9.0.** Pushed forward when 1.9.0 was
+re-scoped to FEAT-011 partial (wallet push/pull) per the
+"continue with the smallest credible win" thread.
 
 Depends on:
 - 1.5.0 (FEAT-012 backend — `get-address-utxos` for coin
