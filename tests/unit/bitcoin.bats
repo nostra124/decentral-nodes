@@ -9,6 +9,10 @@
 # tests/vectors/bip-*.t (gated on FEAT-006's bitcoin.sh module
 # being sourceable).
 
+# 1.5.0 introduced `run --separate-stderr`, which the 1.12.0 fee-
+# fallback test relies on to assert the warn line lands on stderr.
+bats_require_minimum_version 1.5.0
+
 setup() {
 	BATS_TMPDIR=${BATS_TMPDIR:-$(mktemp -d)}
 	HOME="$(mktemp -d "$BATS_TMPDIR/home.XXXXXX")"
@@ -554,6 +558,65 @@ curl_fixture() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-012 (extend, 1.12.0) — backend estimate-fee. Fourth verb on the
+# backend abstraction: returns the recommended sat/vB rate for a given
+# confirmation target. Mempool implementation reads
+# /api/v1/fees/recommended; out-of-bucket targets clamp to the nearest
+# named bucket rather than erroring.
+# ---------------------------------------------------------------------------
+
+# Helper: standard mempool fee-bucket response, used in every
+# estimate-fee test below. Distinct values per bucket let us assert
+# which one the verb selected without depending on the others.
+mempool_fees_fixture() {
+	echo '{"fastestFee":42,"halfHourFee":21,"hourFee":11,"economyFee":4,"minimumFee":1}'
+}
+
+@test "FEAT-012 — backend estimate-fee defaults to the half-hour bucket" {
+	setup_backend_env
+	curl_fixture "https://mempool.space/api/v1/fees/recommended" "$(mempool_fees_fixture)"
+	run "$BITCOIN_BIN" backend estimate-fee
+	[ "$status" -eq 0 ]
+	[ "$output" = "21" ]
+}
+
+@test "FEAT-012 — backend estimate-fee target-block selects the right bucket" {
+	setup_backend_env
+	curl_fixture "https://mempool.space/api/v1/fees/recommended" "$(mempool_fees_fixture)"
+	# 1 → fastestFee=42, 6 → hourFee=11, 144 → economyFee=4, 1000 → minimumFee=1.
+	run "$BITCOIN_BIN" backend estimate-fee 1;    [ "$status" -eq 0 ]; [ "$output" = "42" ]
+	run "$BITCOIN_BIN" backend estimate-fee 6;    [ "$status" -eq 0 ]; [ "$output" = "11" ]
+	run "$BITCOIN_BIN" backend estimate-fee 144;  [ "$status" -eq 0 ]; [ "$output" = "4" ]
+	run "$BITCOIN_BIN" backend estimate-fee 1000; [ "$status" -eq 0 ]; [ "$output" = "1" ]
+}
+
+@test "FEAT-012 — backend estimate-fee rejects a non-integer target" {
+	setup_backend_env
+	run "$BITCOIN_BIN" backend estimate-fee abc
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-012 — backend estimate-fee emits an error when curl fails" {
+	setup_backend_env
+	# No fixture → stub-curl exits 22 → verb returns non-zero.
+	run "$BITCOIN_BIN" backend estimate-fee
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-012 — backend estimate-fee bitcoind stub returns 'not implemented'" {
+	setup_backend_env
+	"$BITCOIN_BIN" backend set bitcoind >/dev/null
+	run "$BITCOIN_BIN" backend estimate-fee
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-012 — bitcoin help backend mentions estimate-fee" {
+	run "$BITCOIN_BIN" help backend
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"estimate-fee"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # FEAT-025 follow-up — libexec/bitcoin/mnemonic-to-seed (a piece of
 # the option-1 vendoring that this milestone landed to unblock the
 # wallet's HD-derivation pipeline).
@@ -828,7 +891,7 @@ build_utxo_fixture() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	[[ "$output" =~ ^70736274ff ]]
 	# Round-trips through `psbt decode` (BIP-174 magic + section layout
@@ -845,8 +908,10 @@ build_utxo_fixture() {
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	# Plenty of room for change: 100000 - 50000 - 140 (1-input/2-output fee
 	# at 1 sat/vB) = 49860 sats of change, well above the 546-sat dust floor.
+	# --fee-rate 1 pins the rate to keep the fee-arithmetic comment honest;
+	# the default-path (estimate-fee) is exercised separately below.
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	# Decode the global unsigned-tx record and pull out the value (hex).
 	psbt="$output"
@@ -869,9 +934,9 @@ build_utxo_fixture() {
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	# 50500 sats UTXO, send 50000: change would be 50500 - 50000 - 140 = 360
 	# sats, below the 546-sat dust floor, so the builder folds it into the fee
-	# and emits a single output.
+	# and emits a single output. --fee-rate 1 pins the rate.
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 50500 02)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
 	# Same offset arithmetic as the previous test: output count at hex 92.
@@ -914,6 +979,70 @@ build_utxo_fixture() {
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	run "$BITCOIN_BIN" wallet build alice bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9 1000
 	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-014 / FEAT-012 (1.12.0) — wallet build picks up the backend's
+# estimate-fee answer when --fee-rate isn't supplied; --fee-rate still
+# overrides; backend failure falls back to 1 sat/vB with a warn.
+#
+# The change-output value pins the fee rate the builder actually used,
+# since change = utxo - sats - (vsize * fee_rate). With one 100000-sat
+# UTXO, sats=50000, and the post-segwit-discount vsize estimate of
+# 10 + 68·1 + 31·2 = 140 vbytes:
+#
+#   fee_rate=1   → fee= 140, change=49860 → LE hex c4c20000...
+#   fee_rate=10  → fee=1400, change=48600 → LE hex d8bd0000...
+# ---------------------------------------------------------------------------
+
+@test "FEAT-014 — wallet build reads the backend's fee estimate when --fee-rate is omitted" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	# 10 sat/vB recommended for the half-hour bucket.
+	curl_fixture "https://mempool.space/api/v1/fees/recommended" \
+		'{"fastestFee":50,"halfHourFee":10,"hourFee":5,"economyFee":2,"minimumFee":1}'
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	[ "$status" -eq 0 ]
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	# Change-output LE-encoded value sits right after the recipient
+	# output: version(8) + n_in(2) + 1 input(82) + n_out(2) + recipient
+	# value(16) + push 22 (2) + 22-byte scriptPubKey(44) = 156 hex chars.
+	# So the change value is at offset 156, length 16.
+	change_le="${tx_hex:156:16}"
+	[ "$change_le" = "d8bd000000000000" ]
+}
+
+@test "FEAT-014 — wallet build --fee-rate still overrides the backend estimate" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	# Backend would say 10 sat/vB; explicit --fee-rate 1 wins.
+	curl_fixture "https://mempool.space/api/v1/fees/recommended" \
+		'{"fastestFee":50,"halfHourFee":10,"hourFee":5,"economyFee":2,"minimumFee":1}'
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	[ "$status" -eq 0 ]
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	change_le="${tx_hex:156:16}"
+	[ "$change_le" = "c4c2000000000000" ]
+}
+
+@test "FEAT-014 — wallet build falls back to 1 sat/vB when the backend estimate is unavailable" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	# Deliberately do NOT register the /api/v1/fees/recommended fixture —
+	# the curl stub will exit 22 and the builder must fall back to 1.
+	# --separate-stderr keeps the fallback warn off the PSBT we're parsing.
+	run --separate-stderr "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	[ "$status" -eq 0 ]
+	[[ "$stderr" == *"falling back to 1 sat/vB"* ]]
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	change_le="${tx_hex:156:16}"
+	[ "$change_le" = "c4c2000000000000" ]
 }
 
 # ---------------------------------------------------------------------------

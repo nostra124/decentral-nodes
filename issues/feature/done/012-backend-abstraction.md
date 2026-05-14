@@ -26,6 +26,24 @@ implemented" error so the dispatcher is coherent.
   curl-failure path + help. Tests stub `curl` via PATH so no
   network is touched in CI.
 
+### Extended in 1.12.0 — fourth verb `estimate-fee`
+
+- `bitcoin backend estimate-fee [<target-blocks>]` returns sat/vB
+  for the requested confirmation target. Mempool implementation
+  reads `/api/v1/fees/recommended`; targets clamp to the nearest
+  named bucket (1 → `fastestFee`, 3 → `halfHourFee` (default),
+  6 → `hourFee`, 144 → `economyFee`, else → `minimumFee`).
+- bitcoind / blockstream stubs return the same "not implemented"
+  error as the other verbs, keeping the dispatcher coherent.
+- 6 new bats tests: default bucket, target selection across all
+  five buckets, non-integer rejection, curl-failure path, the
+  bitcoind-stub path, and the help-line check. Total backend
+  bats coverage now 14.
+- `wallet build` (FEAT-014) reads this verb when `--fee-rate` is
+  not supplied, falling back to 1 sat/vB with a `warn` on any
+  failure (network, parse, stub). See that issue for the wiring
+  test coverage.
+
 ### Shipped alongside (FEAT-025 follow-up partial)
 
 - `libexec/bitcoin/mnemonic-to-seed` — the BIP-39 PBKDF2 plugin
