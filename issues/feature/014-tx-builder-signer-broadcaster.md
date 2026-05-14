@@ -5,29 +5,54 @@ priority: high
 status: open
 ---
 
-## Progress (1.8.0 shipped — `wallet broadcast` only)
+## Progress (1.11.0 shipped — `wallet broadcast` + `wallet build`)
 
-`bitcoin wallet broadcast <name>` reads raw transaction hex from
-stdin, validates it as hex, and forwards to the active backend's
-broadcast verb (FEAT-012). Returns the txid the backend
-produced. Three bats tests cover happy path, empty stdin, and
-non-hex rejection.
+`bitcoin wallet broadcast <name>` (1.8.0) reads raw transaction
+hex from stdin, validates it as hex, and forwards to the active
+backend's broadcast verb (FEAT-012). Returns the txid the backend
+produced.
 
-The `<name>` argument is currently a docs hint — per-wallet
-backend selection is still deferred from FEAT-012, so the active
-backend is global. Once per-wallet backend lands, this verb will
-resolve to the wallet's chosen backend without an interface
-change.
+`bitcoin wallet build <name> <addr> <sats> [--fee-rate sat/vB]`
+(1.11.0) walks the wallet's addresses ledger, queries the active
+backend for UTXOs at each address, greedy-selects (largest-first)
+until input total covers `<sats>` + estimated fee, serialises the
+BIP-141 unsigned transaction, wraps it as a single-record PSBT
+(global `PSBT_GLOBAL_UNSIGNED_TX` only) and prints the hex.
 
-### Deferred (ROADMAP-1.9.0 and beyond)
+The fee estimate is the educational simple model: vsize ≈ 10 +
+68·n_in + 31·n_out at the supplied (default 1) sat/vB rate. If
+the computed change exceeds the 546-sat dust floor a new change
+address is derived from the wallet (committed to the ledger like
+any normal derivation) and a second output is added; otherwise
+the dust is folded into the fee and a single output is emitted.
 
-- `wallet build <name> <addr> <sats>` — coin selection + tx
-  serialisation + PSBT-wrap. ROADMAP-1.9.0.
+Only v0 segwit outputs are supported (P2WPKH 20-byte and P2WSH
+32-byte witness programs). Bech32m / P2TR (v1+) is explicitly
+rejected — signing those is FEAT-007 and not in scope here.
+
+Seven bats tests cover: PSBT magic + decode round-trip, change-
+output happy path, dust-absorbed single-output happy path,
+insufficient-balance rejection, invalid-address rejection, no-
+such-wallet rejection, and P2TR (v1) rejection. The 1.8.0
+`wallet broadcast` tests (3) remain.
+
+The `<name>` argument to `broadcast` is still a docs hint —
+per-wallet backend selection is deferred from FEAT-012, so the
+active backend is global. `wallet build` reads per-wallet ledger
+state (addresses + git-committed change derivation) but uses the
+global backend for UTXO queries; both verbs will resolve to the
+wallet's chosen backend without an interface change once the
+per-wallet backend lands.
+
+### Deferred (ROADMAP-1.12.0 and beyond)
+
 - `wallet sign <name>` — SIGHASH preimage + ECDSA via the
-  secp256k1 dc-script. ROADMAP-1.10.0+ (paired with FEAT-008
-  `psbt sign`).
+  secp256k1 dc-script. Paired with FEAT-008 `psbt sign`.
 - `wallet send <name> <addr> <sats>` — composes build + sign +
-  broadcast. ROADMAP-1.10.0+.
+  broadcast.
+- Taproot signing (FEAT-007) and a v1+ address path for `build`.
+- Fee estimation via `backend estimate-fee` (currently a fixed
+  `--fee-rate` flag).
 
 # Transaction builder, signer, and broadcaster
 
