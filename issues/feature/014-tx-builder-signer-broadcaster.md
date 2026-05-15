@@ -5,7 +5,7 @@ priority: high
 status: open
 ---
 
-## Progress (1.12.0 shipped — `broadcast` + `build` + `build` reads `backend estimate-fee`)
+## Progress (1.13.0 shipped — `broadcast`, `build`, `build` emits WITNESS_UTXO; psbt sign paired)
 
 `bitcoin wallet broadcast <name>` (1.8.0) reads raw transaction
 hex from stdin, validates it as hex, and forwards to the active
@@ -50,6 +50,16 @@ expected `warn` line on stderr. The pre-1.12.0 happy-path tests
 were tightened to pass `--fee-rate 1` explicitly so the fee-math
 comments inside them stay honest under the new default.
 
+**1.13.0** teaches `wallet build` to emit a
+`PSBT_IN_WITNESS_UTXO` record (BIP-174 type 0x01) per input,
+serialised as 8-byte LE amount + varint-prefixed scriptPubKey
+(recomputed from the input address via `wallet:_address_to_script`).
+That gives FEAT-008's new `psbt sign` everything it needs for
+BIP-143 sighash without re-querying the backend. One new bats
+case asserts the record is present and matches the expected
+witness-program bytes for the canonical abandon-mnemonic's
+m/84h/0h/0h/0/0 address.
+
 The `<name>` argument to `broadcast` is still a docs hint —
 per-wallet backend selection is deferred from FEAT-012, so the
 active backend is global. `wallet build` reads per-wallet ledger
@@ -58,15 +68,18 @@ global backend for UTXO queries; both verbs will resolve to the
 wallet's chosen backend without an interface change once the
 per-wallet backend lands.
 
-### Deferred (ROADMAP-1.13.0 and beyond)
+### Deferred (ROADMAP-1.14.0 and beyond)
 
-- `wallet sign <name>` — SIGHASH preimage + ECDSA via the
-  secp256k1 dc-script. Paired with FEAT-008 `psbt sign`.
+- `wallet sign <name>` — wallet integration that derives private
+  keys from the seed and calls `psbt sign` per matched input. The
+  primitive itself shipped in 1.13.0 as `bitcoin psbt sign`.
 - `wallet send <name> <addr> <sats>` — composes build + sign +
   broadcast.
 - Taproot signing (FEAT-007) and a v1+ address path for `build`.
 - ~~Fee estimation via `backend estimate-fee`~~ — shipped in
   1.12.0.
+- ~~PSBT_IN_WITNESS_UTXO emission in `wallet build`~~ — shipped
+  in 1.13.0 (prerequisite for `psbt sign`).
 
 # Transaction builder, signer, and broadcaster
 

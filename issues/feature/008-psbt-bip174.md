@@ -46,12 +46,64 @@ maps — like the BIP-174 "outputs are empty" test vector). A
 future `--sections N` flag (or explicit `section-end` markers
 in the TSV format) would close the asymmetry; not in scope here.
 
-### Deferred to ROADMAP-1.11.0+
+### 1.13.0 shipped — sign (v0 P2WPKH only)
 
-- `bitcoin psbt sign` — SIGHASH preimage + ECDSA over secp256k1.
-  The dc-script for EC math is already in `bin/bitcoin` (see
-  `$secp256k1`); the missing piece is the SIGHASH algorithm + the
-  signing-key plumbing.
+`bitcoin psbt sign <privkey-hex>` reads a PSBT (hex) on stdin and
+a 32-byte private key on argv, then for each input whose
+`PSBT_IN_WITNESS_UTXO` record's scriptPubKey is v0 P2WPKH of
+HASH160(pubkey-of-key) it:
+
+1. Builds the BIP-143 sighash preimage (`nVersion || hashPrevouts
+   || hashSequence || outpoint || scriptCode || amount ||
+   nSequence || hashOutputs || nLocktime || sighash_type`),
+   where `scriptCode = 1976a914<hash160>88ac` per BIP-143 §P2WPKH.
+2. Double-SHA-256's the preimage to get the sighash.
+3. Signs the sighash via `openssl pkeyutl -sign` against a
+   hand-built minimal-DER ECPrivateKey carrying the raw 32-byte
+   secret (no precomputed PEM material).
+4. BIP-66 low-S canonicalises the DER signature (if `s > n/2`,
+   replaces `s` with `n - s` and re-encodes). dc handles the
+   big-integer arithmetic; line-continuation backslashes are
+   stripped before reuse.
+5. Appends the SIGHASH_ALL byte (0x01) and inserts a
+   `PSBT_IN_PARTIAL_SIG` record (type 0x02) into the input map,
+   keyed by the 33-byte compressed pubkey.
+
+Inputs without a matching scriptPubKey (or without WITNESS_UTXO)
+pass through untouched, so a stray key on the wallet's repo can't
+accidentally corrupt unrelated PSBTs.
+
+`wallet build` (FEAT-014) was extended in the same release to
+emit `PSBT_IN_WITNESS_UTXO` records (8-byte LE amount + varint-
+prefixed scriptPubKey) per input, since BIP-143 sighash needs the
+prev-output's amount + scriptPubKey and the unsigned tx alone
+doesn't carry either.
+
+9 new bats tests: WITNESS_UTXO emitted by build; PARTIAL_SIG
+added on a matching input; low-S enforced (first byte of `s` <
+0x80); signature verifies via `openssl pkeyutl -verify` against
+the recomputed BIP-143 sighash; wrong-key is a byte-identical
+no-op (passes the PSBT through); malformed key / empty / non-hex
+inputs rejected; help mentions sign. Total bats now 111.
+
+Known limitations (tracked as follow-ups):
+
+- openssl ECDSA uses random k (not RFC 6979 deterministic),
+  so signatures vary run-to-run; tests verify the structural
+  invariant (verify + low-S) rather than pinning bytes.
+- P2WPKH only. P2SH-P2WPKH, P2WSH multisig, and Taproot key-path
+  are out of scope (FEAT-007 for the Taproot piece).
+- SIGHASH_ALL only; other sighash flags are deferred.
+
+### Deferred to ROADMAP-1.14.0+
+
+- `bitcoin psbt finalize` — promote `PARTIAL_SIG` records to the
+  final witness stack (BIP-174 §Finalizer).
+- `bitcoin psbt extract` — emit the broadcastable raw tx from a
+  finalised PSBT.
+- RFC 6979 deterministic k. Implementing this in shell would
+  unlock byte-pinned signature vector tests but isn't blocking
+  the cold-signing flow.
 
 # PSBT (BIP-174) encode, decode, and sign
 
