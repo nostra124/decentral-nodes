@@ -5,7 +5,7 @@ priority: high
 status: open
 ---
 
-## Progress (1.13.0 shipped — `broadcast`, `build`, `build` emits WITNESS_UTXO; psbt sign paired)
+## Progress (1.14.0 shipped — full build→sign→send pipeline for v0 P2WPKH)
 
 `bitcoin wallet broadcast <name>` (1.8.0) reads raw transaction
 hex from stdin, validates it as hex, and forwards to the active
@@ -68,18 +68,52 @@ global backend for UTXO queries; both verbs will resolve to the
 wallet's chosen backend without an interface change once the
 per-wallet backend lands.
 
-### Deferred (ROADMAP-1.14.0 and beyond)
+### 1.14.0 shipped — `wallet sign` + `wallet send`
 
-- `wallet sign <name>` — wallet integration that derives private
-  keys from the seed and calls `psbt sign` per matched input. The
-  primitive itself shipped in 1.13.0 as `bitcoin psbt sign`.
-- `wallet send <name> <addr> <sats>` — composes build + sign +
-  broadcast.
+`bitcoin wallet sign <name>` reads a PSBT (hex) on stdin and
+iterates over the wallet's `addresses` ledger. For each ledger
+index it derives the raw 32-byte private key at
+`m/84h/0h/0h/0/<idx>` (mirrors `wallet derive` but pulls the
+last 32 bytes of the extended-private-key serialization) and
+pipes the running PSBT through `psbt sign <privkey>`. Inputs the
+key can't sign are no-ops in the signer, so the pass over every
+ledger address is safe.
+
+`bitcoin wallet send <name> <addr> <sats> [--fee-rate sat/vB]`
+composes the pipeline:
+
+    wallet build → wallet sign → psbt finalize → psbt extract →
+    wallet broadcast
+
+…and prints the txid the backend returned. Build-time errors
+(no such wallet, insufficient balance, invalid address)
+propagate through unchanged; each later stage exits non-zero
+with a clear `error` line that names the failed step.
+
+5 new bats tests: wallet sign produces a PARTIAL_SIG for alice's
+matching address (via seed-derived key, not a hardcoded hex);
+wallet sign rejects missing wallet + empty stdin; wallet send
+end-to-end returns the stubbed mempool txid; wallet send rejects
+missing wallet.
+
+### Deferred (ROADMAP-1.15.0 and beyond)
+
 - Taproot signing (FEAT-007) and a v1+ address path for `build`.
+- P2PKH / P2SH-P2WPKH / P2WSH multisig signing (originally
+  acceptance criterion 4).
+- Regtest validation: `bitcoin-cli testmempoolaccept` against
+  the extracted raw tx (acceptance criterion 3). Needs the
+  FEAT-016 podman harness to land.
+- Mainnet-send guard (`--mainnet` flag; acceptance criterion 5).
+  Currently testnet-by-default; the guard becomes relevant once
+  a mainnet wallet flow ships.
+- "Smart" `wallet sign` that derives only the keys the PSBT
+  actually needs (current form is O(n_addresses) derivations).
 - ~~Fee estimation via `backend estimate-fee`~~ — shipped in
   1.12.0.
 - ~~PSBT_IN_WITNESS_UTXO emission in `wallet build`~~ — shipped
-  in 1.13.0 (prerequisite for `psbt sign`).
+  in 1.13.0.
+- ~~`wallet sign`, `wallet send`~~ — shipped in 1.14.0.
 
 # Transaction builder, signer, and broadcaster
 

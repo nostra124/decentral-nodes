@@ -95,15 +95,47 @@ Known limitations (tracked as follow-ups):
   are out of scope (FEAT-007 for the Taproot piece).
 - SIGHASH_ALL only; other sighash flags are deferred.
 
-### Deferred to ROADMAP-1.14.0+
+### 1.14.0 shipped — finalize + extract
 
-- `bitcoin psbt finalize` — promote `PARTIAL_SIG` records to the
-  final witness stack (BIP-174 §Finalizer).
-- `bitcoin psbt extract` — emit the broadcastable raw tx from a
-  finalised PSBT.
-- RFC 6979 deterministic k. Implementing this in shell would
-  unlock byte-pinned signature vector tests but isn't blocking
-  the cold-signing flow.
+`bitcoin psbt finalize` reads a PSBT (hex) on stdin and, for each
+input carrying a `PSBT_IN_PARTIAL_SIG` (type 0x02) plus a v0
+P2WPKH `PSBT_IN_WITNESS_UTXO` (type 0x01):
+
+1. Pulls the first PARTIAL_SIG (key = compressed pubkey, value =
+   DER-sig + SIGHASH byte).
+2. Builds the BIP-141 witness stack `[sig+sighash, pubkey]` and
+   serialises it as `varint(2) || varint(sig_len) || sig ||
+   varint(33) || pubkey`.
+3. Replaces the input map with WITNESS_UTXO + the new
+   `PSBT_IN_FINAL_SCRIPTWITNESS` record (type 0x08), stripping
+   the other per-input fields per BIP-174 §Finalizer.
+
+Inputs with no sig pass through unfinalised — `finalize` is a
+clean no-op on an empty/partially-signed PSBT.
+
+`bitcoin psbt extract` reads a finalised PSBT and emits the
+broadcastable BIP-141 + BIP-144 segwit transaction as hex:
+version || `0001` marker+flag || inputs (FINAL_SCRIPTSIG or
+empty) || outputs || per-input witness (FINAL_SCRIPTWITNESS
+verbatim, or `0x00` empty stack) || locktime. It refuses if any
+input lacks both FINAL_SCRIPTSIG and FINAL_SCRIPTWITNESS.
+
+5 new bats tests: finalize adds FINAL_SCRIPTWITNESS; finalize
+strips PARTIAL_SIG per BIP-174 §Finalizer; extract emits a
+segwit-marked raw tx ending with alice's pubkey; extract refuses
+an unfinalised PSBT; finalize is a no-op on an unsigned PSBT.
+
+### Deferred to ROADMAP-1.15.0+
+
+- `bitcoin psbt combine` — merge two PSBTs that signed disjoint
+  inputs (the canonical multi-sig flow).
+- Taproot (BIP-371) PSBT fields — TR_KEY_SIG, TR_LEAF_SCRIPT,
+  etc. Blocked on FEAT-007.
+- `bitcoin psbt update` and full BIP-174 §Updater semantics —
+  attaching BIP32 derivation paths, redeem scripts, etc.
+- RFC 6979 deterministic k for `sign` — would unlock byte-pinned
+  signature vector tests but isn't blocking the cold-signing
+  flow.
 
 # PSBT (BIP-174) encode, decode, and sign
 

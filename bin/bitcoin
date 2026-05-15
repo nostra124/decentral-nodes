@@ -709,10 +709,12 @@ command:psbt() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		decode) psbt:decode "$@" ;;
-		encode) psbt:encode "$@" ;;
-		sign)   psbt:sign   "$@" ;;
-		help)   psbt:help ;;
+		decode)   psbt:decode   "$@" ;;
+		encode)   psbt:encode   "$@" ;;
+		sign)     psbt:sign     "$@" ;;
+		finalize) psbt:finalize "$@" ;;
+		extract)  psbt:extract  "$@" ;;
+		help)     psbt:help ;;
 		*)
 			error "unknown psbt subcommand: '$sub'"
 			psbt:help >&2
@@ -743,6 +745,15 @@ psbt:help() {
 	                    hex secret key. SIGHASH_ALL only; ECDSA via openssl
 	                    pkeyutl over secp256k1; signatures are BIP-66 low-S
 	                    canonicalised.
+	  finalize          read a PSBT from stdin, promote every input's first
+	                    PSBT_IN_PARTIAL_SIG (type 0x02) to a finalised
+	                    witness via PSBT_IN_FINAL_SCRIPTWITNESS (type 0x08),
+	                    and re-emit. Per BIP-174 §Finalizer, finalised
+	                    inputs keep only WITNESS_UTXO + FINAL_SCRIPTWITNESS.
+	                    Inputs without a sig pass through unfinalised.
+	  extract           read a finalised PSBT from stdin and emit the
+	                    broadcastable BIP-141/144 segwit raw tx as hex.
+	                    Refuses if any input lacks FINAL_SCRIPTWITNESS.
 	  help              this message
 	ENDHELP
 }
@@ -1395,11 +1406,239 @@ psbt:sign() {
 	printf '%s\n' "$out"
 }
 
+# ---------------------------------------------------------------------------
+# FEAT-008 (partial, 1.14.0): psbt finalize.
+#
+# For each input that carries a PARTIAL_SIG (type 0x02) and a v0
+# P2WPKH WITNESS_UTXO (type 0x01), build the BIP-141 witness stack
+# [sig+sighash, pubkey] and emit it as a PSBT_IN_FINAL_SCRIPTWITNESS
+# record (type 0x08). Strip the per-input fields BIP-174 §Finalizer
+# says a finaliser must remove, keeping only WITNESS_UTXO and
+# FINAL_SCRIPTWITNESS.
+# ---------------------------------------------------------------------------
+
+# Walk an input record blob and emit "TYPE\tKEY\tVALUE" tab-separated
+# triples on stdout, one per record. Empty input → no output. Used by
+# both finalize and extract to navigate a parsed input map without
+# repeated psbt:_input_record_value scans.
+psbt:_input_records_tsv() {
+	local blob="$1"
+	local saved_hex="${psbt_hex:-}" saved_pos="${psbt_pos:-0}" saved_len="${psbt_len:-0}"
+	psbt_hex="$blob"
+	local -gi psbt_len=${#blob} psbt_pos=0
+	PSBT_LAST_HEX=""
+	PSBT_LAST_VINT=0
+	while (( psbt_pos < psbt_len )); do
+		psbt:_take_varint || break
+		local -i keylen=$PSBT_LAST_VINT
+		(( keylen == 0 )) && break
+		psbt:_take "$keylen" || break
+		local key_hex="$PSBT_LAST_HEX"
+		local type_byte="${key_hex:0:2}"
+		psbt:_take_varint || break
+		local -i vallen=$PSBT_LAST_VINT
+		psbt:_take "$vallen" || break
+		printf '%s\t%s\t%s\n' "$type_byte" "$key_hex" "$PSBT_LAST_HEX"
+	done
+	psbt_hex="$saved_hex"; psbt_pos=$saved_pos; psbt_len=$saved_len
+}
+
+psbt:finalize() {
+	local raw; raw="$(cat | tr -d '[:space:]' | tr A-F a-f)"
+	if [ -z "$raw" ]; then
+		error "psbt finalize: empty stdin (expected hex-encoded PSBT)"
+		return 2
+	fi
+	if [[ ! "$raw" =~ ^[0-9a-f]+$ ]]; then
+		error "psbt finalize: stdin is not hex"
+		return 3
+	fi
+	psbt:_parse_structured "$raw" || return 4
+
+	local -i n_in=$PSBT_PARSE_N_IN n_out=$PSBT_PARSE_N_OUT
+	local -i i
+	for ((i=0; i<n_in; i++)); do
+		local blob="${PSBT_PARSE_INPUT_RECORDS[i]}"
+		local witness_utxo="" partial_sig_value="" partial_sig_pubkey=""
+		# Walk records, capturing what we need.
+		local tsv_line type_byte key_hex val_hex
+		while IFS=$'\t' read -r type_byte key_hex val_hex; do
+			case "$type_byte" in
+				01) witness_utxo="$val_hex" ;;
+				02)
+					# PSBT_IN_PARTIAL_SIG: key = 0x02 + 33-byte pubkey;
+					# value = DER sig + 1-byte SIGHASH flag.
+					if [ -z "$partial_sig_value" ]; then
+						partial_sig_pubkey="${key_hex:2}"
+						partial_sig_value="$val_hex"
+					fi
+					;;
+			esac
+		done < <(psbt:_input_records_tsv "$blob")
+		if [ -z "$partial_sig_value" ] || [ -z "$witness_utxo" ]; then
+			# Nothing to finalize on this input; pass through unchanged.
+			continue
+		fi
+		# Build witness stack: 02 (count) + varint(sig_len) + sig + 21 + pubkey.
+		local -i sig_len_bytes=$(( ${#partial_sig_value} / 2 ))
+		local -i pub_len_bytes=$(( ${#partial_sig_pubkey} / 2 ))
+		local witness_stack=""
+		witness_stack+="$(psbt:_emit_varint 2)"
+		witness_stack+="$(psbt:_emit_varint "$sig_len_bytes")"
+		witness_stack+="$partial_sig_value"
+		witness_stack+="$(psbt:_emit_varint "$pub_len_bytes")"
+		witness_stack+="$partial_sig_pubkey"
+		# Rebuild the input map: keep WITNESS_UTXO, add FINAL_SCRIPTWITNESS
+		# (type 0x08).
+		local new_blob=""
+		# Re-emit WITNESS_UTXO with the same shape (keylen=1, key=01).
+		new_blob+="01"
+		new_blob+="01"
+		new_blob+="$(psbt:_emit_varint $(( ${#witness_utxo} / 2 )))"
+		new_blob+="$witness_utxo"
+		# FINAL_SCRIPTWITNESS record.
+		new_blob+="01"
+		new_blob+="08"
+		new_blob+="$(psbt:_emit_varint $(( ${#witness_stack} / 2 )))"
+		new_blob+="$witness_stack"
+		PSBT_PARSE_INPUT_RECORDS[i]="$new_blob"
+	done
+
+	# Re-emit.
+	local out="70736274ff"
+	out+="$PSBT_PARSE_GLOBAL_RECORDS"
+	out+="00"
+	for ((i=0; i<n_in; i++)); do
+		out+="${PSBT_PARSE_INPUT_RECORDS[i]}"
+		out+="00"
+	done
+	local j
+	for ((j=0; j<n_out; j++)); do
+		out+="${PSBT_PARSE_OUTPUT_RECORDS[j]}"
+		out+="00"
+	done
+	printf '%s\n' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-008 (partial, 1.14.0): psbt extract.
+#
+# Read a finalised PSBT and emit the broadcastable BIP-141 + BIP-144
+# segwit raw transaction as hex:
+#   version || 00 || 01 || inputs (scriptSig from FINAL_SCRIPTSIG or
+#   empty) || outputs || per-input witness (FINAL_SCRIPTWITNESS bytes
+#   verbatim, or 0x00 empty stack) || locktime
+# ---------------------------------------------------------------------------
+
+psbt:extract() {
+	local raw; raw="$(cat | tr -d '[:space:]' | tr A-F a-f)"
+	if [ -z "$raw" ]; then
+		error "psbt extract: empty stdin (expected hex-encoded PSBT)"
+		return 2
+	fi
+	if [[ ! "$raw" =~ ^[0-9a-f]+$ ]]; then
+		error "psbt extract: stdin is not hex"
+		return 3
+	fi
+	psbt:_parse_structured "$raw" || return 4
+
+	# Pull per-input finalised data.
+	local -i n_in=$PSBT_PARSE_N_IN i
+	local -a final_scriptsig=() final_witness=()
+	for ((i=0; i<n_in; i++)); do
+		local blob="${PSBT_PARSE_INPUT_RECORDS[i]}"
+		local ss="" wit="" type_byte key_hex val_hex
+		while IFS=$'\t' read -r type_byte key_hex val_hex; do
+			case "$type_byte" in
+				07) ss="$val_hex" ;;   # PSBT_IN_FINAL_SCRIPTSIG
+				08) wit="$val_hex" ;;  # PSBT_IN_FINAL_SCRIPTWITNESS
+			esac
+		done < <(psbt:_input_records_tsv "$blob")
+		if [ -z "$ss" ] && [ -z "$wit" ]; then
+			error "psbt extract: input $i has neither FINAL_SCRIPTSIG nor FINAL_SCRIPTWITNESS (PSBT not finalised)"
+			return 5
+		fi
+		final_scriptsig[i]="$ss"
+		final_witness[i]="$wit"
+	done
+
+	# Parse the unsigned tx to extract version, outpoints/sequences,
+	# outputs, locktime. Same shape as psbt:_bip143_sighash's walk.
+	local tx="$PSBT_PARSE_UNSIGNED_TX"
+	local saved_hex="${psbt_hex:-}" saved_pos="${psbt_pos:-0}" saved_len="${psbt_len:-0}"
+	psbt_hex="$tx"
+	local -gi psbt_len=${#psbt_hex} psbt_pos=0
+
+	psbt:_take 4 || { error "psbt extract: truncated version"; return 6; }
+	local nVersion_le="$PSBT_LAST_HEX"
+
+	psbt:_take_varint || { error "psbt extract: truncated input count"; return 6; }
+	local -i tx_n_in=$PSBT_LAST_VINT
+	if (( tx_n_in != n_in )); then
+		error "psbt extract: PSBT input count mismatch (psbt sections: $n_in; tx inputs: $tx_n_in)"
+		psbt_hex="$saved_hex"; psbt_pos=$saved_pos; psbt_len=$saved_len
+		return 7
+	fi
+	local -a outpoints=() sequences=()
+	for ((i=0; i<tx_n_in; i++)); do
+		psbt:_take 32 || return 8
+		local prev_txid="$PSBT_LAST_HEX"
+		psbt:_take 4 || return 8
+		local prev_vout="$PSBT_LAST_HEX"
+		outpoints[i]="$prev_txid$prev_vout"
+		psbt:_take_varint || return 8
+		psbt:_take "$PSBT_LAST_VINT" || return 8
+		psbt:_take 4 || return 8
+		sequences[i]="$PSBT_LAST_HEX"
+	done
+	psbt:_take_varint || { error "psbt extract: truncated output count"; return 6; }
+	local -i tx_n_out=$PSBT_LAST_VINT
+	local outputs_blob=""
+	for ((i=0; i<tx_n_out; i++)); do
+		psbt:_take 8 || return 8
+		outputs_blob+="$PSBT_LAST_HEX"
+		psbt:_take_varint || return 8
+		local -i sp_len=$PSBT_LAST_VINT
+		outputs_blob+="$(psbt:_emit_varint "$sp_len")"
+		psbt:_take "$sp_len" || return 8
+		outputs_blob+="$PSBT_LAST_HEX"
+	done
+	psbt:_take 4 || { error "psbt extract: truncated locktime"; return 6; }
+	local nLocktime_le="$PSBT_LAST_HEX"
+	psbt_hex="$saved_hex"; psbt_pos=$saved_pos; psbt_len=$saved_len
+
+	# Reassemble in BIP-141 + BIP-144 form.
+	local out=""
+	out+="$nVersion_le"
+	out+="0001"                                     # segwit marker + flag
+	out+="$(psbt:_emit_varint "$tx_n_in")"
+	for ((i=0; i<tx_n_in; i++)); do
+		out+="${outpoints[i]}"
+		local ss="${final_scriptsig[i]}"
+		out+="$(psbt:_emit_varint $(( ${#ss} / 2 )))"
+		out+="$ss"
+		out+="${sequences[i]}"
+	done
+	out+="$(psbt:_emit_varint "$tx_n_out")"
+	out+="$outputs_blob"
+	# Witness section: one stack per input. Empty stack = 0x00 (varint
+	# 0 items). FINAL_SCRIPTWITNESS already encodes the full stack.
+	for ((i=0; i<tx_n_in; i++)); do
+		if [ -n "${final_witness[i]}" ]; then
+			out+="${final_witness[i]}"
+		else
+			out+="00"
+		fi
+	done
+	out+="$nLocktime_le"
+	printf '%s\n' "$out"
+}
+
 command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		new|ls|rm|help|derive|addresses|label|balance|broadcast|build|remote|push|pull) wallet:"$sub" "$@" ;;
+		new|ls|rm|help|derive|addresses|label|balance|broadcast|build|sign|send|remote|push|pull) wallet:"$sub" "$@" ;;
 		*)
 			error "unknown wallet subcommand: '$sub'"
 			wallet:help >&2
@@ -1434,6 +1673,13 @@ wallet:help() {
 	                    Without --fee-rate, reads 'backend estimate-fee 3';
 	                    falls back to 1 sat/vB on backend failure.
 	                    P2WPKH/P2WSH outputs only.
+	  sign <name>       read a PSBT (hex) from stdin, derive a private key
+	                    for every address in the wallet's ledger, pipe the
+	                    PSBT through 'psbt sign' for each. Inputs the keys
+	                    can't sign pass through unmodified.
+	  send <name> <addr> <sats> [--fee-rate sat/vB]
+	                    end-to-end: build | sign | psbt finalize | psbt extract
+	                    | broadcast. Prints the txid the backend returned.
 	  broadcast <name>  POST raw-tx hex from stdin to the active backend
 	  remote add <name> <remote> <url>
 	                    set/replace a git remote on the wallet repo
@@ -1906,6 +2152,133 @@ wallet:build() {
 	for ((i=0; i<n_out; i++)); do psbt+="00"; done  # empty output maps
 
 	printf '%s\n' "$psbt"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-014 (partial, 1.14.0): wallet sign + wallet send.
+#
+# `wallet sign` reads a PSBT (hex) on stdin and pipes it through
+# `psbt sign <privkey>` once per address in the wallet's ledger.
+# Each derivation reuses the pipeline wallet:_derive_address uses,
+# but pulls the raw 32-byte private key rather than computing the
+# pubkey. Keys that don't match any input are no-ops in the signer.
+#
+# `wallet send` composes build | sign | psbt finalize | psbt extract
+# | broadcast, returning the txid the backend produced.
+# ---------------------------------------------------------------------------
+
+# Derive the raw 32-byte private key (hex) for <name>'s ledger index
+# <idx>. Mirrors wallet:_derive_address but stops one step earlier
+# and reads the 32 bytes of secret key rather than the 33-byte
+# compressed pubkey.
+wallet:_derive_privkey_hex() {
+	local name="$1" idx="$2"
+	if ! command -v secret >/dev/null 2>&1; then
+		error "wallet sign: 'secret' not in PATH (cannot read seed for '$name')"
+		return 5
+	fi
+	local libexec="${SELF_LIBEXEC:?wallet sign: SELF_LIBEXEC must be set}"
+	# The bip32 derive plugin emits the full 78-byte serialised
+	# extended private key. The last 32 bytes are the raw secret key
+	# (the byte just before is the 0x00 marker that distinguishes
+	# private from public child-key data).
+	local priv_hex
+	priv_hex="$(
+		secret get "$name/seed" |
+		"$libexec/${SELF:-bitcoin}/mnemonic-to-seed" |
+		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/0/$idx" 2>/dev/null |
+		tail -c 32 |
+		xxd -p -c 0 |
+		tr -d '\n'
+	)"
+	if [[ ! "$priv_hex" =~ ^[0-9a-f]{64}$ ]]; then
+		error "wallet sign: private-key derivation produced unexpected output for $name/$idx"
+		return 6
+	fi
+	printf '%s\n' "$priv_hex"
+}
+
+wallet:sign() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet sign: usage: wallet sign <name> (PSBT on stdin)"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet sign: no such wallet '$name' at $path"
+		return 3
+	fi
+	local ledger="$path/addresses"
+	if [ ! -s "$ledger" ]; then
+		error "wallet sign: wallet '$name' has no derived addresses"
+		return 4
+	fi
+
+	local psbt; psbt="$(cat | tr -d '[:space:]' | tr A-F a-f)"
+	if [ -z "$psbt" ]; then
+		error "wallet sign: empty stdin (expected hex-encoded PSBT)"
+		return 5
+	fi
+	if [[ ! "$psbt" =~ ^[0-9a-f]+$ ]]; then
+		error "wallet sign: stdin is not hex"
+		return 6
+	fi
+
+	# Walk the ledger; for each index derive a privkey + re-pipe.
+	# psbt:sign is a no-op for inputs the key can't sign, so this
+	# is safe even when the ledger has many addresses.
+	local idx addr_ledger _label privkey
+	while IFS=$'\t' read -r idx addr_ledger _label; do
+		[ -z "$idx" ] && continue
+		if ! privkey="$(wallet:_derive_privkey_hex "$name" "$idx")"; then
+			warn "wallet sign: skipping index $idx (derivation failed)"
+			continue
+		fi
+		psbt="$(printf '%s\n' "$psbt" | psbt:sign "$privkey")" || {
+			error "wallet sign: psbt sign failed at index $idx"
+			return 7
+		}
+	done < "$ledger"
+
+	printf '%s\n' "$psbt"
+}
+
+wallet:send() {
+	# Same arg shape as `wallet build`. We don't re-parse here;
+	# whatever the user passes is forwarded to build.
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet send: usage: wallet send <name> <addr> <sats> [--fee-rate sat/vB]"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet send: no such wallet '$name' at $path"
+		return 3
+	fi
+	# Compose build | sign | finalize | extract | broadcast in-shell.
+	# A pipefail-style abort: capture the build PSBT first so a
+	# build-time failure surfaces with its own error message.
+	local psbt; psbt="$(wallet:build "$@")" || {
+		error "wallet send: wallet build failed"
+		return 4
+	}
+	local signed; signed="$(printf '%s\n' "$psbt" | wallet:sign "$name")" || {
+		error "wallet send: wallet sign failed"
+		return 5
+	}
+	local finalised; finalised="$(printf '%s\n' "$signed" | psbt:finalize)" || {
+		error "wallet send: psbt finalize failed"
+		return 6
+	}
+	local raw_tx; raw_tx="$(printf '%s\n' "$finalised" | psbt:extract)" || {
+		error "wallet send: psbt extract failed"
+		return 7
+	}
+	printf '%s\n' "$raw_tx" | wallet:broadcast "$name"
 }
 
 # ---------------------------------------------------------------------------

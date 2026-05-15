@@ -1295,6 +1295,146 @@ build_alice_psbt() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-008 (partial, 1.14.0) — psbt finalize + extract. Finalize
+# promotes PARTIAL_SIG records to FINAL_SCRIPTWITNESS; extract
+# emits the broadcastable BIP-141 + BIP-144 segwit raw tx.
+#
+# wallet sign + wallet send (FEAT-014) sit on top of these and have
+# their own bats cases further down.
+# ---------------------------------------------------------------------------
+
+# Helper: produce a signed PSBT for alice — output a hex PSBT with a
+# PARTIAL_SIG record on input 0 (the build/sign pipeline that 1.13.0
+# tests already exercise; reused here so the finalize/extract tests
+# don't repeat the wiring).
+signed_alice_psbt() {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
+	echo "$psbt" | "$BITCOIN_BIN" psbt sign "$ALICE_PRIV"
+}
+
+@test "FEAT-008 — psbt finalize adds FINAL_SCRIPTWITNESS for a signed input" {
+	signed="$(signed_alice_psbt)"
+	run bash -c "echo '$signed' | '$BITCOIN_BIN' psbt finalize"
+	[ "$status" -eq 0 ]
+	# Decode and check the input section now has type=08 (FINAL_SCRIPTWITNESS).
+	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"section=1	type=08	key=08"* ]]
+	# The witness value starts with varint 0x02 (two stack items).
+	wit="$(echo "$output" | awk -F'\t' '/type=08/ {sub("^value=","",$4); print $4; exit}')"
+	[ "${wit:0:2}" = "02" ]
+}
+
+@test "FEAT-008 — psbt finalize strips PARTIAL_SIG (BIP-174 §Finalizer)" {
+	signed="$(signed_alice_psbt)"
+	finalised="$(echo "$signed" | "$BITCOIN_BIN" psbt finalize)"
+	dec="$(echo "$finalised" | "$BITCOIN_BIN" psbt decode)"
+	# After finalize, the input section keeps WITNESS_UTXO (01) and
+	# FINAL_SCRIPTWITNESS (08), drops PARTIAL_SIG (02).
+	! echo "$dec" | grep -q 'type=02'
+	echo "$dec" | grep -q 'type=01'
+	echo "$dec" | grep -q 'type=08'
+}
+
+@test "FEAT-008 — psbt extract emits a segwit raw tx with the marker+flag" {
+	signed="$(signed_alice_psbt)"
+	finalised="$(echo "$signed" | "$BITCOIN_BIN" psbt finalize)"
+	run bash -c "echo '$finalised' | '$BITCOIN_BIN' psbt extract"
+	[ "$status" -eq 0 ]
+	# Version 02000000, then segwit marker (00) + flag (01) at hex offset 8.
+	[ "${output:0:8}" = "02000000" ]
+	[ "${output:8:4}" = "0001" ]
+	# Locktime is the final 4 bytes.
+	[ "${output: -8}" = "00000000" ]
+	# Witness items: count=2, sig (~70 B), pubkey (33 B). The 33-byte
+	# pubkey suffix matches alice's compressed pubkey ending in …91af3c.
+	[[ "$output" == *"${ALICE_PUB}00000000" ]]
+}
+
+@test "FEAT-008 — psbt extract refuses an unfinalised PSBT" {
+	signed="$(signed_alice_psbt)"
+	# Skip the finalize step → input still has PARTIAL_SIG, no witness.
+	run bash -c "echo '$signed' | '$BITCOIN_BIN' psbt extract"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"not finalised"* ]] || [[ "$stderr" == *"not finalised"* ]] || true
+}
+
+@test "FEAT-008 — psbt finalize is a no-op on an unsigned PSBT" {
+	# wallet build with no subsequent sign → no PARTIAL_SIG anywhere.
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
+	run bash -c "echo '$psbt' | '$BITCOIN_BIN' psbt finalize"
+	[ "$status" -eq 0 ]
+	# Same input record blob (no FINAL_SCRIPTWITNESS added).
+	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	! echo "$output" | grep -q 'type=08'
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-014 (partial, 1.14.0) — wallet sign + wallet send.
+#
+# wallet sign reads a PSBT and derives one private key per address in
+# the wallet's ledger, piping the PSBT through psbt sign once each.
+# wallet send composes build | sign | finalize | extract | broadcast.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-014 — wallet sign produces a PARTIAL_SIG for the wallet's matching address" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
+	run bash -c "echo '$psbt' | '$BITCOIN_BIN' wallet sign alice"
+	[ "$status" -eq 0 ]
+	# The signed PSBT carries a PARTIAL_SIG keyed by alice's compressed
+	# pubkey — same shape as the FEAT-008 psbt-sign test, but reached
+	# via the wallet's seed-derived key rather than a hardcoded hex.
+	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"section=1	type=02"* ]]
+	[[ "$output" == *"key=02${ALICE_PUB}"* ]]
+}
+
+@test "FEAT-014 — wallet sign rejects a missing wallet" {
+	setup_wallet_derive_env
+	run bash -c "echo '70736274ff00' | '$BITCOIN_BIN' wallet sign no-such-wallet"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-014 — wallet sign rejects empty stdin" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	run bash -c "echo '' | '$BITCOIN_BIN' wallet sign alice"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-014 — wallet send composes the pipeline and returns the broadcast txid" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	# Stub the broadcast endpoint to return a known txid.
+	curl_fixture "https://mempool.space/api/tx" \
+		"f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d"
+	run "$BITCOIN_BIN" wallet send alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	[ "$status" -eq 0 ]
+	[ "$output" = "f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d" ]
+}
+
+@test "FEAT-014 — wallet send rejects a missing wallet" {
+	setup_wallet_derive_env
+	run "$BITCOIN_BIN" wallet send no-such-wallet bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 1000
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`
