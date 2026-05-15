@@ -711,6 +711,7 @@ command:psbt() {
 	case "$sub" in
 		decode) psbt:decode "$@" ;;
 		encode) psbt:encode "$@" ;;
+		sign)   psbt:sign   "$@" ;;
 		help)   psbt:help ;;
 		*)
 			error "unknown psbt subcommand: '$sub'"
@@ -734,9 +735,15 @@ psbt:help() {
 	                    trailing sections aren't representable — the
 	                    encoded byte count equals (max section + 2)
 	                    terminators.
+	  sign <privkey>    read a PSBT (hex) from stdin, sign every v0 P2WPKH
+	                    input whose WITNESS_UTXO scriptPubKey matches
+	                    HASH160(pubkey of <privkey>), and re-emit the PSBT
+	                    with PSBT_IN_PARTIAL_SIG records (BIP-174 type 0x02)
+	                    inserted per signed input. <privkey> is a 32-byte
+	                    hex secret key. SIGHASH_ALL only; ECDSA via openssl
+	                    pkeyutl over secp256k1; signatures are BIP-66 low-S
+	                    canonicalised.
 	  help              this message
-
-	psbt sign lands in ROADMAP-1.10.0+ (FEAT-008 remainder).
 	ENDHELP
 }
 
@@ -869,6 +876,522 @@ psbt:encode() {
 	done
 	# One final 0x00 closes the last section.
 	out+="00"
+	printf '%s\n' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-008 (partial, 1.13.0): psbt sign.
+#
+# Reads a PSBT (hex) from stdin and a raw 32-byte private key from
+# argv. For every input whose WITNESS_UTXO scriptPubKey is v0 P2WPKH
+# of HASH160(pubkey), computes the BIP-143 sighash, ECDSA-signs via
+# openssl, BIP-66 low-S canonicalises the DER signature, and inserts
+# a PSBT_IN_PARTIAL_SIG record (type 0x02) into the input map. Other
+# inputs (wrong scriptPubKey, non-P2WPKH, missing WITNESS_UTXO) are
+# passed through unmodified. The re-emitted PSBT is printed as hex.
+#
+# SIGHASH_ALL only. P2WPKH only. RFC 6979 deterministic-k is NOT
+# implemented (openssl uses random k), so signatures vary run-to-run.
+# Tests verify the structural invariant (sig + sighash verify against
+# the pubkey) rather than pinning a byte sequence.
+# ---------------------------------------------------------------------------
+
+# secp256k1 group order n and n/2, used for BIP-66 low-S
+# canonicalisation. Decimals because dc reads decimals natively.
+declare -gr PSBT_SECP256K1_N='115792089237316195423570985008687907852837564279074904382605163141518161494337'
+declare -gr PSBT_SECP256K1_N_HALF='57896044618658097711785492504343953926418782139537452191302581570759080747168'
+
+# Pack a 32-byte private key hex into a minimal-DER ECPrivateKey,
+# write it to $1. Caller is responsible for cleanup. We omit the
+# optional [1] pubkey field — openssl computes the pubkey on demand.
+psbt:_write_privkey_der() {
+	local out="$1" key_hex="$2"
+	{
+		printf '302e020101'         # SEQUENCE(46) / INTEGER 1
+		printf '0420'               # OCTET STRING(32)
+		printf '%s' "$key_hex"
+		printf 'a00706052b8104000a' # [0] OID 1.3.132.0.10 (secp256k1)
+	} | xxd -r -p > "$out"
+}
+
+# Print the compressed-form pubkey hex (33 bytes / 66 chars) for the
+# given 32-byte private key hex. Returns non-zero if openssl rejects
+# the key (e.g. zero or out-of-range).
+psbt:_privkey_to_pubkey() {
+	local key_hex="$1"
+	local der; der="$(mktemp)"
+	psbt:_write_privkey_der "$der" "$key_hex"
+	# openssl pkey -text prints the uncompressed (0x04|X|Y) point.
+	# Extract X and Y, then build the compressed form (02|X if Y even,
+	# 03|X if Y odd).
+	local text point x y_last
+	if ! text="$(openssl pkey -inform DER -in "$der" -text -noout 2>/dev/null)"; then
+		rm -f "$der"
+		return 1
+	fi
+	rm -f "$der"
+	# Extract the pub: block. openssl wraps it across lines:
+	#   pub:
+	#       04:79:be:66:...:d4:b8
+	point="$(printf '%s\n' "$text" \
+		| awk '/^pub:/{flag=1; next} /^ASN1 OID/{flag=0} flag {print}' \
+		| tr -d ' :\n' )"
+	# Strip the leading "04" prefix, take 64 chars X and 64 chars Y.
+	if (( ${#point} != 130 )); then
+		return 2
+	fi
+	if [[ "${point:0:2}" != "04" ]]; then
+		return 3
+	fi
+	x="${point:2:64}"
+	y_last="${point:128:2}"
+	local -i y_last_int=$((16#$y_last))
+	local prefix
+	if (( y_last_int & 1 )); then prefix="03"; else prefix="02"; fi
+	printf '%s%s\n' "$prefix" "$x"
+}
+
+# Hash160(stdin-hex). Pipe-friendly: takes hex on stdin, prints hex
+# on stdout. Uses openssl (we already depend on >= 3.0).
+psbt:_hash160_hex() {
+	local hex; read -r hex
+	printf '%s' "$hex" \
+		| xxd -r -p \
+		| openssl dgst -sha256 -binary \
+		| openssl dgst -rmd160 -binary \
+		| xxd -p -c 0 \
+		| tr -d '\n'
+	printf '\n'
+}
+
+# Double-SHA-256 of input hex. Pipe-friendly like _hash160_hex.
+psbt:_sha256d_hex() {
+	local hex; read -r hex
+	printf '%s' "$hex" \
+		| xxd -r -p \
+		| openssl dgst -sha256 -binary \
+		| openssl dgst -sha256 -binary \
+		| xxd -p -c 0 \
+		| tr -d '\n'
+	printf '\n'
+}
+
+# BIP-66 low-S canonicalisation. Input: DER ECDSA signature hex.
+# If the s component is > n/2, replace it with n - s and re-encode.
+# Re-emits canonical DER signature hex.
+#
+# DER layout: 30 <total-len> 02 <r-len> <r-bytes> 02 <s-len> <s-bytes>
+# All length bytes are single-byte (signatures are well under 128 B).
+#
+# dc wraps long-integer output across lines with a backslash + newline
+# continuation; every dc invocation here is filtered through `tr` to
+# strip that so the next dc call doesn't see a stray '\'.
+psbt:_low_s_canon() {
+	local sig="$1"
+	if [[ ! "$sig" =~ ^30[[:xdigit:]]{2}02[[:xdigit:]]{2} ]]; then
+		error "psbt sign: malformed DER signature header in '$sig'"
+		return 1
+	fi
+	local r_len_hex="${sig:6:2}"
+	local -i r_len=$((16#$r_len_hex))
+	local r_start=8
+	local s_marker_off=$((r_start + r_len * 2))
+	if [[ "${sig:s_marker_off:2}" != "02" ]]; then
+		error "psbt sign: expected s INTEGER marker at offset $s_marker_off in '$sig'"
+		return 2
+	fi
+	local s_len_hex="${sig:s_marker_off+2:2}"
+	local -i s_len=$((16#$s_len_hex))
+	local s_start=$((s_marker_off + 4))
+	local s="${sig:s_start:s_len*2}"
+	local s_decimal
+	s_decimal="$(echo "16i ${s^^} p" | dc | tr -d '\\\n')" || return 3
+	local cmp
+	cmp="$(echo "$PSBT_SECP256K1_N_HALF $s_decimal - p" | dc | tr -d '\\\n')"
+	# If (n/2 - s) is negative, s > n/2 and we must flip to n - s.
+	if [[ "$cmp" == -* ]]; then
+		local new_s_dec; new_s_dec="$(echo "$PSBT_SECP256K1_N $s_decimal - p" | dc | tr -d '\\\n')"
+		local new_s_hex; new_s_hex="$(echo "16o $new_s_dec p" | dc | tr -d '\\\n' | tr 'A-F' 'a-f')"
+		# Even-pad. DER signed-int leading-zero rule: prepend 00 if
+		# high bit of first byte is set.
+		if (( ${#new_s_hex} % 2 == 1 )); then new_s_hex="0$new_s_hex"; fi
+		local first_byte=$((16#${new_s_hex:0:2}))
+		if (( first_byte & 0x80 )); then new_s_hex="00$new_s_hex"; fi
+		local new_s_len_hex; new_s_len_hex="$(printf '%02x' $(( ${#new_s_hex} / 2 )))"
+		local prefix="${sig:0:s_marker_off+2}"
+		local new_sig="${prefix}${new_s_len_hex}${new_s_hex}"
+		local -i new_total=$(( (${#new_sig} - 4) / 2 ))
+		local new_total_hex; new_total_hex="$(printf '%02x' "$new_total")"
+		new_sig="30${new_total_hex}${new_sig:4}"
+		printf '%s' "$new_sig"
+	else
+		printf '%s' "$sig"
+	fi
+}
+
+# Sign a 32-byte sighash with a private key. Output: low-S
+# canonicalised DER signature hex (no SIGHASH byte appended; caller
+# adds that).
+psbt:_sign_sighash() {
+	local key_hex="$1" sighash_hex="$2"
+	local der_key; der_key="$(mktemp)"
+	local hash_bin; hash_bin="$(mktemp)"
+	local sig_bin;  sig_bin="$(mktemp)"
+	psbt:_write_privkey_der "$der_key" "$key_hex"
+	printf '%s' "$sighash_hex" | xxd -r -p > "$hash_bin"
+	if ! openssl pkeyutl -sign -inkey "$der_key" -keyform DER -in "$hash_bin" -out "$sig_bin" 2>/dev/null; then
+		rm -f "$der_key" "$hash_bin" "$sig_bin"
+		error "psbt sign: openssl pkeyutl -sign failed for key '${key_hex:0:8}…'"
+		return 1
+	fi
+	local sig_hex; sig_hex="$(xxd -p -c 0 "$sig_bin" | tr -d '\n')"
+	rm -f "$der_key" "$hash_bin" "$sig_bin"
+	psbt:_low_s_canon "$sig_hex"
+}
+
+# Compute the BIP-143 sighash for a v0 segwit input.
+# Args:
+#   $1 unsigned-tx hex
+#   $2 input index (0-based)
+#   $3 scriptCode hex (for P2WPKH, this is 1976a914<hash160>88ac)
+#   $4 amount LE 8-byte hex
+#   $5 sighash type (default 01 = SIGHASH_ALL)
+# Output: 32-byte sighash hex.
+psbt:_bip143_sighash() {
+	local tx="$1" idx="$2" script_code="$3" amount_le="$4" sighash_type="${5:-01}"
+
+	# Parse the unsigned tx via the existing _take helpers. They use
+	# the globals psbt_hex / psbt_pos / psbt_len; save and restore so
+	# we don't clobber an in-flight decode/sign.
+	local saved_hex="${psbt_hex:-}" saved_pos="${psbt_pos:-0}" saved_len="${psbt_len:-0}"
+	psbt_hex="$tx"
+	local -gi psbt_len=${#psbt_hex} psbt_pos=0
+	PSBT_LAST_HEX=""
+	PSBT_LAST_VINT=0
+
+	# version (4 B LE)
+	psbt:_take 4 || { error "psbt sign: truncated version in unsigned tx"; return 1; }
+	local nVersion_le="$PSBT_LAST_HEX"
+
+	# inputs
+	psbt:_take_varint || { error "psbt sign: truncated input count"; return 1; }
+	local -i n_in=$PSBT_LAST_VINT
+	local prevouts="" sequences=""
+	local target_outpoint="" target_sequence=""
+	local k
+	for ((k=0; k<n_in; k++)); do
+		psbt:_take 32 || { error "psbt sign: truncated prev_txid at input $k"; return 1; }
+		local prev_txid="$PSBT_LAST_HEX"
+		psbt:_take 4 || { error "psbt sign: truncated prev_vout at input $k"; return 1; }
+		local prev_vout="$PSBT_LAST_HEX"
+		prevouts+="$prev_txid$prev_vout"
+		psbt:_take_varint || { error "psbt sign: truncated scriptSig length at input $k"; return 1; }
+		local -i ss_len=$PSBT_LAST_VINT
+		psbt:_take "$ss_len" || { error "psbt sign: truncated scriptSig at input $k"; return 1; }
+		psbt:_take 4 || { error "psbt sign: truncated sequence at input $k"; return 1; }
+		local seq="$PSBT_LAST_HEX"
+		sequences+="$seq"
+		if (( k == idx )); then
+			target_outpoint="$prev_txid$prev_vout"
+			target_sequence="$seq"
+		fi
+	done
+
+	# outputs
+	psbt:_take_varint || { error "psbt sign: truncated output count"; return 1; }
+	local -i n_out=$PSBT_LAST_VINT
+	local outputs=""
+	for ((k=0; k<n_out; k++)); do
+		psbt:_take 8 || { error "psbt sign: truncated output value at $k"; return 1; }
+		outputs+="$PSBT_LAST_HEX"
+		psbt:_take_varint || { error "psbt sign: truncated script length at output $k"; return 1; }
+		local -i sp_len=$PSBT_LAST_VINT
+		outputs+="$(psbt:_emit_varint "$sp_len")"
+		psbt:_take "$sp_len" || { error "psbt sign: truncated scriptPubKey at output $k"; return 1; }
+		outputs+="$PSBT_LAST_HEX"
+	done
+
+	# locktime
+	psbt:_take 4 || { error "psbt sign: truncated locktime"; return 1; }
+	local nLocktime_le="$PSBT_LAST_HEX"
+
+	# Restore the global parser state.
+	psbt_hex="$saved_hex"; psbt_pos=$saved_pos; psbt_len=$saved_len
+
+	if [ -z "$target_outpoint" ]; then
+		error "psbt sign: input index $idx out of range (tx has $n_in inputs)"
+		return 1
+	fi
+
+	local hashPrevouts; hashPrevouts="$(printf '%s' "$prevouts"  | psbt:_sha256d_hex)"
+	local hashSequence; hashSequence="$(printf '%s' "$sequences" | psbt:_sha256d_hex)"
+	local hashOutputs;  hashOutputs="$(printf '%s' "$outputs"    | psbt:_sha256d_hex)"
+
+	local sighash_type_le4; sighash_type_le4="$(wallet:_le32 "$((16#$sighash_type))")"
+
+	local preimage=""
+	preimage+="$nVersion_le"
+	preimage+="$hashPrevouts"
+	preimage+="$hashSequence"
+	preimage+="$target_outpoint"
+	preimage+="$(psbt:_emit_varint $(( ${#script_code} / 2 )))"
+	preimage+="$script_code"
+	preimage+="$amount_le"
+	preimage+="$target_sequence"
+	preimage+="$hashOutputs"
+	preimage+="$nLocktime_le"
+	preimage+="$sighash_type_le4"
+
+	printf '%s' "$preimage" | psbt:_sha256d_hex
+}
+
+# Parse a PSBT into structured per-input records. Populates the
+# parallel globals PSBT_PARSE_INPUT_RECORDS[i] (record blob without
+# the terminator) and PSBT_PARSE_OUTPUT_RECORDS[j]. Also exports
+# PSBT_PARSE_GLOBAL_RECORDS and PSBT_PARSE_UNSIGNED_TX.
+#
+# The "record blob" for a section is the concatenation of every
+# keylen+key+vallen+value triple, with NO trailing 0x00 — that byte
+# is added back at emit time.
+psbt:_parse_structured() {
+	psbt_hex="$1"
+	local -gi psbt_len=${#psbt_hex} psbt_pos=0
+	PSBT_LAST_HEX=""
+	PSBT_LAST_VINT=0
+	psbt:_take 5 || return 1
+	if [[ "$PSBT_LAST_HEX" != "70736274ff" ]]; then
+		error "psbt sign: bad magic '$PSBT_LAST_HEX' (expected '70736274ff')"
+		return 2
+	fi
+	# Collect the global section, then per-input, per-output sections.
+	# The unsigned-tx record sits in the global section as type 0x00.
+	PSBT_PARSE_GLOBAL_RECORDS=""
+	PSBT_PARSE_UNSIGNED_TX=""
+	PSBT_PARSE_INPUT_RECORDS=()
+	PSBT_PARSE_OUTPUT_RECORDS=()
+
+	local -i section=0
+	local cur_records=""
+	while (( psbt_pos < psbt_len )); do
+		psbt:_take_varint || { error "psbt sign: truncated keylen varint"; return 3; }
+		local -i keylen=$PSBT_LAST_VINT
+		if (( keylen == 0 )); then
+			# Stash the just-closed section.
+			case $section in
+				0) PSBT_PARSE_GLOBAL_RECORDS="$cur_records" ;;
+				*) ;;
+			esac
+			if (( section >= 1 )); then
+				# This branch handles any section beyond the global.
+				# We'll partition after the fact.
+				:
+			fi
+			(( section++ ))
+			cur_records=""
+			continue
+		fi
+		psbt:_take "$keylen" || { error "psbt sign: truncated key"; return 4; }
+		local key_hex="$PSBT_LAST_HEX"
+		local type_byte="${key_hex:0:2}"
+		psbt:_take_varint || { error "psbt sign: truncated vallen"; return 5; }
+		local -i vallen=$PSBT_LAST_VINT
+		psbt:_take "$vallen" || { error "psbt sign: truncated value"; return 6; }
+		local val_hex="$PSBT_LAST_HEX"
+		local rec=""
+		rec+="$(psbt:_emit_varint "$keylen")"
+		rec+="$key_hex"
+		rec+="$(psbt:_emit_varint "$vallen")"
+		rec+="$val_hex"
+		cur_records+="$rec"
+		if (( section == 0 )) && [[ "$type_byte" == "00" ]]; then
+			PSBT_PARSE_UNSIGNED_TX="$val_hex"
+		fi
+	done
+	# We accumulated everything into cur_records / GLOBAL_RECORDS but
+	# never split per-input / per-output. Re-do the walk: this time,
+	# count the number of inputs and outputs from the unsigned tx so
+	# we know how to partition the post-global sections.
+	if [ -z "$PSBT_PARSE_UNSIGNED_TX" ]; then
+		error "psbt sign: PSBT has no PSBT_GLOBAL_UNSIGNED_TX record"
+		return 7
+	fi
+	# Quick parse: input count is at offset 4 bytes (8 hex chars).
+	local saved_hex="$psbt_hex" saved_len="$psbt_len" saved_pos="$psbt_pos"
+	psbt_hex="$PSBT_PARSE_UNSIGNED_TX"
+	psbt_len=${#psbt_hex}; psbt_pos=8
+	psbt:_take_varint || { error "psbt sign: bad input count in unsigned tx"; return 8; }
+	local -i n_in=$PSBT_LAST_VINT
+	# Skip past the inputs to reach the output-count varint.
+	local k
+	for ((k=0; k<n_in; k++)); do
+		psbt:_take 36 || return 9  # txid + vout
+		psbt:_take_varint || return 9  # scriptSig len
+		psbt:_take "$PSBT_LAST_VINT" || return 9
+		psbt:_take 4 || return 9  # sequence
+	done
+	psbt:_take_varint || { error "psbt sign: bad output count in unsigned tx"; return 9; }
+	local -i n_out=$PSBT_LAST_VINT
+	psbt_hex="$saved_hex"; psbt_len=$saved_len; psbt_pos=$saved_pos
+
+	# Re-walk the PSBT structure to collect per-input / per-output
+	# blobs into the parallel arrays.
+	psbt_pos=0
+	psbt:_take 5 >/dev/null
+	section=0
+	cur_records=""
+	while (( psbt_pos < psbt_len )); do
+		psbt:_take_varint || return 10
+		local -i keylen=$PSBT_LAST_VINT
+		if (( keylen == 0 )); then
+			if   (( section == 0 ));              then PSBT_PARSE_GLOBAL_RECORDS="$cur_records"
+			elif (( section >= 1 && section <= n_in )); then PSBT_PARSE_INPUT_RECORDS[section-1]="$cur_records"
+			elif (( section <= n_in + n_out ));   then PSBT_PARSE_OUTPUT_RECORDS[section-1-n_in]="$cur_records"
+			fi
+			(( section++ ))
+			cur_records=""
+			continue
+		fi
+		psbt:_take "$keylen" || return 11
+		local key_hex="$PSBT_LAST_HEX"
+		psbt:_take_varint || return 12
+		local -i vallen=$PSBT_LAST_VINT
+		psbt:_take "$vallen" || return 13
+		local val_hex="$PSBT_LAST_HEX"
+		cur_records+="$(psbt:_emit_varint "$keylen")$key_hex$(psbt:_emit_varint "$vallen")$val_hex"
+	done
+	# Pad arrays so every input/output has a (possibly empty) entry.
+	while (( ${#PSBT_PARSE_INPUT_RECORDS[@]}  < n_in  )); do PSBT_PARSE_INPUT_RECORDS+=("");  done
+	while (( ${#PSBT_PARSE_OUTPUT_RECORDS[@]} < n_out )); do PSBT_PARSE_OUTPUT_RECORDS+=(""); done
+	PSBT_PARSE_N_IN=$n_in
+	PSBT_PARSE_N_OUT=$n_out
+}
+
+# Walk an input's record blob and pull out the value for a given
+# type byte (e.g. "01" for PSBT_IN_WITNESS_UTXO). Returns the
+# value hex on stdout (empty if not present).
+psbt:_input_record_value() {
+	local blob="$1" wanted_type="$2"
+	local -i pos=0 len=${#blob}
+	local saved_hex="${psbt_hex:-}" saved_pos="${psbt_pos:-0}" saved_len="${psbt_len:-0}"
+	psbt_hex="$blob"
+	local -gi psbt_len=${#blob} psbt_pos=0
+	PSBT_LAST_HEX=""
+	PSBT_LAST_VINT=0
+	local found=""
+	while (( psbt_pos < psbt_len )); do
+		psbt:_take_varint || break
+		local -i keylen=$PSBT_LAST_VINT
+		(( keylen == 0 )) && break
+		psbt:_take "$keylen" || break
+		local key_hex="$PSBT_LAST_HEX"
+		local type_byte="${key_hex:0:2}"
+		psbt:_take_varint || break
+		local -i vallen=$PSBT_LAST_VINT
+		psbt:_take "$vallen" || break
+		if [[ "$type_byte" == "$wanted_type" ]]; then
+			found="$PSBT_LAST_HEX"
+			break
+		fi
+	done
+	psbt_hex="$saved_hex"; psbt_pos=$saved_pos; psbt_len=$saved_len
+	printf '%s' "$found"
+}
+
+psbt:sign() {
+	local key_hex="${1:-}"
+	if [ -z "$key_hex" ]; then
+		error "psbt sign: usage: psbt sign <privkey-hex> (PSBT on stdin)"
+		return 2
+	fi
+	key_hex="${key_hex,,}"
+	if [[ ! "$key_hex" =~ ^[0-9a-f]{64}$ ]]; then
+		error "psbt sign: <privkey-hex> must be 64 lowercase hex chars (32 bytes)"
+		return 3
+	fi
+
+	local raw; raw="$(cat | tr -d '[:space:]' | tr A-F a-f)"
+	if [ -z "$raw" ]; then
+		error "psbt sign: empty stdin (expected hex-encoded PSBT)"
+		return 4
+	fi
+	if [[ ! "$raw" =~ ^[0-9a-f]+$ ]]; then
+		error "psbt sign: stdin is not hex"
+		return 5
+	fi
+
+	local pubkey; pubkey="$(psbt:_privkey_to_pubkey "$key_hex")" || {
+		error "psbt sign: could not derive pubkey from private key"
+		return 6
+	}
+	local pubkey_hash; pubkey_hash="$(printf '%s' "$pubkey" | psbt:_hash160_hex)"
+	local expected_script="0014${pubkey_hash}"
+
+	# Parse the PSBT into per-section blobs.
+	psbt:_parse_structured "$raw" || return 7
+
+	local -i n_in=$PSBT_PARSE_N_IN n_out=$PSBT_PARSE_N_OUT
+	local tx="$PSBT_PARSE_UNSIGNED_TX"
+
+	local -i i
+	for ((i=0; i<n_in; i++)); do
+		local blob="${PSBT_PARSE_INPUT_RECORDS[i]}"
+		local wu; wu="$(psbt:_input_record_value "$blob" "01")"
+		if [ -z "$wu" ]; then
+			# No WITNESS_UTXO record — can't sign without it.
+			continue
+		fi
+		# wu = 8-byte LE value + varint scriptlen + scriptPubKey.
+		local amount_le="${wu:0:16}"
+		# Decode the varint after the 16-char amount.
+		local rest="${wu:16}"
+		local -i v0=$((16#${rest:0:2}))
+		local script_start=2 script_len_bytes
+		if   (( v0 < 0xfd )); then script_len_bytes=$v0
+		elif (( v0 == 0xfd )); then
+			local lo="${rest:2:2}" hi="${rest:4:2}"
+			script_len_bytes=$(( (16#$hi << 8) | 16#$lo ))
+			script_start=6
+		else
+			error "psbt sign: WITNESS_UTXO with very long scriptPubKey unsupported"
+			continue
+		fi
+		local script="${rest:script_start:script_len_bytes*2}"
+		if [[ "$script" != "$expected_script" ]]; then
+			# Not signable by this key.
+			continue
+		fi
+		# scriptCode for P2WPKH per BIP-143: 1976a914 <20-byte hash> 88ac
+		local script_code="1976a914${pubkey_hash}88ac"
+		local sighash; sighash="$(psbt:_bip143_sighash "$tx" "$i" "$script_code" "$amount_le" 01)" || return 8
+		local sig; sig="$(psbt:_sign_sighash "$key_hex" "$sighash")" || return 9
+		# Append SIGHASH_ALL byte.
+		sig+="01"
+		# Insert PSBT_IN_PARTIAL_SIG record: keylen + (0x02 + pubkey) + vallen + (sig+sighash)
+		# key field = 0x02 (type) || compressed pubkey (33 B) = 34 bytes
+		local key_field="02${pubkey}"
+		local -i key_len=$(( ${#key_field} / 2 ))
+		local -i val_len=$(( ${#sig} / 2 ))
+		local new_record=""
+		new_record+="$(psbt:_emit_varint "$key_len")"
+		new_record+="$key_field"
+		new_record+="$(psbt:_emit_varint "$val_len")"
+		new_record+="$sig"
+		PSBT_PARSE_INPUT_RECORDS[i]+="$new_record"
+	done
+
+	# Re-emit the PSBT.
+	local out="70736274ff"
+	out+="$PSBT_PARSE_GLOBAL_RECORDS"
+	out+="00"
+	for ((i=0; i<n_in; i++)); do
+		out+="${PSBT_PARSE_INPUT_RECORDS[i]}"
+		out+="00"
+	done
+	local j
+	for ((j=0; j<n_out; j++)); do
+		out+="${PSBT_PARSE_OUTPUT_RECORDS[j]}"
+		out+="00"
+	done
 	printf '%s\n' "$out"
 }
 
@@ -1250,7 +1773,9 @@ wallet:build() {
 
 	# Collect UTXOs from every address in the wallet's ledger. The
 	# backend returns a JSON array per address; we flatten via jq.
-	local -a utxos_txid=() utxos_vout=() utxos_value=()
+	# Per-UTXO `addr` is tracked so the signer (FEAT-008 psbt sign,
+	# 1.13.0) can compute the input's scriptPubKey from the address.
+	local -a utxos_txid=() utxos_vout=() utxos_value=() utxos_addr=()
 	local _idx addr_ledger _label utxo_json txid vout value
 	while IFS=$'\t' read -r _idx addr_ledger _label; do
 		[ -z "$addr_ledger" ] && continue
@@ -1263,6 +1788,7 @@ wallet:build() {
 			utxos_txid+=( "$txid" )
 			utxos_vout+=( "$vout" )
 			utxos_value+=( "$value" )
+			utxos_addr+=( "$addr_ledger" )
 		done < <(printf '%s' "$utxo_json" | jq -r '.[] | [.txid, .vout, .value] | @tsv' 2>/dev/null)
 	done < "$ledger"
 
@@ -1346,18 +1872,37 @@ wallet:build() {
 	raw_tx+="00000000"                              # locktime
 
 	# --- wrap as a PSBT ---------------------------------------------
-	# Magic + global UNSIGNED_TX record + section terminator, then one
-	# empty terminator per input map and per output map. The psbt
-	# encode TSV interface can't represent purely-empty trailing
-	# sections (see psbt:help), so we emit the wire format directly.
+	# Magic + global UNSIGNED_TX record + section terminator, then per
+	# input map a PSBT_IN_WITNESS_UTXO record (type 0x01) carrying the
+	# prev-output's amount (8 B LE) + varint-prefixed scriptPubKey,
+	# followed by an end-of-section 0x00 byte. Output maps are empty.
+	# The PSBT_IN_WITNESS_UTXO record was added in 1.13.0 so that
+	# `psbt sign` (FEAT-008 partial) has everything BIP-143 sighash
+	# needs without re-fetching from the backend.
 	local psbt="70736274ff"
 	psbt+="01"                                      # global keylen=1
 	psbt+="00"                                      # key = PSBT_GLOBAL_UNSIGNED_TX
 	psbt+="$(psbt:_emit_varint $(( ${#raw_tx} / 2 )))"
 	psbt+="$raw_tx"
 	psbt+="00"                                      # close global
-	local i
-	for ((i=0; i<n_in; i++));  do psbt+="00"; done  # empty input maps
+	local i utxo_script utxo_record
+	for ((i=0; i<n_in; i++)); do
+		ix="${sel[i]}"
+		# scriptPubKey for the input's source address (same v0
+		# P2WPKH/P2WSH we accept on the output side).
+		if ! utxo_script="$(wallet:_address_to_script "${utxos_addr[ix]}")"; then
+			error "wallet build: failed to encode scriptPubKey for input address '${utxos_addr[ix]}'"
+			return 11
+		fi
+		utxo_record="$(wallet:_le64 "${utxos_value[ix]}")"
+		utxo_record+="$(psbt:_emit_varint $(( ${#utxo_script} / 2 )))"
+		utxo_record+="$utxo_script"
+		psbt+="01"                                  # keylen=1
+		psbt+="01"                                  # key = PSBT_IN_WITNESS_UTXO
+		psbt+="$(psbt:_emit_varint $(( ${#utxo_record} / 2 )))"
+		psbt+="$utxo_record"
+		psbt+="00"                                  # close input map
+	done
 	for ((i=0; i<n_out; i++)); do psbt+="00"; done  # empty output maps
 
 	printf '%s\n' "$psbt"

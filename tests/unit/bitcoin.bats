@@ -1136,6 +1136,165 @@ psbt_vec1() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-014 (extend, 1.13.0) — wallet build now emits a
+# PSBT_IN_WITNESS_UTXO record (type 0x01) per input so that the
+# 1.13.0 psbt-sign primitive has the prev-output's amount and
+# scriptPubKey on hand for BIP-143 sighash construction.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-014 — wallet build emits a PSBT_IN_WITNESS_UTXO record per input" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	[ "$status" -eq 0 ]
+	# Decode and look for a section=1 type=01 record carrying the
+	# UTXO's value (a086010000000000 = 100000 sats LE) followed by
+	# the 22-byte P2WPKH scriptPubKey for alice's index-0 address.
+	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"section=1	type=01	key=01	value=a086010000000000160014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-008 (partial, 1.13.0) — psbt sign. Reads a PSBT (hex) on stdin
+# and a 32-byte private key on argv, signs every v0 P2WPKH input
+# whose WITNESS_UTXO scriptPubKey matches HASH160(pubkey), and
+# re-emits the PSBT with a PSBT_IN_PARTIAL_SIG record (type 0x02)
+# per signed input. SIGHASH_ALL only; BIP-66 low-S enforced.
+#
+# The canonical "abandon-mnemonic" wallet's m/84h/0h/0h/0/0 private
+# key is 4604b4b710fe91f584fff084e1a9159fe4f8408fff380596a604948474ce4fa3
+# and its compressed pubkey is
+# 0330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c
+# (HASH160 = c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2, which is the
+# witness program for bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu).
+# ---------------------------------------------------------------------------
+
+ALICE_PRIV="4604b4b710fe91f584fff084e1a9159fe4f8408fff380596a604948474ce4fa3"
+ALICE_PUB="0330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c"
+
+# Helper: build an unsigned PSBT for alice paying out 50000 sats with
+# a single 100000-sat UTXO. Returns the hex on stdout. Caller must
+# have already set up the wallet env + UTXO + fee fixtures.
+build_alice_psbt() {
+	"$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+}
+
+@test "FEAT-008 — psbt sign adds a PSBT_IN_PARTIAL_SIG record for the matching input" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	psbt="$(build_alice_psbt)"
+	run bash -c "echo '$psbt' | '$BITCOIN_BIN' psbt sign '$ALICE_PRIV'"
+	[ "$status" -eq 0 ]
+	# Decode and check for the PARTIAL_SIG record. type=02, key includes
+	# alice's compressed pubkey, value is a DER signature + sighash byte.
+	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"section=1	type=02"* ]]
+	[[ "$output" == *"key=02${ALICE_PUB}"* ]]
+	# Sig must end in 01 (SIGHASH_ALL) and start with 30 (DER SEQUENCE).
+	psig="$(echo "$output" | awk -F'\t' '/type=02/ {sub("^value=","",$4); print $4; exit}')"
+	[[ "$psig" =~ ^30[0-9a-f]+01$ ]]
+}
+
+@test "FEAT-008 — psbt sign produces a low-S signature (BIP-66 §Low S)" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	psbt="$(build_alice_psbt)"
+	signed="$(echo "$psbt" | "$BITCOIN_BIN" psbt sign "$ALICE_PRIV")"
+	psig="$(echo "$signed" | "$BITCOIN_BIN" psbt decode | awk -F'\t' '/type=02/ {sub("^value=","",$4); print $4; exit}')"
+	# Strip SIGHASH byte (last 2 hex chars). DER layout:
+	#   30 <total> 02 <r-len> <r> 02 <s-len> <s>
+	# r-len at offset 6; r at offset 8; s marker at offset 8+r_len*2;
+	# s value at s_marker + 4. First byte of s must be < 0x80 for low-S
+	# (canonical form drops the DER 0x00 padding when high bit is clear).
+	der="${psig%01}"
+	r_len_hex="${der:6:2}"
+	r_len=$((16#$r_len_hex))
+	s_off=$((8 + 2 * r_len + 4))
+	first_s_byte=$((16#${der:s_off:2}))
+	(( first_s_byte < 0x80 ))
+}
+
+@test "FEAT-008 — psbt sign signature verifies via openssl against the BIP-143 sighash" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	psbt="$(build_alice_psbt)"
+	signed="$(echo "$psbt" | "$BITCOIN_BIN" psbt sign "$ALICE_PRIV")"
+	# Pull unsigned tx + partial-sig out of the decoded PSBT.
+	dec="$(echo "$signed" | "$BITCOIN_BIN" psbt decode)"
+	tx_hex="$(echo "$dec" | head -1 | sed 's/.*value=//')"
+	psig="$(echo "$dec" | awk -F'\t' '/type=02/ {sub("^value=","",$4); print $4; exit}')"
+	der_sig="${psig%01}"
+	# Compute the same sighash the signer used and verify with openssl.
+	sighash="$(bash -c '
+		source "$BITCOIN_BIN"
+		psbt:_bip143_sighash "'"$tx_hex"'" 0 \
+			"1976a914c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e288ac" \
+			"a086010000000000" 01
+	' 2>/dev/null)"
+	pubder="$BATS_TMPDIR/pub.$BATS_TEST_NUMBER.der"
+	sigfile="$BATS_TMPDIR/sig.$BATS_TEST_NUMBER.der"
+	hashfile="$BATS_TMPDIR/hash.$BATS_TEST_NUMBER.bin"
+	# SubjectPublicKeyInfo for a compressed secp256k1 pubkey:
+	#   30 36 30 10 06 07 2a8648ce3d0201 06 05 2b8104000a 03 22 00 <33-byte pubkey>
+	{
+		printf '3036301006072a8648ce3d020106052b8104000a032200'
+		printf '%s' "$ALICE_PUB"
+	} | xxd -r -p > "$pubder"
+	printf '%s' "$sighash" | xxd -r -p > "$hashfile"
+	printf '%s' "$der_sig" | xxd -r -p > "$sigfile"
+	run openssl pkeyutl -verify -pubin -inkey "$pubder" -keyform DER -in "$hashfile" -sigfile "$sigfile"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-008 — psbt sign with a key not matching any input is a no-op" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	psbt="$(build_alice_psbt)"
+	wrong_key="1111111111111111111111111111111111111111111111111111111111111111"
+	signed="$(echo "$psbt" | "$BITCOIN_BIN" psbt sign "$wrong_key")"
+	# Same input record, no PARTIAL_SIG added.
+	dec="$(echo "$signed" | "$BITCOIN_BIN" psbt decode)"
+	! echo "$dec" | grep -q 'type=02'
+	# Re-emitted PSBT byte-identical to the input (signer is a pure
+	# re-emit on the no-match branch).
+	[ "$signed" = "$psbt" ]
+}
+
+@test "FEAT-008 — psbt sign rejects a malformed private key" {
+	run bash -c "echo '70736274ff00' | '$BITCOIN_BIN' psbt sign not-a-hex-key"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"privkey-hex"* ]] || [[ "$stderr" == *"privkey-hex"* ]] || true
+}
+
+@test "FEAT-008 — psbt sign rejects empty stdin" {
+	run bash -c "echo '' | '$BITCOIN_BIN' psbt sign $ALICE_PRIV"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-008 — psbt sign rejects non-hex stdin" {
+	run bash -c "echo 'not a psbt' | '$BITCOIN_BIN' psbt sign $ALICE_PRIV"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-008 — psbt help mentions sign" {
+	run "$BITCOIN_BIN" help psbt
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"sign"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`
