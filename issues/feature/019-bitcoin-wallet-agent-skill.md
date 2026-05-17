@@ -5,6 +5,57 @@ priority: medium
 status: open
 ---
 
+## Progress (1.16.0 shipped — skill content + opencode entry + install plumbing)
+
+Four of the six acceptance criteria shipped; AC3 (idempotent
+symlink dance) and AC5 (manual trigger verification against a
+live agent) remain open.
+
+- **`skills/bitcoin-wallet/SKILL.md`** rewritten against the
+  1.15.0 verb set. Frontmatter includes the agent-triggering
+  description. Body covers the four design principles, the
+  wallet model, eight workflow recipes (new, restore, derive,
+  send end-to-end, cold-sign, backend selection, descriptor
+  checksum), and seven guardrails (no mnemonic logging, no
+  seed bypass, testnet default, mainnet caution, BIP citation,
+  no auto-broadcast, pre-build reversibility). Cites
+  BIP-32/39/141/143/173/174/380 by both upstream URL and
+  vendored path under `share/doc/bitcoin/bips/`.
+
+- **`skills/bitcoin-wallet/opencode.md`** is the opencode
+  command-form entry. Same structural sections as SKILL.md but
+  table-form recipes and a cross-reference back to SKILL.md for
+  the long-form details.
+
+- **`Makefile.in install`** extended to copy each
+  `skills/$(PACKAGE)-*/SKILL.md` to
+  `$(DATADIR)/claude/skills/<name>/SKILL.md` and each
+  `opencode.md` to
+  `$(DATADIR)/opencode/commands/<name>.md`. The existing
+  `install-skills-user` target then symlinks those into the
+  user's per-agent directories iff they exist.
+
+7 new bats tests cover: SKILL.md frontmatter; four design
+principles; every wallet verb shipped through 1.15.0; seven
+guardrails; BIP citations by local path; opencode.md presence +
+SKILL.md cross-reference; Makefile install referencing both
+artefacts.
+
+### Deferred to ROADMAP-1.17.0+
+
+- **AC3** — end-to-end test of `make install-skills-user`
+  idempotency. The target exists and is wired against the
+  install layout shipped here; testing it from bats requires
+  writing to `$HOME/.claude/skills/` and is tracked as a
+  follow-up.
+- **AC5** — manual verification that the skill description
+  triggers on the listed operations against a real agent.
+  Operationally tied to specific agent versions; can't be
+  tested in CI.
+- Raven / claude.ai web variants of the skill — opencode +
+  Claude Code skill cover the agents the foundation toolchain
+  uses today.
+
 # `bitcoin-wallet` agent skill — educate AI agents on the wallet
 
 ## Description

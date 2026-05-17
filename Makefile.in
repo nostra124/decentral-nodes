@@ -70,6 +70,26 @@ install:
 		cp -a share/$(PACKAGE)/* \
 		      $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/; \
 	fi
+	# FEAT-019: agent skills. Each skills/$(PACKAGE)-<name>/ ships
+	# its SKILL.md (Claude / generic) to share/claude/skills/<name>/
+	# and its opencode.md to share/opencode/commands/<name>.md. The
+	# `install-skills-user` target later symlinks these into the
+	# user's per-agent dirs iff those dirs exist.
+	@if ls -d skills/$(PACKAGE)-* >/dev/null 2>&1; then \
+		for skill in skills/$(PACKAGE)-*; do \
+			name=$$(basename $$skill); \
+			if [ -f "$$skill/SKILL.md" ]; then \
+				mkdir -p $(BUILD_DIR)$(DATADIR)/claude/skills/$$name; \
+				install -m 644 "$$skill/SKILL.md" \
+				    $(BUILD_DIR)$(DATADIR)/claude/skills/$$name/SKILL.md; \
+			fi; \
+			if [ -f "$$skill/opencode.md" ]; then \
+				mkdir -p $(BUILD_DIR)$(DATADIR)/opencode/commands; \
+				install -m 644 "$$skill/opencode.md" \
+				    $(BUILD_DIR)$(DATADIR)/opencode/commands/$$name.md; \
+			fi; \
+		done; \
+	fi
 	# VERSION → $DATADIR/<pkg>/version : the runtime version
 	# string the binary reads (FEAT-194). The binary's two-path
 	# fallback resolves to this file when invoked as the installed

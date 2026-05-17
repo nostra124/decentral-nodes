@@ -1568,6 +1568,90 @@ signed_alice_psbt() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-019 (partial, 1.16.0) — bitcoin-wallet agent skill. The AI-
+# facing companion to the FEAT-015 human walkthrough. Lives at
+# skills/bitcoin-wallet/{SKILL.md,opencode.md} and is installed by
+# the Makefile into share/claude/skills/ and share/opencode/commands/.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-019 — SKILL.md exists with the required frontmatter" {
+	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	[ -s "$skill" ]
+	# YAML frontmatter: --- ... name: bitcoin-wallet ... description: ... ---
+	head -1 "$skill" | grep -q '^---$'
+	grep -q '^name: bitcoin-wallet' "$skill"
+	grep -q '^description:' "$skill"
+}
+
+@test "FEAT-019 — SKILL.md opens with the four design principles" {
+	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	# All four words must appear in the design-principles section.
+	for word in Educational Functional Decentralized Simple; do
+		grep -q -F "$word" "$skill"
+	done
+}
+
+@test "FEAT-019 — SKILL.md references every wallet verb shipped through 1.15.0" {
+	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	for recipe in "wallet new" "wallet derive" "wallet balance" \
+		"wallet label" "wallet build" "wallet sign" "wallet send" \
+		"wallet broadcast" "wallet push" "wallet pull" \
+		"psbt finalize" "psbt extract" "psbt decode" \
+		"backend set" "backend estimate-fee" \
+		"descriptor checksum"; do
+		grep -q -F "$recipe" "$skill"
+	done
+}
+
+@test "FEAT-019 — SKILL.md spells out the guardrails an agent must hold" {
+	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	# The five guardrails the skill spec enumerates.
+	grep -q -i 'never print.*mnemonic' "$skill"
+	grep -q -i 'never bypass .secret' "$skill"
+	grep -q -i 'testnet\|regtest' "$skill"
+	grep -q -i 'mainnet' "$skill"
+	grep -q -i 'cite the BIP' "$skill"
+	grep -q -i 'auto-broadcast' "$skill"
+}
+
+@test "FEAT-019 — SKILL.md cites the vendored BIPs by local path" {
+	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	grep -q 'share/doc/bitcoin/bips/' "$skill"
+	# At least one BIP from each major family the wallet implements.
+	for bip in "BIP-32" "BIP-39" "BIP-141" "BIP-143" "BIP-173" "BIP-174" "BIP-380"; do
+		grep -q -F "$bip" "$skill"
+	done
+}
+
+@test "FEAT-019 — opencode entry exists with matching content" {
+	oc="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/opencode.md"
+	[ -s "$oc" ]
+	# YAML frontmatter for opencode commands.
+	head -1 "$oc" | grep -q '^---$'
+	grep -q '^description:' "$oc"
+	# Cross-references SKILL.md so users know where the full
+	# manifest lives.
+	grep -q 'SKILL.md' "$oc"
+	# Covers the same workflow recipes (subset is fine since opencode
+	# entries can be terser).
+	for verb in "wallet new" "wallet send" "psbt finalize" "psbt extract"; do
+		grep -q -F "$verb" "$oc"
+	done
+}
+
+@test "FEAT-019 — Makefile install installs SKILL.md and opencode.md" {
+	mk="$BATS_TEST_DIRNAME/../../Makefile.in"
+	# The install target must reference both skill artefacts;
+	# pre-existing install-skills-user only consumes what install puts
+	# under share/, so the install target is the gate.
+	grep -q 'SKILL.md' "$mk"
+	grep -q 'opencode.md' "$mk"
+	# Destination paths the agent dirs are symlinked from.
+	grep -q 'share/claude/skills\|claude/skills' "$mk"
+	grep -q 'opencode/commands' "$mk"
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`
