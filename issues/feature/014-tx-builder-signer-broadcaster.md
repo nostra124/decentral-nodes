@@ -5,6 +5,33 @@ priority: high
 status: open
 ---
 
+## Progress (1.21.0 shipped — mainnet-send guard closes AC 5)
+
+`bitcoin wallet send` learns a `--mainnet` flag and reads each
+wallet's `network=` line from its `config`. If the wallet is
+configured for mainnet, send refuses to broadcast unless
+`--mainnet` is supplied; the error names the file and the
+required flag. Other networks (testnet / regtest / signet /
+unset) proceed unconditionally, and `--mainnet` is silently
+accepted there. The guard sits at the broadcast step only —
+build / sign / finalize / extract stay unguarded since none of
+them touch the network.
+
+New helper `wallet:_network` reads the config line with a
+`testnet` fallback for missing-line / missing-file cases (the
+educational default since 1.3.0's `wallet new`).
+
+4 new bats cases: testnet wallet sends without --mainnet;
+empty-config wallet treated as testnet; mainnet wallet refuses
+without --mainnet; mainnet wallet succeeds with --mainnet;
+non-mainnet wallets accept --mainnet as a silent no-op. Full
+suite: 175 ok / 0 not ok.
+
+This closes the FEAT-014 deferred item that 1.14.0 left open
+("Mainnet-send guard (`--mainnet` flag; acceptance criterion 5)
+— Currently testnet-by-default…"). The original AC 5 is now
+fully satisfied.
+
 ## Progress (1.14.0 shipped — full build→sign→send pipeline for v0 P2WPKH)
 
 `bitcoin wallet broadcast <name>` (1.8.0) reads raw transaction

@@ -43,16 +43,22 @@ completion is context-aware for psbt / backend / descriptor;
 walkthrough references every wallet verb; walkthrough cites
 the standards table. Total bats now 129.
 
-### Deferred to ROADMAP-1.16.0+
+### Deferred to ROADMAP-1.22.0+
 
 - **AC5** — every walkthrough command exercised by
   `tests/sit/`. Tracked under FEAT-016; needs the podman /
   regtest harness which the cloud sandbox can't run.
-- **AC6** — default network = testnet/regtest on a fresh
-  install. Pairs with the per-wallet config work that
-  FEAT-012 deferred.
 - **AI-agent walkthrough** — same content, agent-facing form.
   Tracked under FEAT-019.
+- ~~AC6~~ — default network = testnet on a fresh install.
+  Closed in 1.21.0: `wallet new` has written
+  `network=testnet` to `<wallet>/config` since 1.3.0
+  (FEAT-010), and 1.21.0's `wallet send --mainnet` guard
+  reads that line and refuses to broadcast against a
+  mainnet-configured wallet without explicit opt-in. The
+  per-wallet network field is the source of truth; a
+  top-level `bitcoin config set network` is not needed for
+  the educational walkthrough's threat model.
 
 # `bitcoin(1)` man page, bash completion, and README walkthrough
 

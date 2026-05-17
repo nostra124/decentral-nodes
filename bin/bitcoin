@@ -1993,9 +1993,11 @@ wallet:help() {
 	                    for every address in the wallet's ledger, pipe the
 	                    PSBT through 'psbt sign' for each. Inputs the keys
 	                    can't sign pass through unmodified.
-	  send <name> <addr> <sats> [--fee-rate sat/vB]
+	  send <name> <addr> <sats> [--fee-rate sat/vB] [--mainnet]
 	                    end-to-end: build | sign | psbt finalize | psbt extract
 	                    | broadcast. Prints the txid the backend returned.
+	                    --mainnet is required when the wallet's config says
+	                    network=mainnet; ignored on other networks.
 	  broadcast <name>  POST raw-tx hex from stdin to the active backend
 	  index <name>      for every address in the wallet's ledger, fetch
 	                    every tx via 'backend get-address-txs' and cache
@@ -2654,11 +2656,22 @@ wallet:sign() {
 }
 
 wallet:send() {
-	# Same arg shape as `wallet build`. We don't re-parse here;
-	# whatever the user passes is forwarded to build.
-	local name="${1:-}"
+	# Same arg shape as `wallet build`. We don't re-parse positional
+	# args here; whatever the user passes is forwarded to build. The
+	# only flag we lift out is `--mainnet`, the broadcast-side guard
+	# added in 1.21.0 for FEAT-014.
+	local name="" mainnet=0
+	local -a fwd_args=()
+	local arg
+	for arg in "$@"; do
+		case "$arg" in
+			--mainnet) mainnet=1 ;;
+			*) fwd_args+=( "$arg" ) ;;
+		esac
+	done
+	name="${fwd_args[0]:-}"
 	if [ -z "$name" ]; then
-		error "wallet send: usage: wallet send <name> <addr> <sats> [--fee-rate sat/vB]"
+		error "wallet send: usage: wallet send <name> <addr> <sats> [--fee-rate sat/vB] [--mainnet]"
 		return 2
 	fi
 	local path; path="$(wallet:_path "$name")"
@@ -2666,10 +2679,21 @@ wallet:send() {
 		error "wallet send: no such wallet '$name' at $path"
 		return 3
 	fi
+	# Mainnet guard: a wallet whose config says `network=mainnet`
+	# refuses to broadcast unless the user explicitly opted in.
+	# Other networks (testnet, regtest, signet, unset) proceed
+	# unconditionally; --mainnet is silently accepted there.
+	local net; net="$(wallet:_network "$name")"
+	if [ "$net" = "mainnet" ] && (( ! mainnet )); then
+		error "wallet send: wallet '$name' is configured for mainnet (config: network=mainnet); pass --mainnet to confirm an irreversible broadcast"
+		return 8
+	fi
 	# Compose build | sign | finalize | extract | broadcast in-shell.
 	# A pipefail-style abort: capture the build PSBT first so a
 	# build-time failure surfaces with its own error message.
-	local psbt; psbt="$(wallet:build "$@")" || {
+	# fwd_args[] is the original arg list minus --mainnet (which is
+	# a send-only flag; wallet build doesn't know about it).
+	local psbt; psbt="$(wallet:build "${fwd_args[@]}")" || {
 		error "wallet send: wallet build failed"
 		return 4
 	}
@@ -2686,6 +2710,21 @@ wallet:send() {
 		return 7
 	}
 	printf '%s\n' "$raw_tx" | wallet:broadcast "$name"
+}
+
+# Read the wallet's `network=` line from its config. Returns the
+# value or "testnet" if the line is missing (consistent with
+# wallet new's default). Used by the wallet send mainnet guard.
+wallet:_network() {
+	local name="$1"
+	local cfg; cfg="$(wallet:_path "$name")/config"
+	if [ ! -f "$cfg" ]; then
+		echo testnet
+		return
+	fi
+	local v
+	v="$(awk -F= '$1 == "network" { print $2; exit }' "$cfg")"
+	echo "${v:-testnet}"
 }
 
 # ---------------------------------------------------------------------------
