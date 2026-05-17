@@ -5,7 +5,47 @@ priority: medium
 status: open
 ---
 
-## Progress (1.17.0 shipped — read path: index + tx + history)
+## Progress (1.19.0 shipped — labels + history filter; AC 7 still deferred)
+
+Six of seven acceptance criteria are closed; only AC 7
+(push/pull conflict resolution for divergent labels) remains
+open. That last item pairs with FEAT-011's deferred custom
+merge resolvers and is its own session of work.
+
+- **`bitcoin wallet label <kind> <name> <key> <text>`** with
+  three kinds — `tx`, `utxo`, `addr`:
+  - `tx <txid>` → row in `labels/tx` (TSV: `txid\ttext`)
+  - `utxo <txid:vout>` → row in `labels/utxo`
+  - `addr <addr>` → 3rd column of the `addresses` ledger
+    (pre-1.19.0 storage; preserved for backward compatibility)
+  Empty `<text>` clears the entry. Tabs and newlines in the
+  text are rejected (storage is TSV). Each edit commits one
+  line so push/pull conflict resolution stays line-granular.
+
+- **Backward-compat:** `wallet label <name> <addr> <text>`
+  (pre-1.19.0 3-arg form, no `<kind>` prefix) keeps working —
+  the dispatcher routes it as `wallet label addr ...`. The
+  pre-existing FEAT-013 bats test for the addr label passes
+  unmodified, confirming compat.
+
+- **`bitcoin wallet history <name> [--label <pattern>]`**
+  learns a `--label` filter. The filter loads `labels/tx` into
+  an awk map and keeps history rows whose tx-label contains
+  `<pattern>` as a case-insensitive substring. Rows without a
+  matching label are dropped. No labels file → empty output.
+
+- **`bitcoin wallet tx <name> <txid>`** gains a third output
+  section, `=== labels ===`, after the existing decoded + hex
+  sections. Lists the tx label (if any) and every utxo label
+  whose key has the same `txid:` prefix. The section is
+  suppressed entirely when no labels match.
+
+10 new bats tests for the label expansion + history filter +
+tx labels section, all of which pass alongside the 7 pre-1.19.0
+FEAT-018 tests (so the read path stays intact). Total bats now
+164.
+
+### 1.17.0 progress (read path)
 
 Acceptance criteria 1, 2, 3, and 6 (the read path + idempotency)
 are closed. Criteria 4, 5, and 7 (label expansion and push/pull
@@ -50,21 +90,18 @@ hex and json; `wallet tx` works without backend access (cache-
 only); `wallet tx` rejects un-indexed txids; `wallet index`
 rejects missing wallets. Total bats now 146.
 
-### Deferred to ROADMAP-1.18.0+
+### Deferred to ROADMAP-1.20.0+
 
-- **AC 4–5** — `wallet label tx <wallet> <txid> <label>`,
-  `wallet label utxo <wallet> <txid:vout> <label>`, and
-  `wallet history --label <pattern>` filter. Needs a breaking
-  restructure of the existing `wallet label <name> <addr>
-  <text>` signature into a `wallet label <kind> ...` form.
 - **AC 7** — push/pull conflict resolution for divergent
-  labels. Pairs with the label expansion above and with
-  FEAT-011's deferred custom merge resolvers.
+  labels. Pairs with FEAT-011's deferred custom merge
+  resolvers (addresses-union, psbts-last-writer-wins,
+  descriptors-conflict-as-error). One session by itself.
 - bitcoind / blockstream backend implementations of
-  `get-address-txs`. Stubs ship in this release.
-- `wallet tx` pretty-print beyond cat-the-json. The mempool
-  JSON is already structured; consumers can pipe through `jq`
-  for now.
+  `get-address-txs`. Stubs ship today.
+- Multi-line labels. Storage is TSV; tabs and newlines in
+  labels are rejected.
+- ~~AC 4–5~~ — `wallet label tx|utxo` + `--label` filter.
+  Shipped in 1.19.0.
 
 # Client-side transaction index and labels for tx / UTXO / address
 

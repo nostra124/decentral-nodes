@@ -1861,6 +1861,111 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-018 (partial, 1.19.0) — wallet label tx|utxo + wallet history
+# --label filter + wallet tx labels section. Builds on 1.17.0's
+# read path; consumes the `transactions/` cache and the new
+# `labels/{tx,utxo}` files.
+# ---------------------------------------------------------------------------
+
+# Helper: a wallet pre-populated with one indexed tx, so the label
+# verbs have a real txid to annotate. Mirrors the 1.17.0 alice_tx
+# fixture but is parameterless so multiple tests can reuse it.
+setup_indexed_alice() {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/txs" "$(alice_tx_fixture)"
+	curl_fixture "https://mempool.space/api/tx/abc123/hex" "0200000001deadbeef"
+	"$BITCOIN_BIN" wallet index alice >/dev/null
+}
+
+@test "FEAT-018 — wallet label tx writes to labels/tx and commits" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet label tx alice abc123 "rent payment"
+	[ "$status" -eq 0 ]
+	labels="$XDG_DATA_HOME/bitcoin/wallets/alice/labels/tx"
+	[ -s "$labels" ]
+	grep -q $'^abc123\trent payment$' "$labels"
+}
+
+@test "FEAT-018 — wallet label utxo writes to labels/utxo" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet label utxo alice abc123:0 "faucet money"
+	[ "$status" -eq 0 ]
+	labels="$XDG_DATA_HOME/bitcoin/wallets/alice/labels/utxo"
+	[ -s "$labels" ]
+	grep -q $'^abc123:0\tfaucet money$' "$labels"
+}
+
+@test "FEAT-018 — wallet label utxo rejects a malformed <txid:vout> key" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet label utxo alice "not-a-utxo-key" "foo"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-018 — empty <text> clears the label" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label tx alice abc123 "rent payment" >/dev/null
+	run "$BITCOIN_BIN" wallet label tx alice abc123 ""
+	[ "$status" -eq 0 ]
+	labels="$XDG_DATA_HOME/bitcoin/wallets/alice/labels/tx"
+	# File still exists but is empty (no row for abc123).
+	! grep -q '^abc123' "$labels"
+}
+
+@test "FEAT-018 — labels reject tabs and newlines in <text>" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet label tx alice abc123 $'has\ttab'
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-018 — backward-compat: wallet label <name> <addr> <text> still works" {
+	# Pre-1.19.0 callers don't pass a <kind>; the 3-arg form must
+	# continue to write to the addresses ledger.
+	setup_indexed_alice
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	run "$BITCOIN_BIN" wallet label alice "$addr" "compat label"
+	[ "$status" -eq 0 ]
+	grep -q "compat label" "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses"
+}
+
+@test "FEAT-018 — wallet history --label filters by case-insensitive substring" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label tx alice abc123 "Rent Payment" >/dev/null
+	run "$BITCOIN_BIN" wallet history alice --label rent
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"abc123"* ]]
+	# A non-matching pattern returns nothing.
+	run "$BITCOIN_BIN" wallet history alice --label groceries
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "FEAT-018 — wallet history --label requires a pattern argument" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet history alice --label
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-018 — wallet tx emits a labels section when annotated" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label tx   alice abc123   "rent payment" >/dev/null
+	"$BITCOIN_BIN" wallet label utxo alice abc123:0 "faucet money" >/dev/null
+	run "$BITCOIN_BIN" wallet tx alice abc123
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"=== labels ==="* ]]
+	[[ "$output" == *"rent payment"* ]]
+	[[ "$output" == *"faucet money"* ]]
+}
+
+@test "FEAT-018 — wallet tx omits the labels section when there are none" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet tx alice abc123
+	[ "$status" -eq 0 ]
+	[[ "$output" != *"=== labels ==="* ]]
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`
