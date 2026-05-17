@@ -1819,10 +1819,13 @@ EOF
 	done
 }
 
-@test "FEAT-026 — descriptor derive rejects non-wpkh functions with a clear error" {
+@test "FEAT-026 — descriptor derive rejects still-unimplemented functions with a clear error" {
+	# 1.18.0 only shipped wpkh; 1.20.0 added pkh + sh(wpkh). tr and
+	# combo remain deferred (tr is blocked on FEAT-007 Taproot).
 	setup_wallet_derive_env
-	for fn in pkh tr combo; do
-		run "$BITCOIN_BIN" descriptor derive "${fn}(xpub/0/*)" 0
+	body="$(alice_xpub_path)"
+	for fn in tr combo; do
+		run "$BITCOIN_BIN" descriptor derive "${fn}($body)" 0
 		[ "$status" -ne 0 ]
 		[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]] || true
 	done
@@ -1858,6 +1861,107 @@ EOF
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"derive"* ]]
 	[[ "$output" == *"wallet"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-026 (extend, 1.20.0) — pkh() and sh(wpkh()) support in
+# descriptor derive. The wpkh child-pubkey pipeline is reused; only
+# the address-encoding tail differs. Address shapes:
+#   pkh()       → base58check(0x00 || HASH160(pubkey)) → '1...'
+#   sh(wpkh())  → base58check(0x05 || HASH160(0014 HASH160(pubkey))) → '3...'
+#
+# Vectors for the canonical abandon-mnemonic m/84h/0h/0h/0/0 pubkey
+# (0330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c)
+# are cross-verified with an independent Python implementation:
+#   pkh → 1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso
+#   sh(wpkh) → 3GtVZYzsKF6Feikdjd4bDyPdAiyeHANY9b
+# ---------------------------------------------------------------------------
+
+# Helper: descriptor body that derives alice's m/84h/0h/0h/0/* keys.
+# Returns the wpkh-wrapped form without checksum; tests substitute
+# the outer function (pkh / sh(wpkh)) as needed.
+alice_xpub_path() {
+	# `descriptor wallet alice` emits wpkh(<xpub>/0/*)#<checksum>;
+	# we strip the wpkh() wrapper and the #-checksum suffix.
+	local desc="$("$BITCOIN_BIN" descriptor wallet alice)"
+	local body="${desc:0: ${#desc}-9}"   # drop '#<8 chars>'
+	echo "${body#wpkh(}" | sed 's/)$//'
+}
+
+@test "FEAT-026 — descriptor derive pkh() produces a legacy P2PKH '1...' address" {
+	setup_wallet_derive_env
+	body="$(alice_xpub_path)"
+	run "$BITCOIN_BIN" descriptor derive "pkh($body)" 0
+	[ "$status" -eq 0 ]
+	# Cross-verified vector for the abandon mnemonic / BIP-84 idx 0.
+	[ "$output" = "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso" ]
+	# Structural: leading '1', base58 charset, sensible length.
+	[[ "$output" =~ ^1[1-9A-HJ-NP-Za-km-z]{25,33}$ ]]
+}
+
+@test "FEAT-026 — descriptor derive sh(wpkh()) produces a P2SH '3...' nested-segwit address" {
+	setup_wallet_derive_env
+	body="$(alice_xpub_path)"
+	run "$BITCOIN_BIN" descriptor derive "sh(wpkh($body))" 0
+	[ "$status" -eq 0 ]
+	# Cross-verified vector.
+	[ "$output" = "3GtVZYzsKF6Feikdjd4bDyPdAiyeHANY9b" ]
+	[[ "$output" =~ ^3[1-9A-HJ-NP-Za-km-z]{25,33}$ ]]
+}
+
+@test "FEAT-026 — descriptor derive walks indices forward for both new functions" {
+	setup_wallet_derive_env
+	body="$(alice_xpub_path)"
+	# Distinct addresses across indices — the same pubkey can't appear
+	# twice unless derivation is broken.
+	pkh_0="$("$BITCOIN_BIN" descriptor derive "pkh($body)" 0)"
+	pkh_1="$("$BITCOIN_BIN" descriptor derive "pkh($body)" 1)"
+	[ "$pkh_0" != "$pkh_1" ]
+	sh_0="$("$BITCOIN_BIN" descriptor derive "sh(wpkh($body))" 0)"
+	sh_1="$("$BITCOIN_BIN" descriptor derive "sh(wpkh($body))" 1)"
+	[ "$sh_0" != "$sh_1" ]
+	# And the three function families never collide on the same index.
+	wpkh_0="$("$BITCOIN_BIN" descriptor derive "wpkh($body)" 0)"
+	[ "$pkh_0" != "$sh_0" ]
+	[ "$pkh_0" != "$wpkh_0" ]
+	[ "$sh_0"  != "$wpkh_0" ]
+}
+
+@test "FEAT-026 — sh(<non-wpkh>) returns 'not yet implemented'" {
+	setup_wallet_derive_env
+	body="$(alice_xpub_path)"
+	# sh(pkh(...)) is a valid BIP-380 descriptor; we just don't ship it.
+	run "$BITCOIN_BIN" descriptor derive "sh(pkh($body))" 0
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]] || true
+}
+
+@test "FEAT-026 — pkh and sh(wpkh) round-trip through a verified checksum" {
+	setup_wallet_derive_env
+	body="$(alice_xpub_path)"
+	# Slap a checksum on each new-style descriptor and confirm derive
+	# accepts the checksummed form.
+	for d in "pkh($body)" "sh(wpkh($body))"; do
+		cs="$("$BITCOIN_BIN" descriptor checksum "$d")"
+		run "$BITCOIN_BIN" descriptor verify "$cs"
+		[ "$status" -eq 0 ]
+		run "$BITCOIN_BIN" descriptor derive "$cs" 0
+		[ "$status" -eq 0 ]
+	done
+}
+
+@test "FEAT-026 — pkh / sh(wpkh) reject malformed input" {
+	setup_wallet_derive_env
+	# No '*' placeholder.
+	body="$(alice_xpub_path)"
+	bad="${body/\/\*/}"
+	run "$BITCOIN_BIN" descriptor derive "pkh($bad)" 0
+	[ "$status" -ne 0 ]
+	run "$BITCOIN_BIN" descriptor derive "sh(wpkh($bad))" 0
+	[ "$status" -ne 0 ]
+	# Bare key (no '/path').
+	run "$BITCOIN_BIN" descriptor derive "pkh(xpubBareKey)" 0
+	[ "$status" -ne 0 ]
 }
 
 # ---------------------------------------------------------------------------

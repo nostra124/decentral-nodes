@@ -5,7 +5,48 @@ priority: medium
 status: open
 ---
 
-## Progress (1.18.0 shipped — wpkh() only)
+## Progress (1.20.0 shipped — wpkh / pkh / sh(wpkh); tr and combo still deferred)
+
+All four acceptance criteria are now closed except for the
+`tr()` and `combo()` strands of AC 3. `tr()` is gated on
+FEAT-007 (Taproot / BIP-340/341/350); `combo()` is mechanical
+once it lands (just iterate the supported address types).
+
+### 1.20.0 extension — pkh() and sh(wpkh()) address paths
+
+- **`descriptor derive "pkh(<xpub>/<path>/*)" <i>`** derives
+  the child compressed pubkey via the same pipeline `wpkh`
+  uses, then `HASH160`s it and base58check-encodes with the
+  0x00 mainnet P2PKH version byte. Output: a legacy `1...`
+  address.
+- **`descriptor derive "sh(wpkh(<xpub>/<path>/*))" <i>`**
+  derives the child pubkey, builds the P2WPKH redeem script
+  (`0014 || HASH160(pubkey)`), `HASH160`s the script, and
+  base58check-encodes with the 0x05 mainnet P2SH version byte.
+  Output: a nested-segwit `3...` address.
+- Shared helper `descriptor:_base58check_hex` sits next to the
+  pre-existing `descriptor:_base58check_file` for the xpub
+  encoding. Both add the BIP-13 4-byte `sha256d` checksum
+  before base58, and the hex variant prepends one `'1'` per
+  leading 0x00 byte (preserving byte count over the otherwise
+  big-int base58 encoding — needed because mainnet P2PKH
+  starts with `0x00`).
+- Both addresses are cross-verified against an independent
+  Python reference for the canonical abandon-mnemonic
+  m/84h/0h/0h/0/0 pubkey:
+  - `pkh → 1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso`
+  - `sh(wpkh) → 3GtVZYzsKF6Feikdjd4bDyPdAiyeHANY9b`
+
+6 new bats tests for the extension: byte-pinned vectors for
+both addresses; index walk produces distinct values; the three
+function families never collide on the same index; sh(<non-wpkh>)
+returns "not yet implemented"; checksummed round-trip works;
+malformed inputs (no `*`, bare key) rejected. Total bats now
+170. The pre-1.20.0 "rejects non-wpkh" test was retargeted at
+the still-deferred functions (tr, combo) since pkh no longer
+errors.
+
+### 1.18.0 progress (wpkh() only)
 
 Three of the four acceptance criteria shipped; AC 3 (the full
 five-function support — `pkh` / `wpkh` / `sh(wpkh)` / `tr` /
@@ -43,18 +84,21 @@ non-wpkh functions return a "not yet implemented" error;
 malformed descriptors and bad indices rejected; bad checksum
 rejected; help mentions derive + wallet. Total bats now 154.
 
-### Deferred to ROADMAP-1.19.0+
+### Deferred to ROADMAP-1.21.0+
 
-- **AC 3** — `pkh()`, `sh(wpkh())`, `tr()`, `combo()` support
-  in `descriptor derive`. Needs the BIP-13 P2PKH address path
-  (mostly available via `p2pkh-address` in the script) plus
-  the BIP-86 / BIP-350 P2TR (bech32m) path. Stub returns
-  "not yet implemented" today; the FEAT-007 Taproot work
-  will paint that error away from `tr()` specifically.
+- **AC 3 (remainder)** — `tr()` and `combo()` descriptor
+  functions. `tr()` is gated on FEAT-007 Taproot
+  (BIP-340/341/350) — its address is bech32m, which the wallet
+  doesn't yet emit. `combo()` is mechanical: emit one address
+  per supported script type (pkh, wpkh, sh(wpkh)) per call.
 - Multi-key descriptors (`multi(...)`, `sortedmulti(...)`).
+- Testnet/regtest version bytes (0x6F P2PKH, 0xC4 P2SH).
+  Hard-coded to mainnet today; pairs with FEAT-015 AC6 (per-
+  wallet network configuration).
 - Wiring `descriptor wallet` to populate the wallet repo's
-  `descriptors` file as a side effect — a useful follow-up
-  but not yet shipped.
+  `descriptors` file as a side effect — useful follow-up, not
+  yet shipped.
+- ~~AC 3 (`pkh`, `sh(wpkh)`)~~ — shipped in 1.20.0.
 
 # Descriptor derive + wallet-emit (FEAT-009 follow-up)
 
