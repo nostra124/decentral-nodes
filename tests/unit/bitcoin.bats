@@ -1652,6 +1652,130 @@ signed_alice_psbt() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-012 (extend, 1.17.0) — backend get-address-txs. Fifth verb on
+# the backend abstraction; consumed by `wallet index` (FEAT-018).
+# ---------------------------------------------------------------------------
+
+@test "FEAT-012 — backend get-address-txs returns the mempool JSON array" {
+	setup_backend_env
+	curl_fixture "https://mempool.space/api/address/bc1qexample/txs" \
+		'[{"txid":"deadbeef","status":{"block_height":830000},"vin":[],"vout":[]}]'
+	run "$BITCOIN_BIN" backend get-address-txs bc1qexample
+	[ "$status" -eq 0 ]
+	[[ "$output" == *'"txid":"deadbeef"'* ]]
+}
+
+@test "FEAT-012 — backend get-address-txs requires an address" {
+	setup_backend_env
+	run "$BITCOIN_BIN" backend get-address-txs
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-012 — backend get-address-txs bitcoind stub returns 'not implemented'" {
+	setup_backend_env
+	"$BITCOIN_BIN" backend set bitcoind >/dev/null
+	run "$BITCOIN_BIN" backend get-address-txs bc1qexample
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-018 (partial, 1.17.0) — wallet index + tx + history. The
+# read path: walks the addresses ledger, fetches every tx via the
+# new backend verb, caches under transactions/<txid>.{hex,json},
+# rebuilds the history ledger, and commits.
+# ---------------------------------------------------------------------------
+
+# Helper: a single-tx fixture that pays 12345 sats to alice's first
+# derived address (bc1qcr8te4...) at block 830000.
+alice_tx_fixture() {
+	local addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	cat <<EOF
+[{"txid":"abc123","status":{"block_height":830000},"vin":[{"prevout":{"scriptpubkey_address":"bc1qfaucet","value":13000}}],"vout":[{"scriptpubkey_address":"$addr","value":12345},{"scriptpubkey_address":"bc1qfaucetchange","value":600}]}]
+EOF
+}
+
+@test "FEAT-018 — wallet index caches transactions/<txid>.{hex,json}" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/txs" "$(alice_tx_fixture)"
+	curl_fixture "https://mempool.space/api/tx/abc123/hex" "0200000001deadbeef"
+	run "$BITCOIN_BIN" wallet index alice
+	[ "$status" -eq 0 ]
+	txdir="$XDG_DATA_HOME/bitcoin/wallets/alice/transactions"
+	[ -s "$txdir/abc123.hex" ]
+	[ -s "$txdir/abc123.json" ]
+	grep -q '"txid": *"abc123"' "$txdir/abc123.json"
+}
+
+@test "FEAT-018 — wallet index appends to history with direction + net sats" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/txs" "$(alice_tx_fixture)"
+	curl_fixture "https://mempool.space/api/tx/abc123/hex" "0200000001deadbeef"
+	"$BITCOIN_BIN" wallet index alice >/dev/null
+	run "$BITCOIN_BIN" wallet history alice
+	[ "$status" -eq 0 ]
+	# One line: txid \t height \t direction \t net_sats
+	[ "$output" = $'abc123\t830000\tin\t12345' ]
+}
+
+@test "FEAT-018 — wallet index is idempotent (no second commit)" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/txs" "$(alice_tx_fixture)"
+	curl_fixture "https://mempool.space/api/tx/abc123/hex" "0200000001deadbeef"
+	"$BITCOIN_BIN" wallet index alice >/dev/null
+	before="$(cd "$XDG_DATA_HOME/bitcoin/wallets/alice" && git rev-parse HEAD)"
+	"$BITCOIN_BIN" wallet index alice >/dev/null
+	after="$(cd "$XDG_DATA_HOME/bitcoin/wallets/alice" && git rev-parse HEAD)"
+	[ "$before" = "$after" ]
+}
+
+@test "FEAT-018 — wallet tx prints the cached hex + json" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/txs" "$(alice_tx_fixture)"
+	curl_fixture "https://mempool.space/api/tx/abc123/hex" "0200000001deadbeef"
+	"$BITCOIN_BIN" wallet index alice >/dev/null
+	run "$BITCOIN_BIN" wallet tx alice abc123
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"0200000001deadbeef"* ]]
+	[[ "$output" == *'"txid"'* ]]
+}
+
+@test "FEAT-018 — wallet tx reads from cache without backend access" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/txs" "$(alice_tx_fixture)"
+	curl_fixture "https://mempool.space/api/tx/abc123/hex" "0200000001deadbeef"
+	"$BITCOIN_BIN" wallet index alice >/dev/null
+	# Wipe fixtures: backend would now fail. wallet tx must still work.
+	rm -rf "$CURL_STUB_RESPONSES"
+	mkdir -p "$CURL_STUB_RESPONSES"
+	run "$BITCOIN_BIN" wallet tx alice abc123
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"abc123"* ]]
+}
+
+@test "FEAT-018 — wallet tx rejects an un-indexed txid" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	run "$BITCOIN_BIN" wallet tx alice notindexed
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-018 — wallet index rejects a missing wallet" {
+	setup_wallet_derive_env
+	run "$BITCOIN_BIN" wallet index no-such-wallet
+	[ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`

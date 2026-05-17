@@ -5,6 +5,67 @@ priority: medium
 status: open
 ---
 
+## Progress (1.17.0 shipped — read path: index + tx + history)
+
+Acceptance criteria 1, 2, 3, and 6 (the read path + idempotency)
+are closed. Criteria 4, 5, and 7 (label expansion and push/pull
+conflict resolution) remain open; they need a breaking restructure
+of the existing `wallet label <name> <addr> <text>` signature and
+pair naturally with FEAT-011's deferred custom merge resolvers.
+
+- **`backend get-address-txs <addr>`** (extends FEAT-012) returns
+  every tx touching `<addr>` as a JSON array. mempool
+  implementation hits `/api/address/<addr>/txs`; bitcoind /
+  blockstream stubs match the other-verb "not implemented"
+  pattern. 3 new backend bats tests.
+
+- **`bitcoin wallet index <name>`** walks the wallet's `addresses`
+  ledger, asks the backend for every tx touching each address,
+  and caches both forms under `<wallet>/transactions/`:
+  - `<txid>.json` — the backend's decoded tx record (the entry
+    from `get-address-txs` filtered by txid).
+  - `<txid>.hex` — the raw tx, fetched from
+    `$BITCOIN_MEMPOOL_URL/api/tx/<txid>/hex`.
+
+  After all addresses are processed, the `history` ledger is
+  rebuilt from the union of cached transactions as:
+  `<txid>\t<height>\t<direction>\t<net_sats>`. Direction is
+  `in` / `out` / `self` based on whether the tx's vin entries
+  reference wallet-owned addresses and the net is computed via
+  jq from `vout_to_us - vin_from_us`. The result is committed
+  in one wallet git commit; re-runs are idempotent
+  (per-`<txid>` cache files gate the download, and the history
+  rebuild is content-stable, so the second commit is a no-op).
+
+- **`bitcoin wallet tx <name> <txid>`** reads from the local
+  cache only — works offline. Errors clearly if the txid is
+  not yet indexed.
+
+- **`bitcoin wallet history <name>`** cats the history ledger.
+
+7 new bats tests for the wallet verbs: tx cache files present;
+history line shape matches `<txid>\t<height>\t<dir>\t<net>`;
+re-running index is a no-op git commit; `wallet tx` prints both
+hex and json; `wallet tx` works without backend access (cache-
+only); `wallet tx` rejects un-indexed txids; `wallet index`
+rejects missing wallets. Total bats now 146.
+
+### Deferred to ROADMAP-1.18.0+
+
+- **AC 4–5** — `wallet label tx <wallet> <txid> <label>`,
+  `wallet label utxo <wallet> <txid:vout> <label>`, and
+  `wallet history --label <pattern>` filter. Needs a breaking
+  restructure of the existing `wallet label <name> <addr>
+  <text>` signature into a `wallet label <kind> ...` form.
+- **AC 7** — push/pull conflict resolution for divergent
+  labels. Pairs with the label expansion above and with
+  FEAT-011's deferred custom merge resolvers.
+- bitcoind / blockstream backend implementations of
+  `get-address-txs`. Stubs ship in this release.
+- `wallet tx` pretty-print beyond cat-the-json. The mempool
+  JSON is already structured; consumers can pipe through `jq`
+  for now.
+
 # Client-side transaction index and labels for tx / UTXO / address
 
 ## Description
