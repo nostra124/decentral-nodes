@@ -1904,8 +1904,14 @@ wallet:help() {
 	  rm [-f] <name>    remove a wallet (-f also removes secret/<name>/seed)
 	  derive <name>     derive next BIP-84 receive address; append to ledger
 	  addresses <name>  list every derived address (with index + label)
-	  label <name> <addr> <text>
-	                    set/clear the label on a derived address
+	  label <kind:tx|utxo|addr> <name> <key> <text>
+	                    set/clear a label. Kinds:
+	                      tx   <txid>          → labels/tx
+	                      utxo <txid>:<vout>   → labels/utxo
+	                      addr <addr>          → addresses column
+	                    Empty <text> clears the entry. The compat form
+	                    'label <name> <addr> <text>' (no kind prefix) is
+	                    treated as 'label addr ...' for pre-1.19.0 callers.
 	  balance <name>    sum UTXO values for all derived addresses via the
 	                    active backend (skills/automerging.md §3b -- mempool)
 	  build <name> <addr> <sats> [--fee-rate sat/vB]
@@ -1929,8 +1935,11 @@ wallet:help() {
 	                    the history ledger and commits. Idempotent.
 	  tx <name> <txid>  print the cached transactions/<txid>.hex (+.json)
 	                    without re-querying the backend.
-	  history <name>    list the wallet's history ledger
-	                    (txid, height, direction, net sats)
+	  history <name> [--label <pattern>]
+	                    list the wallet's history ledger
+	                    (txid, height, direction, net sats); with
+	                    --label, filter rows whose tx-label matches
+	                    <pattern> (case-insensitive substring)
 	  remote add <name> <remote> <url>
 	                    set/replace a git remote on the wallet repo
 	  push <name> [<remote>]
@@ -2034,38 +2043,117 @@ wallet:addresses() {
 }
 
 wallet:label() {
-	local name="${1:-}" addr="${2:-}" label="${3:-}"
-	if [ -z "$name" ] || [ -z "$addr" ]; then
-		error "wallet label: usage: wallet label <name> <address> <label>"
+	# Two signatures are accepted:
+	#   wallet label <kind> <name> <key> <text>   (1.19.0 form)
+	#   wallet label <name> <addr> <text>         (pre-1.19.0 compat)
+	#
+	# The compat form is dispatched as `wallet label addr <name>
+	# <addr> <text>`. Detection: the first arg matches the kind
+	# vocabulary (tx | utxo | addr) → new form; otherwise →
+	# compat form.
+	local kind name key text
+	case "${1:-}" in
+		tx|utxo|addr)
+			kind="$1"; name="${2:-}"; key="${3:-}"; text="${4:-}"
+			;;
+		"")
+			error "wallet label: usage: wallet label <kind> <name> <key> <text>"
+			return 2
+			;;
+		*)
+			# Compat: <name> <addr> <text>
+			kind=addr; name="${1:-}"; key="${2:-}"; text="${3:-}"
+			;;
+	esac
+	if [ -z "$name" ] || [ -z "$key" ]; then
+		error "wallet label: usage: wallet label <kind:tx|utxo|addr> <name> <key> <text>"
 		return 2
 	fi
+	# Reject tabs / newlines in the label text — storage is TSV.
+	if [[ "$text" == *$'\t'* ]] || [[ "$text" == *$'\n'* ]]; then
+		error "wallet label: <text> must not contain tabs or newlines (storage is TSV)"
+		return 3
+	fi
 	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet label: no such wallet '$name' at $path"
+		return 4
+	fi
+	case "$kind" in
+		addr) wallet:_label_addr "$name" "$path" "$key" "$text" ;;
+		tx)   wallet:_label_kv   "$name" "$path" "tx"   "$key" "$text" ;;
+		utxo)
+			if [[ ! "$key" =~ ^[[:xdigit:]]+:[0-9]+$ ]]; then
+				error "wallet label utxo: <key> must look like '<txid>:<vout>' (got '$key')"
+				return 5
+			fi
+			wallet:_label_kv   "$name" "$path" "utxo" "$key" "$text"
+			;;
+	esac
+}
+
+# Helper: rewrite the addresses-ledger label column for <addr>.
+# Pre-1.19.0 behaviour; preserved as the addr-kind storage.
+wallet:_label_addr() {
+	local name="$1" path="$2" addr="$3" text="$4"
 	local ledger="$path/addresses"
 	if [ ! -f "$ledger" ]; then
-		error "wallet label: no ledger at $ledger"
+		error "wallet label addr: no ledger at $ledger"
 		return 3
 	fi
 	if ! grep -q -F "	$addr	" "$ledger"; then
-		error "wallet label: address '$addr' not in $name's ledger"
+		error "wallet label addr: address '$addr' not in $name's ledger"
 		return 4
 	fi
-	# Rewrite the line: <idx>\t<addr>\t<label>\n
 	local tmp="$ledger.tmp"
-	awk -v a="$addr" -v l="$label" -F '\t' 'BEGIN{OFS="\t"} {
+	awk -v a="$addr" -v l="$text" -F '\t' 'BEGIN{OFS="\t"} {
 		if ($2 == a) print $1, $2, l;
 		else        print $0;
 	}' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
 	(
 		cd "$path"
 		git add addresses
-		# commit.gpgsign=false: wallet-internal commits run on the
-		# user's wallet repo, not on this project's repo. We don't
-		# assume the user has signing keys set up for their wallet.
-		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
-		    -c commit.gpgsign=false \
-			commit -q -m "wallet label: $name $addr -> '$label'"
-	) || { error "wallet label: commit failed"; return 5; }
+		if ! git diff --cached --quiet 2>/dev/null; then
+			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+			    -c commit.gpgsign=false \
+				commit -q -m "wallet label: $name $addr -> '$text'"
+		fi
+	) || { error "wallet label addr: commit failed"; return 5; }
 	info "label set for $addr"
+}
+
+# Helper: set / clear / append the label for <key> in
+# labels/<kind>. Storage is plain TSV (key TAB text). Empty
+# <text> removes the row.
+wallet:_label_kv() {
+	local name="$1" path="$2" kind="$3" key="$4" text="$5"
+	local store="$path/labels"
+	local file="$store/$kind"
+	mkdir -p "$store" || { error "wallet label $kind: cannot mkdir $store"; return 3; }
+	[ -f "$file" ] || : > "$file"
+	# Rewrite: drop any existing row for <key>; if <text> non-empty,
+	# append the new row at the end. Preserves order otherwise.
+	local tmp="$file.tmp"
+	awk -v k="$key" -F '\t' '$1 != k { print }' "$file" > "$tmp"
+	if [ -n "$text" ]; then
+		printf '%s\t%s\n' "$key" "$text" >> "$tmp"
+	fi
+	mv "$tmp" "$file"
+	(
+		cd "$path"
+		git add "labels/$kind"
+		if ! git diff --cached --quiet 2>/dev/null; then
+			local action; if [ -z "$text" ]; then action="cleared"; else action="-> '$text'"; fi
+			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+			    -c commit.gpgsign=false \
+				commit -q -m "wallet label $kind: $name $key $action"
+		fi
+	) || { error "wallet label $kind: commit failed"; return 5; }
+	if [ -z "$text" ]; then
+		info "label cleared for $kind:$key"
+	else
+		info "label set for $kind:$key"
+	fi
 }
 
 # FEAT-014 (partial, 1.8.0): wallet broadcast. Reads a raw hex
@@ -2693,10 +2781,59 @@ wallet:tx() {
 		echo "=== hex ==="
 		cat "$hex"
 	fi
+	# 1.19.0: append associated labels from labels/tx + labels/utxo
+	# if any are recorded. Suppressed entirely when both files are
+	# absent or hold no match.
+	local tx_lbl utxo_lbls
+	tx_lbl="$(wallet:_label_lookup "$path" "tx" "$txid")"
+	# UTXO labels are keyed by <txid>:<vout>; print every match.
+	if [ -f "$path/labels/utxo" ]; then
+		utxo_lbls="$(awk -F '\t' -v p="$txid:" '$1 ~ "^"p {print "utxo:"$0}' "$path/labels/utxo")"
+	fi
+	if [ -n "$tx_lbl" ] || [ -n "$utxo_lbls" ]; then
+		echo "=== labels ==="
+		[ -n "$tx_lbl" ]    && printf 'tx\t%s\n' "$tx_lbl"
+		[ -n "$utxo_lbls" ] && printf '%s\n' "$utxo_lbls"
+	fi
+}
+
+# Read the label text for <key> from labels/<kind>. Empty when
+# the file or key is absent. Pipe-free.
+wallet:_label_lookup() {
+	local path="$1" kind="$2" key="$3"
+	local file="$path/labels/$kind"
+	[ -f "$file" ] || return 0
+	awk -F '\t' -v k="$key" '$1 == k { print $2; exit }' "$file"
 }
 
 wallet:history() {
-	local name="${1:-}"
+	local name="" pattern=""
+	# Flag parsing: --label <pattern> is the only flag in 1.19.0.
+	while [ $# -gt 0 ]; do
+		case "${1:-}" in
+			--label)
+				if [ -z "${2:-}" ]; then
+					error "wallet history: --label requires a pattern argument"
+					return 2
+				fi
+				pattern="$2"
+				shift 2
+				;;
+			--) shift; break ;;
+			-*)
+				error "wallet history: unknown flag '$1'"
+				return 2
+				;;
+			*)
+				if [ -z "$name" ]; then name="$1"
+				else
+					error "wallet history: too many positional arguments (saw '$1')"
+					return 2
+				fi
+				shift
+				;;
+		esac
+	done
 	if [ -z "$name" ]; then
 		error "wallet history: name required"
 		return 2
@@ -2711,7 +2848,29 @@ wallet:history() {
 		# Empty history is fine (no txs indexed yet).
 		return 0
 	fi
-	cat "$hist"
+	if [ -z "$pattern" ]; then
+		cat "$hist"
+		return 0
+	fi
+	# Filter: keep history rows whose tx-label (looked up by txid in
+	# labels/tx) contains <pattern> as a substring, case-insensitive.
+	local labels="$path/labels/tx"
+	if [ ! -s "$labels" ]; then
+		# No labels yet → no matches by definition.
+		return 0
+	fi
+	awk -F '\t' \
+	    -v lbl_file="$labels" \
+	    -v needle="${pattern,,}" \
+	    'BEGIN {
+	         while ((getline line < lbl_file) > 0) {
+	             split(line, f, "\t")
+	             labels[f[1]] = tolower(f[2])
+	         }
+	         close(lbl_file)
+	     }
+	     ($1 in labels) && index(labels[$1], needle) > 0 { print }' \
+	    "$hist"
 }
 
 # ---------------------------------------------------------------------------
