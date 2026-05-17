@@ -496,6 +496,11 @@ backend:estimate-fee() {
 	backend:"$b":estimate-fee "$@"
 }
 
+backend:get-address-txs() {
+	local b; b="$(backend:_active)"
+	backend:"$b":get-address-txs "$@"
+}
+
 # --- mempool.space implementation --------------------------------------------
 
 : "${BITCOIN_MEMPOOL_URL:=https://mempool.space}"
@@ -573,6 +578,23 @@ backend:mempool:estimate-fee() {
 	printf '%s\n' "$rate"
 }
 
+# Return the JSON array of transactions touching <address>. Used by
+# `wallet index` (FEAT-018) to build the wallet's on-disk history.
+backend:mempool:get-address-txs() {
+	local addr="${1:-}"
+	if [ -z "$addr" ]; then
+		error "backend get-address-txs: address required"
+		return 2
+	fi
+	local url="$BITCOIN_MEMPOOL_URL/api/address/$addr/txs"
+	local out
+	if ! out="$(curl -sfL "$url")"; then
+		error "mempool: GET $url failed (curl exit $?)"
+		return 1
+	fi
+	printf '%s\n' "$out"
+}
+
 # --- bitcoind / blockstream stubs --------------------------------------------
 #
 # Scaffolded so `bitcoin backend set bitcoind|blockstream` doesn't
@@ -586,6 +608,7 @@ backend:bitcoind:chain-height() {
 backend:bitcoind:get-address-utxos() { backend:bitcoind:chain-height; }
 backend:bitcoind:broadcast()         { backend:bitcoind:chain-height; }
 backend:bitcoind:estimate-fee()      { backend:bitcoind:chain-height; }
+backend:bitcoind:get-address-txs()   { backend:bitcoind:chain-height; }
 
 backend:blockstream:chain-height() {
 	error "backend blockstream: not implemented in this release (use mempool)"
@@ -594,6 +617,7 @@ backend:blockstream:chain-height() {
 backend:blockstream:get-address-utxos() { backend:blockstream:chain-height; }
 backend:blockstream:broadcast()         { backend:blockstream:chain-height; }
 backend:blockstream:estimate-fee()      { backend:blockstream:chain-height; }
+backend:blockstream:get-address-txs()   { backend:blockstream:chain-height; }
 
 # --- dispatcher --------------------------------------------------------------
 
@@ -610,7 +634,7 @@ command:backend() {
 		mempool|bitcoind|blockstream)
 			# Shorthand: `bitcoin backend mempool` = `backend set mempool`
 			backend:set "$action" ;;
-		chain-height|get-address-utxos|broadcast|estimate-fee)
+		chain-height|get-address-utxos|broadcast|estimate-fee|get-address-txs)
 			backend:"$action" "$@" ;;
 		help)
 			backend:help ;;
@@ -633,6 +657,8 @@ backend:help() {
 
 	  chain-height              current chain tip height (integer)
 	  get-address-utxos <addr>  UTXOs at <addr> as backend-native JSON
+	  get-address-txs <addr>    every tx touching <addr> as backend-native
+	                            JSON array (FEAT-018 wallet index source)
 	  broadcast <hex>           POST a raw tx; print the txid
 	  estimate-fee [<blocks>]   sat/vB recommended for confirmation in
 	                            <blocks> (default 3). Mempool buckets:
@@ -1638,7 +1664,7 @@ command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		new|ls|rm|help|derive|addresses|label|balance|broadcast|build|sign|send|remote|push|pull) wallet:"$sub" "$@" ;;
+		new|ls|rm|help|derive|addresses|label|balance|broadcast|build|sign|send|index|tx|history|remote|push|pull) wallet:"$sub" "$@" ;;
 		*)
 			error "unknown wallet subcommand: '$sub'"
 			wallet:help >&2
@@ -1681,6 +1707,15 @@ wallet:help() {
 	                    end-to-end: build | sign | psbt finalize | psbt extract
 	                    | broadcast. Prints the txid the backend returned.
 	  broadcast <name>  POST raw-tx hex from stdin to the active backend
+	  index <name>      for every address in the wallet's ledger, fetch
+	                    every tx via 'backend get-address-txs' and cache
+	                    the raw hex + decoded JSON under
+	                    <wallet>/transactions/<txid>.{hex,json}. Updates
+	                    the history ledger and commits. Idempotent.
+	  tx <name> <txid>  print the cached transactions/<txid>.hex (+.json)
+	                    without re-querying the backend.
+	  history <name>    list the wallet's history ledger
+	                    (txid, height, direction, net sats)
 	  remote add <name> <remote> <url>
 	                    set/replace a git remote on the wallet repo
 	  push <name> [<remote>]
@@ -2279,6 +2314,189 @@ wallet:send() {
 		return 7
 	}
 	printf '%s\n' "$raw_tx" | wallet:broadcast "$name"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-018 (partial, 1.17.0): wallet index / tx / history.
+#
+# `wallet index` walks the wallet's addresses ledger and downloads
+# every tx touching one of them via `backend get-address-txs`,
+# caching both the raw hex and the backend's decoded JSON under
+# <wallet>/transactions/. The history ledger tracks one row per tx
+# (txid, height, direction, net sats). Idempotent: each per-txid
+# hex file gates the download, and the history is rewritten in
+# place from the union of cached transactions on every run.
+#
+# `wallet tx` and `wallet history` read from the cache only, so
+# they work even when the backend is unreachable.
+# ---------------------------------------------------------------------------
+
+# For the given decoded tx JSON, compute (direction, net sats) where
+# direction is "in", "out", or "self" and net is the signed delta
+# applied to the wallet's balance by this tx. Pure jq; no curl.
+#   $1 = tx JSON (one tx entry from get-address-txs)
+#   $2 = newline-separated list of wallet addresses
+wallet:_tx_direction_and_amount() {
+	local tx_json="$1" addrs="$2"
+	# Sum of outputs paying our addresses, minus sum of inputs spent
+	# from our addresses. -R -s reads the addr list as one string,
+	# split on newlines, drops the trailing empty line.
+	local result
+	result="$(
+		printf '%s\n' "$addrs" \
+		| jq -R -s --argjson tx "$tx_json" -r '
+			split("\n") | map(select(length > 0)) as $owned
+			| ($tx.vout // []
+				| map(select(.scriptpubkey_address as $a | $owned | index($a)))
+				| map(.value) | add // 0) as $vout_to_us
+			| ($tx.vin // []
+				| map(select(.prevout.scriptpubkey_address as $a
+				             | $owned | index($a)))
+				| map(.prevout.value) | add // 0) as $vin_from_us
+			| ($vout_to_us - $vin_from_us) as $net
+			| (if $vout_to_us > 0 and $vin_from_us == 0 then "in"
+			   elif $vin_from_us > 0 and $vout_to_us == 0 then "out"
+			   elif $vin_from_us > 0 and $vout_to_us > 0 then "self"
+			   else "in" end) as $dir
+			| "\($dir)\t\($net)"
+		' 2>/dev/null
+	)"
+	printf '%s' "$result"
+}
+
+wallet:index() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet index: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet index: no such wallet '$name' at $path"
+		return 3
+	fi
+	local ledger="$path/addresses"
+	if [ ! -s "$ledger" ]; then
+		error "wallet index: wallet '$name' has no derived addresses (run 'wallet derive')"
+		return 4
+	fi
+	if ! command -v jq >/dev/null 2>&1; then
+		error "wallet index: jq is required for tx decoding"
+		return 5
+	fi
+
+	local txdir="$path/transactions"
+	mkdir -p "$txdir" || { error "wallet index: cannot mkdir $txdir"; return 6
+	}
+
+	# Collect the set of wallet addresses once for direction/amount.
+	local owned_addrs
+	owned_addrs="$(awk -F'\t' 'NF>=2 && $2 != "" {print $2}' "$ledger")"
+
+	# Walk the ledger and fetch each address's tx list.
+	local _idx addr _label tx_json_array txid height
+	local txs_json
+	while IFS=$'\t' read -r _idx addr _label; do
+		[ -z "$addr" ] && continue
+		if ! txs_json="$(backend:get-address-txs "$addr" 2>/dev/null)"; then
+			warn "wallet index: backend get-address-txs failed for $addr (skipping)"
+			continue
+		fi
+		# Iterate each tx via jq, emit "txid\theight" lines.
+		while IFS=$'\t' read -r txid height; do
+			[ -z "$txid" ] && continue
+			# Persist the JSON for this tx (idempotent — skip if cached).
+			if [ ! -s "$txdir/$txid.json" ]; then
+				printf '%s' "$txs_json" \
+					| jq --arg id "$txid" '.[] | select(.txid == $id)' \
+					> "$txdir/$txid.json"
+			fi
+			# Fetch raw hex if not cached.
+			if [ ! -s "$txdir/$txid.hex" ]; then
+				local hex_url="$BITCOIN_MEMPOOL_URL/api/tx/$txid/hex"
+				if ! curl -sfL "$hex_url" > "$txdir/$txid.hex" 2>/dev/null; then
+					warn "wallet index: GET $hex_url failed (skipping hex cache for $txid)"
+					rm -f "$txdir/$txid.hex"
+				fi
+			fi
+		done < <(printf '%s' "$txs_json" \
+			| jq -r '.[] | [.txid, (.status.block_height // "mempool")] | @tsv' 2>/dev/null)
+	done < "$ledger"
+
+	# Rebuild the history ledger from the cached transactions. Sorting
+	# by height keeps the file deterministic and merge-friendly.
+	local hist="$path/history"
+	: > "$hist.tmp"
+	local f
+	for f in "$txdir"/*.json; do
+		[ -f "$f" ] || continue
+		txid="$(jq -r '.txid' "$f" 2>/dev/null)"
+		height="$(jq -r '.status.block_height // "mempool"' "$f" 2>/dev/null)"
+		local tx_json; tx_json="$(cat "$f")"
+		local dir_amt; dir_amt="$(wallet:_tx_direction_and_amount "$tx_json" "$owned_addrs")"
+		printf '%s\t%s\t%s\n' "$txid" "$height" "$dir_amt" >> "$hist.tmp"
+	done
+	# Stable sort by height (numeric where possible, "mempool" sorts last).
+	LC_ALL=C sort -k2,2 "$hist.tmp" > "$hist"
+	rm -f "$hist.tmp"
+
+	# Commit if anything changed.
+	(
+		cd "$path"
+		git add transactions history 2>/dev/null
+		if ! git diff --cached --quiet 2>/dev/null; then
+			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+			    -c commit.gpgsign=false \
+				commit -q -m "wallet index: $name" || true
+		fi
+	)
+	info "wallet '$name' index updated"
+}
+
+wallet:tx() {
+	local name="${1:-}" txid="${2:-}"
+	if [ -z "$name" ] || [ -z "$txid" ]; then
+		error "wallet tx: usage: wallet tx <name> <txid>"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet tx: no such wallet '$name' at $path"
+		return 3
+	fi
+	local hex="$path/transactions/$txid.hex"
+	local json="$path/transactions/$txid.json"
+	if [ ! -s "$hex" ] && [ ! -s "$json" ]; then
+		error "wallet tx: '$txid' not indexed (run 'wallet index $name' first)"
+		return 4
+	fi
+	if [ -s "$json" ]; then
+		echo "=== decoded ==="
+		cat "$json"
+	fi
+	if [ -s "$hex" ]; then
+		echo "=== hex ==="
+		cat "$hex"
+	fi
+}
+
+wallet:history() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet history: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet history: no such wallet '$name' at $path"
+		return 3
+	fi
+	local hist="$path/history"
+	if [ ! -s "$hist" ]; then
+		# Empty history is fine (no txs indexed yet).
+		return 0
+	fi
+	cat "$hist"
 }
 
 # ---------------------------------------------------------------------------

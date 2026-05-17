@@ -44,6 +44,18 @@ implemented" error so the dispatcher is coherent.
   failure (network, parse, stub). See that issue for the wiring
   test coverage.
 
+### Extended in 1.17.0 — fifth verb `get-address-txs`
+
+- `bitcoin backend get-address-txs <address>` returns every
+  confirmed-or-mempool transaction touching `<address>` as a
+  JSON array. Mempool implementation hits
+  `/api/address/<addr>/txs`; bitcoind / blockstream stubs match
+  the other-verb pattern.
+- 3 new bats tests: happy path, no-address rejection, stub path.
+- `wallet index` (FEAT-018) consumes the verb to build the
+  wallet's on-disk transaction history. See that issue for the
+  wiring + idempotency tests.
+
 ### Shipped alongside (FEAT-025 follow-up partial)
 
 - `libexec/bitcoin/mnemonic-to-seed` — the BIP-39 PBKDF2 plugin
