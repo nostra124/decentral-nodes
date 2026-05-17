@@ -1435,6 +1435,139 @@ signed_alice_psbt() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-015 (partial, 1.15.0) — man page + bash completion + walkthrough.
+# The man-page assertions read straight from the source roff so they
+# are independent of whether mandoc/groff is installed on CI runners.
+# The completion test sources the file under bash and calls the
+# completion function with constructed COMP_WORDS — no need to spawn
+# a real readline session.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-015 — man page exists and has every required section" {
+	man="$BATS_TEST_DIRNAME/../../share/man/man1/bitcoin.1"
+	[ -s "$man" ]
+	# Each section header is a top-level .SH directive in roff.
+	for section in NAME SYNOPSIS DESCRIPTION OPTIONS SUBCOMMANDS \
+		ENVIRONMENT FILES "EXIT STATUS" EXAMPLES STANDARDS "SEE ALSO"; do
+		grep -q "^\\.SH $section\$" "$man"
+	done
+}
+
+@test "FEAT-015 — man page STANDARDS section cites every implemented BIP" {
+	man="$BATS_TEST_DIRNAME/../../share/man/man1/bitcoin.1"
+	# Pin the canonical list of BIPs the wallet implements end-to-end
+	# through 1.14.0. New BIPs should be added here as they ship.
+	for bip in "BIP-13" "BIP-32" "BIP-39" "BIP-141" "BIP-143" \
+		"BIP-173" "BIP-174" "BIP-350" "BIP-380"; do
+		grep -q "$bip" "$man"
+	done
+}
+
+@test "FEAT-015 — man page renders cleanly under mandoc lint" {
+	# Skip the test if mandoc isn't installed — the man source is
+	# still asserted to exist by the section test above, and CI
+	# can opt into stricter lint by installing mandoc.
+	command -v mandoc >/dev/null 2>&1 || skip "mandoc not installed"
+	man="$BATS_TEST_DIRNAME/../../share/man/man1/bitcoin.1"
+	# Suppress two harmless conventional warnings:
+	#   - "empty block: UR"   — bare URL in .UR/.UE pair
+	#   - "skipping paragraph macro: PP after SH"
+	#     (common idiom for spacing after a section header)
+	# Anything else fails the test.
+	run bash -c "mandoc -T lint '$man' 2>&1 | grep -vE 'empty block: UR|skipping paragraph macro' || true"
+	[ "$status" -eq 0 ]
+	[ -z "$output" ]
+}
+
+@test "FEAT-015 — bash completion is source-able under bash" {
+	completion="$BATS_TEST_DIRNAME/../../etc/bash_completion.d/bitcoin"
+	[ -s "$completion" ]
+	run bash -n "$completion"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-015 — bash completion offers every wallet subcommand" {
+	completion="$BATS_TEST_DIRNAME/../../etc/bash_completion.d/bitcoin"
+	run bash -c "
+		source '$completion'
+		COMP_WORDS=(bitcoin wallet '')
+		COMP_CWORD=2
+		_bitcoin_complete_entries
+		printf '%s ' \"\${COMPREPLY[@]}\"
+	"
+	[ "$status" -eq 0 ]
+	# Every verb shipped through 1.14.0 must surface.
+	for verb in new ls rm derive addresses label balance build sign send broadcast remote push pull help; do
+		[[ "$output" == *"$verb"* ]]
+	done
+}
+
+@test "FEAT-015 — bash completion is context-aware for psbt + backend + descriptor" {
+	completion="$BATS_TEST_DIRNAME/../../etc/bash_completion.d/bitcoin"
+	# psbt subtree
+	run bash -c "
+		source '$completion'
+		COMP_WORDS=(bitcoin psbt '')
+		COMP_CWORD=2
+		_bitcoin_complete_entries
+		printf '%s ' \"\${COMPREPLY[@]}\"
+	"
+	[ "$status" -eq 0 ]
+	for verb in decode encode sign finalize extract; do
+		[[ "$output" == *"$verb"* ]]
+	done
+	# backend subtree
+	run bash -c "
+		source '$completion'
+		COMP_WORDS=(bitcoin backend '')
+		COMP_CWORD=2
+		_bitcoin_complete_entries
+		printf '%s ' \"\${COMPREPLY[@]}\"
+	"
+	[ "$status" -eq 0 ]
+	for verb in view set auto chain-height get-address-utxos broadcast estimate-fee; do
+		[[ "$output" == *"$verb"* ]]
+	done
+	# `bitcoin backend set <TAB>` offers the three named backends.
+	run bash -c "
+		source '$completion'
+		COMP_WORDS=(bitcoin backend set '')
+		COMP_CWORD=3
+		_bitcoin_complete_entries
+		printf '%s ' \"\${COMPREPLY[@]}\"
+	"
+	[ "$status" -eq 0 ]
+	for backend in mempool bitcoind blockstream; do
+		[[ "$output" == *"$backend"* ]]
+	done
+}
+
+@test "FEAT-015 — walkthrough exists and references the end-to-end pipeline" {
+	wk="$BATS_TEST_DIRNAME/../../docs/bitcoin-walkthrough.md"
+	[ -s "$wk" ]
+	# The four design principles must appear (FEAT-015 §Design).
+	for principle in Educational Functional Decentralized Simple; do
+		grep -q -i "$principle" "$wk"
+	done
+	# Every wallet verb shipped through 1.14.0 must appear in the
+	# walkthrough — readers should be able to grep for the verb and
+	# find the section that demonstrates it.
+	for verb in "wallet new" "wallet derive" "wallet balance" \
+		"wallet label" "wallet send" "wallet remote" "wallet push" \
+		"wallet pull" "wallet sign" "wallet build" "wallet broadcast" \
+		"psbt finalize" "psbt extract"; do
+		grep -q -F "$verb" "$wk"
+	done
+}
+
+@test "FEAT-015 — walkthrough cites the standards table" {
+	wk="$BATS_TEST_DIRNAME/../../docs/bitcoin-walkthrough.md"
+	for bip in "BIP-32" "BIP-39" "BIP-141" "BIP-143" "BIP-173" "BIP-174"; do
+		grep -q -F "$bip" "$wk"
+	done
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`
