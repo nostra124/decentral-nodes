@@ -5,6 +5,55 @@ priority: medium
 status: open
 ---
 
+## Progress (1.15.0 shipped — man page + bash completion + walkthrough)
+
+Three of the six acceptance criteria are closed; the remaining
+three (SIT validation, default-network configuration, agent
+skill) are explicit follow-ups.
+
+- **`share/man/man1/bitcoin.1`** rewritten against the 1.14.0
+  verb set. All conventional sections present (NAME, SYNOPSIS,
+  DESCRIPTION, OPTIONS, SUBCOMMANDS, ENVIRONMENT, FILES,
+  EXIT STATUS, EXAMPLES, STANDARDS, SEE ALSO). DESCRIPTION
+  opens with the four design principles (educational,
+  functional, decentralized, simple). STANDARDS enumerates
+  BIP-13/32/39/141/143/173/174/350/380/381/386 with upstream
+  URL and the vendored path under
+  `share/doc/bitcoin/bips/`. EXAMPLES walks the cold-signing
+  flow in five lines.
+- **`etc/bash_completion.d/bitcoin`** rewritten to be
+  context-aware. Top-level completion merges the dispatcher's
+  built-ins with whatever `bitcoin modules` reports
+  (libexec/bitcoin plugins). The wallet, psbt, descriptor, and
+  backend subtrees each have their own verb list; `wallet
+  remote` and `backend set` go one level deeper.
+- **`docs/bitcoin-walkthrough.md`** is the new human-facing
+  walkthrough. Opens with the design principles, walks a
+  reader from `wallet new` through `wallet derive`, balance
+  query, label, the end-to-end `wallet send` pipeline, and the
+  cold-signing flow over `wallet push/pull`. Every section
+  cites the relevant BIP(s) with both upstream URL and local
+  vendored path.
+
+8 new bats tests cover: man page sections present; STANDARDS
+section enumerates every implemented BIP; mandoc lint
+(skipped where mandoc isn't installed); completion is
+source-able; completion offers every wallet subcommand;
+completion is context-aware for psbt / backend / descriptor;
+walkthrough references every wallet verb; walkthrough cites
+the standards table. Total bats now 129.
+
+### Deferred to ROADMAP-1.16.0+
+
+- **AC5** — every walkthrough command exercised by
+  `tests/sit/`. Tracked under FEAT-016; needs the podman /
+  regtest harness which the cloud sandbox can't run.
+- **AC6** — default network = testnet/regtest on a fresh
+  install. Pairs with the per-wallet config work that
+  FEAT-012 deferred.
+- **AI-agent walkthrough** — same content, agent-facing form.
+  Tracked under FEAT-019.
+
 # `bitcoin(1)` man page, bash completion, and README walkthrough
 
 ## Description

@@ -1,16 +1,83 @@
-# completion file for bash
-_bitcoin_complete_entries () {
+# bash completion for bitcoin(1) — FEAT-015 (1.15.0).
+#
+# Context-aware completion for the wallet / psbt / descriptor /
+# backend subtrees. The top-level fallback merges the dispatcher's
+# built-in commands with any libexec/bitcoin/<plugin> the running
+# binary can see, so a fresh plugin doesn't require editing this
+# file before it tab-completes.
+
+_bitcoin_subcommands() {
+	local top="help version modules backend descriptor psbt wallet"
+	top="$top bech32 bech32-verify bech32-encode bech32-decode"
+	# libexec plugins — discovered via `bitcoin modules` so newly
+	# added plugins surface automatically. Fall back to a static
+	# list if the binary isn't on PATH yet (fresh shell).
+	local plugins
+	if command -v bitcoin >/dev/null 2>&1; then
+		plugins="$(bitcoin modules 2>/dev/null | tr '\n' ' ')"
+	else
+		plugins="bip13 bip32 bip39 daemon mnemonic-to-seed wif"
+	fi
+	printf '%s %s\n' "$top" "$plugins"
+}
+
+_bitcoin_wallet_subs() {
+	echo "new ls rm derive addresses label balance build sign send broadcast remote push pull help"
+}
+
+_bitcoin_psbt_subs() {
+	echo "decode encode sign finalize extract help"
+}
+
+_bitcoin_descriptor_subs() {
+	echo "checksum verify help"
+}
+
+_bitcoin_backend_subs() {
+	echo "view set auto mempool bitcoind blockstream chain-height get-address-utxos broadcast estimate-fee help"
+}
+
+_bitcoin_complete_entries() {
 	COMPREPLY=()
 	local cur="${COMP_WORDS[COMP_CWORD]}"
-	local commands="help version bip13 bip32 bip39 daemon wif wallet"
-	if [[ $COMP_CWORD -gt 1 ]]; then
-		case "${COMP_WORDS[1]}" in
-			help)
-				COMPREPLY=($(compgen -W "${commands}" -- ${cur}))
-				;;
-		esac
+	local prev_cmd="${COMP_WORDS[1]:-}"
+	local prev_sub="${COMP_WORDS[2]:-}"
+
+	# Top-level: COMP_CWORD == 1.
+	if [[ $COMP_CWORD -eq 1 ]]; then
+		COMPREPLY=( $(compgen -W "$(_bitcoin_subcommands)" -- "$cur") )
 		return
 	fi
-	COMPREPLY+=($(compgen -W "${commands}" -- ${cur}))
+
+	case "$prev_cmd" in
+		help)
+			# `bitcoin help <TAB>` mirrors top-level.
+			[[ $COMP_CWORD -eq 2 ]] && \
+				COMPREPLY=( $(compgen -W "$(_bitcoin_subcommands)" -- "$cur") )
+			;;
+		wallet)
+			if [[ $COMP_CWORD -eq 2 ]]; then
+				COMPREPLY=( $(compgen -W "$(_bitcoin_wallet_subs)" -- "$cur") )
+			elif [[ $COMP_CWORD -eq 3 && "$prev_sub" == "remote" ]]; then
+				COMPREPLY=( $(compgen -W "add" -- "$cur") )
+			fi
+			;;
+		psbt)
+			[[ $COMP_CWORD -eq 2 ]] && \
+				COMPREPLY=( $(compgen -W "$(_bitcoin_psbt_subs)" -- "$cur") )
+			;;
+		descriptor)
+			[[ $COMP_CWORD -eq 2 ]] && \
+				COMPREPLY=( $(compgen -W "$(_bitcoin_descriptor_subs)" -- "$cur") )
+			;;
+		backend)
+			if [[ $COMP_CWORD -eq 2 ]]; then
+				COMPREPLY=( $(compgen -W "$(_bitcoin_backend_subs)" -- "$cur") )
+			elif [[ $COMP_CWORD -eq 3 && "$prev_sub" == "set" ]]; then
+				COMPREPLY=( $(compgen -W "mempool bitcoind blockstream" -- "$cur") )
+			fi
+			;;
+	esac
 }
+
 complete -F _bitcoin_complete_entries bitcoin

@@ -1,5 +1,5 @@
 .\" Manpage for bitcoin(1).
-.TH BITCOIN 1 "May 2026" "scripts" "User Commands"
+.TH BITCOIN 1 "2026-05-15" "1.15.0" "User Commands"
 
 .SH NAME
 bitcoin \- educational Bitcoin frontend (BIPs implemented end-to-end)
@@ -12,35 +12,86 @@ bitcoin \- educational Bitcoin frontend (BIPs implemented end-to-end)
 
 .SH DESCRIPTION
 .B bitcoin
-is the educational Bitcoin frontend. Each subcommand
-implements a specific BIP (Bitcoin Improvement Proposal),
-cites the spec in its help text, and points at the
-vendored reference under
-.IR share/doc/bitcoin/standards/
-(FEAT-017).
-
-The wallet model:
+is an educational Bitcoin frontend. It is built around four
+design principles:
 
 .IP \(bu 2
-The seed phrase lives in
+.B educational
+\(em every subcommand cites the BIP it implements, and the
+referenced spec is shipped locally under
+.IR share/doc/bitcoin/bips/ .
+.IP \(bu 2
+.B functional
+\(em the tool is a real wallet: derive addresses, build and
+sign transactions, broadcast through one of three backends.
+.IP \(bu 2
+.B decentralized
+\(em the wallet repository is a git repository the user owns;
+seed material lives outside of
+.B bitcoin
+in
 .BR secret (1)
-\(em not in
-.BR bitcoin .
+so wallets can be pushed and pulled between machines without
+leaking key material.
 .IP \(bu 2
-Address derivation reads the seed via
+.B simple
+\(em the tool is bash + standard Unix utilities. There is no
+shared cryptography library; each BIP plugin reaches for the
+primitives it needs (openssl, dc, basenc) and is otherwise
+self-contained.
+
+.PP
+A wallet is a per-name git repository at
+.IR $XDG_DATA_HOME/bitcoin/wallets/<name>/
+that holds the signing context (config, descriptors, the
+addresses ledger). The seed phrase itself lives in
+.BR secret (1)
+\(em
+.B bitcoin
+calls
 .B "secret get <wallet>/seed"
-on demand.
-.IP \(bu 2
-Same address use is acceptable; no privacy-leak
-warning is emitted.
+on demand whenever it needs to derive a key.
+
+.SH OPTIONS
+.TP
+.B \-d
+Enable debug output (
+.IR set\ \-vx ).
+.TP
+.B \-q
+Quiet mode \(em suppress info-level messages.
+.TP
+.B \-p
+Prompt for a BIP-39 passphrase before any seed operation.
+.TP
+.B \-t
+Test-mode placeholder.
 
 .SH SUBCOMMANDS
 
-.SS BIP plugins (libexec/bitcoin/<name>)
+.SS Generic
+.TP
+.B help \fR[\fIcommand\fR]
+Print top-level help, or per-command help when
+.I command
+is given.
+.TP
+.B version
+Print the package version
+(from
+.I VERSION
+in the dev tree or
+.IR $PREFIX/share/bitcoin/version
+once installed).
+.TP
+.B modules
+List the BIP plugins under
+.IR libexec/bitcoin/ .
 
+.SS BIP plugins (libexec/bitcoin/<name>)
 .TP
 .B bip13
-Pay-to-Script-Hash address encoding.
+Base58Check encoding and Pay-to-Script-Hash address support.
 .TP
 .B bip32
 Hierarchical deterministic wallet derivation.
@@ -48,41 +99,348 @@ Hierarchical deterministic wallet derivation.
 .B bip39
 Mnemonic seed phrase encoding.
 .TP
+.B mnemonic-to-seed
+BIP-39 PBKDF2 \(em turn a mnemonic into a 64-byte seed.
+.TP
 .B wif
-Wallet Import Format private key encoding.
+Wallet Import Format private-key encoding.
 .TP
 .B daemon
-Multi-backend daemon abstraction
-(bitcoind / mempool.space / blockstream.info).
+Legacy daemon dispatcher (see
+.B backend
+for the supported abstraction).
 
-.SS Wallet (FEAT-018, partial)
+.SS bech32 / bech32m (BIP-173, BIP-350)
+.TP
+.B bech32 \fR[\fB-m\fR] \fIhrp\fR \fIdata\fR
+Encode a bech32 (or bech32m, with
+.BR -m )
+string from its human-readable part and data.
+.TP
+.B bech32-verify \fR[\fB-m\fR] \fIstring\fR
+Verify a bech32/bech32m checksum.
+.TP
+.B bech32-encode \fR[\fB-m\fR] \fIhrp\fR \fIdata\fR
+Lower-level encoder used by the address paths.
+.TP
+.B bech32-decode \fIstring\fR
+Decode a bech32 string into its hrp and 5-bit data words.
 
+.SS Output descriptors (BIP-380)
 .TP
-.BI "wallet new " name
-Create a new wallet (seed phrase stored in
-.BR secret ).
+.B descriptor checksum \fIdescriptor\fR
+Append the 8-character BIP-380 polymod checksum to a
+descriptor body. Idempotent: passing in an already-checksummed
+descriptor replaces the checksum.
 .TP
-.BI "wallet derive " name " " path
-Derive an address at the given BIP-32 path.
+.B descriptor verify \fIdescriptor#checksum\fR
+Verify a descriptor's checksum.
+
+.SS Backend (FEAT-012)
 .TP
-.BI "wallet balance " name
-Query balance via the configured daemon.
+.B backend \fR[\fIaction\fR]
+Print the active backend (
+.IR view ,
+the default) or set it.
+.TP
+.B backend set \fIname\fR
+Switch the active backend (
+.BR mempool ,
+.BR bitcoind ,
+.BR blockstream ).
+Mempool is the only fully implemented backend in this release;
+the others are stubs that return a clear "not implemented".
+.TP
+.B backend auto
+Pick
+.B bitcoind
+when reachable, else fall back to
+.B mempool
+with a warn line.
+.TP
+.B backend chain-height
+Current chain-tip height as an integer.
+.TP
+.B backend get-address-utxos \fIaddress\fR
+UTXOs at
+.I address
+as backend-native JSON.
+.TP
+.B backend broadcast \fIhex\fR
+POST a raw transaction; print the txid.
+.TP
+.B backend estimate-fee \fR[\fItarget-blocks\fR]
+Recommended sat/vB for confirmation within
+.I target-blocks
+(default 3). Mempool buckets: 1 (fastest), 3 (half-hour),
+6 (hour), 144 (economy), else minimum.
+
+.SS PSBT (BIP-174)
+.TP
+.B psbt decode
+Read a PSBT (hex) from stdin and emit one TSV line per
+key-value record:
+.IR "section=<n> type=<hex> key=<hex> value=<hex>" .
+.TP
+.B psbt encode
+Reverse of
+.BR "psbt decode" .
+Read TSV records on stdin and emit a hex PSBT, inserting
+section terminators where the section field advances.
+.TP
+.B psbt sign \fIprivkey-hex\fR
+Read a PSBT from stdin and sign every v0 P2WPKH input whose
+WITNESS_UTXO scriptPubKey matches HASH160(pubkey of
+.IR privkey-hex ).
+SIGHASH_ALL only; ECDSA via openssl over secp256k1;
+signatures are BIP-66 low-S canonicalised.
+.TP
+.B psbt finalize
+Promote PARTIAL_SIG records to FINAL_SCRIPTWITNESS per
+BIP-174 \(sc Finalizer.
+.TP
+.B psbt extract
+Emit the broadcastable BIP-141 + BIP-144 segwit raw tx from a
+finalised PSBT.
+
+.SS Wallet (FEAT-010, FEAT-013, FEAT-014)
+.TP
+.B wallet new \fIname\fR
+Create a new wallet at
+.IR $XDG_DATA_HOME/bitcoin/wallets/<name>/ .
+Generates a BIP-39 mnemonic and stores it via
+.BR "secret put <name>/seed" .
+.TP
+.B wallet ls
+List existing wallets.
+.TP
+.B wallet rm \fR[\fB-f\fR] \fIname\fR
+Remove a wallet.
+.B -f
+also removes the seed via
+.BR "secret rm" .
+.TP
+.B wallet derive \fIname\fR
+Derive the next BIP-84 receive address (
+.IR m/84h/0h/0h/0/i )
+and append it to the wallet's ledger.
+.TP
+.B wallet addresses \fIname\fR
+List every derived address with its index and label.
+.TP
+.B wallet label \fIname\fR \fIaddress\fR \fItext\fR
+Set or clear the label on a derived address.
+.TP
+.B wallet balance \fIname\fR
+Sum UTXO values for every derived address via the active
+backend.
+.TP
+.B wallet build \fIname\fR \fIaddress\fR \fIsats\fR \fR[\fB--fee-rate\fR \fIN\fR]
+Build an unsigned PSBT paying
+.I sats
+to
+.I address.
+Without
+.BR --fee-rate ,
+reads the active backend's
+.BR "estimate-fee 3"
+recommendation, falling back to 1 sat/vB on failure.
+P2WPKH / P2WSH outputs only.
+.TP
+.B wallet sign \fIname\fR
+Read a PSBT on stdin, derive a private key for every address
+in the wallet's ledger, pipe the PSBT through
+.B psbt sign
+once per key.
+.TP
+.B wallet send \fIname\fR \fIaddress\fR \fIsats\fR \fR[\fB--fee-rate\fR \fIN\fR]
+End-to-end:
+.BR "wallet build" " | " "wallet sign" " | " "psbt finalize"
+.BR | " psbt extract" " | " "wallet broadcast" .
+Prints the txid.
+.TP
+.B wallet broadcast \fIname\fR
+Read raw transaction hex from stdin; POST it via the active
+backend.
+.TP
+.B wallet remote add \fIname\fR \fIremote\fR \fIurl\fR
+Set / replace a git remote on the wallet repository so the
+wallet can be pushed between machines.
+.TP
+.B wallet push \fIname\fR \fR[\fIremote\fR]
+.B git push
+the wallet repository.
+.TP
+.B wallet pull \fIname\fR \fR[\fIremote\fR]
+.B git pull --rebase
+the wallet repository.
 
 .SH ENVIRONMENT
 .TP
 .B SELF_DEBUG
-Enable shell tracing.
+Enable shell tracing for any
+.B bitcoin
+process.
+.TP
+.B SELF_QUIET
+Suppress info-level log lines.
+.TP
+.B SELF_LIBEXEC
+Override the libexec directory used to find BIP plugins.
+.TP
+.B BITCOIN_BACKEND
+Override the active backend for this shell (
+.BR mempool ,
+.BR bitcoind ,
+.BR blockstream ).
+Takes precedence over
+.IR $XDG_CONFIG_HOME/bitcoin/backend .
+.TP
+.B BITCOIN_MEMPOOL_URL
+Base URL for the mempool.space backend (default
+.IR https://mempool.space ).
+.TP
+.B BIP39_PASSPHRASE
+Optional BIP-39 passphrase consumed by
+.BR mnemonic-to-seed .
+.TP
+.B XDG_DATA_HOME
+Wallet repositories live under
+.IR $XDG_DATA_HOME/bitcoin/wallets/ .
+.TP
+.B XDG_CONFIG_HOME
+Backend selection persists in
+.IR $XDG_CONFIG_HOME/bitcoin/backend .
+.TP
+.B XDG_SHARE_HOME
+The BIP-39 wordlist is read from
+.IR $XDG_SHARE_HOME/bitcoin/bip39/<lang>.txt .
 
 .SH FILES
 .TP
+.I $XDG_DATA_HOME/bitcoin/wallets/<name>/
+Per-wallet git repository: config, descriptors, addresses
+ledger.
+.TP
+.I $XDG_CONFIG_HOME/bitcoin/backend
+Active backend (one line, one name).
+.TP
+.I share/doc/bitcoin/bips/bip-NNNN.mediawiki
+Vendored BIP source documents (FEAT-017).
+.TP
 .I libexec/bitcoin/<plugin>
 Per-BIP plugin script.
-.TP
-.I share/doc/bitcoin/standards/
-Vendored BIP source documents (FEAT-017).
 
 .SH EXIT STATUS
-0 on success; non-zero on failure.
+Zero on success; non-zero on failure. Every failure branch
+emits at least one
+.IR warn / error / fatal
+line on stderr that names the condition and the offending
+value (per
+.IR skills/logging.md ).
+
+.SH EXAMPLES
+.PP
+The cold-signing flow:
+.PP
+.RS
+.EX
+$ bitcoin wallet new alice
+$ bitcoin wallet derive alice
+bc1q...
+$ # (fund the address from a faucet, wait for a confirmation)
+$ bitcoin wallet balance alice
+100000
+$ bitcoin wallet send alice bc1qrecipientaddr... 50000
+<txid>
+.EE
+.RE
+
+.PP
+The same flow split across two machines (hot-build, cold-sign):
+.PP
+.RS
+.EX
+hot$  bitcoin wallet build alice bc1qrecipient 50000 > tx.psbt
+cold$ bitcoin wallet sign  alice < tx.psbt | bitcoin psbt finalize > signed.psbt
+hot$  bitcoin psbt extract < signed.psbt | bitcoin wallet broadcast alice
+.EE
+.RE
+
+.SH STANDARDS
+Each subcommand cites its underlying BIP via
+.BR "bitcoin help <subcommand>" .
+The vendored specifications live under
+.IR share/doc/bitcoin/bips/ :
+
+.TP
+.B BIP-13 (P2SH addresses)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0013.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0013.mediawiki .
+.TP
+.B BIP-32 (HD wallets)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0032.mediawiki .
+.TP
+.B BIP-39 (mnemonic seed phrases)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0039.mediawiki .
+.TP
+.B BIP-141 (segwit)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki
+.UE
+\(em consumed by
+.B wallet build
++
+.BR "psbt extract" .
+.TP
+.B BIP-143 (segwit sighash)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki
+.UE
+\(em consumed by
+.BR "psbt sign" .
+.TP
+.B BIP-173 (bech32 segwit addresses)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0173.mediawiki .
+.TP
+.B BIP-174 (PSBT)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0174.mediawiki .
+.TP
+.B BIP-350 (bech32m for v1+ segwit)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0350.mediawiki .
+.TP
+.B BIP-380 (output descriptors)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0380.mediawiki .
+.TP
+.B BIP-381 (non-segwit descriptors)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0381.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0381.mediawiki .
+.TP
+.B BIP-386 (tr() descriptors)
+.UR https://github.com/bitcoin/bips/blob/master/bip-0386.mediawiki
+.UE
+\(em local:
+.IR share/doc/bitcoin/bips/bip-0386.mediawiki .
 
 .SH SEE ALSO
 .BR account (1),
@@ -90,12 +448,7 @@ Vendored BIP source documents (FEAT-017).
 .BR lightning (1),
 .BR bitcoind (8).
 
-.SH STANDARDS
-BIP 13 (P2SH), BIP 32 (HD wallets), BIP 39 (mnemonic),
-BIP 173 (bech32 addresses) \(em vendored under
-.IR share/doc/bitcoin/standards/ .
-
 .SH BUGS
 Report at
-.UR https://github.com/nostra124/scripts/issues
+.UR https://github.com/nostra124/bitcoin/issues
 .UE .
