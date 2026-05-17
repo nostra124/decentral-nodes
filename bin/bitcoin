@@ -385,9 +385,10 @@ descriptor:help() {
 	                    if <s> already ends in '#<8 chars>', replace it
 	  verify <s>        verify a descriptor's checksum; exit 0 on success
 	  derive <desc> <i> instantiate the '*' placeholder in <desc> with <i>
-	                    and emit the resulting address. Only wpkh() is
-	                    supported in this release; pkh / sh(wpkh) / tr /
-	                    combo return a clear 'not yet implemented' error.
+	                    and emit the resulting address. Supports wpkh()
+	                    (bech32 segwit), pkh() (legacy P2PKH '1...'), and
+	                    sh(wpkh()) (P2SH-nested segwit '3...'). tr() and
+	                    combo() return a clear 'not yet implemented'.
 	  wallet <name>     emit a checksummed wpkh(<xpub>/0/*) descriptor for
 	                    an existing wallet. Reads the seed via 'secret get
 	                    <name>/seed' and derives the m/84h/0h/0h account
@@ -427,32 +428,10 @@ command:descriptor() {
 # FEAT-026 (partial, 1.18.0): descriptor derive + descriptor wallet.
 #
 # Together these turn descriptors from checksum strings into actual
-# address generators. Only wpkh() is supported in this release; the
-# other four spec functions (pkh / sh(wpkh) / tr / combo) return a
-# clear "not yet implemented" error and are tracked as follow-up.
+# address generators. As of 1.20.0 the supported set is wpkh / pkh /
+# sh(wpkh); tr and combo remain stubbed (and tr is gated on FEAT-007
+# Taproot).
 # ---------------------------------------------------------------------------
-
-# Parse a wpkh()-form descriptor body and emit "<xpub><TAB><path>".
-# The path's terminal '*' is preserved — the caller substitutes the
-# index. Errors non-zero on a malformed body.
-#   $1 = body (no '#<checksum>' suffix)
-descriptor:_parse_wpkh() {
-	local body="$1"
-	# Strip leading 'wpkh(' and trailing ')'.
-	if [[ ! "$body" =~ ^wpkh\((.*)\)$ ]]; then
-		return 1
-	fi
-	local inner="${BASH_REMATCH[1]}"
-	# inner = <xpub>/<path>  (path may include '*')
-	if [[ "$inner" != */* ]]; then
-		# Bare key, no derivation — also valid per BIP-380 but for
-		# `derive <desc> <index>` we require the '*' placeholder.
-		return 2
-	fi
-	local xpub="${inner%%/*}"
-	local path="${inner#*/}"
-	printf '%s\t%s\n' "$xpub" "$path"
-}
 
 descriptor:derive() {
 	local desc="${1:-}" idx="${2:-}"
@@ -475,11 +454,28 @@ descriptor:derive() {
 		body="${desc:0: ${#desc}-9}"
 	fi
 
-	# Dispatch on the descriptor function. Only wpkh() ships here.
-	local fn="${body%%(*}"
+	# Dispatch on the outer descriptor function. Each branch extracts
+	# the inner key+path, runs the shared `_derive_pubkey` pipeline,
+	# and hands the resulting compressed pubkey to a per-function
+	# address encoder.
+	local fn inner_body inner_fn
+	if [[ "$body" =~ ^sh\((.*)\)$ ]]; then
+		fn="sh"
+		inner_body="${BASH_REMATCH[1]}"
+		inner_fn="${inner_body%%(*}"
+		# In 1.20.0 the only supported sh() inner is wpkh().
+		if [[ "$inner_fn" != "wpkh" ]]; then
+			error "descriptor derive: 'sh($inner_fn(...))' is not yet implemented (only sh(wpkh()) ships here)"
+			return 5
+		fi
+	else
+		fn="${body%%(*}"
+		inner_body="$body"
+	fi
+
 	case "$fn" in
-		wpkh) ;;
-		pkh|sh|tr|combo)
+		wpkh|pkh|sh) ;;
+		tr|combo)
 			error "descriptor derive: '$fn()' is not yet implemented (tracked as FEAT-026 follow-up)"
 			return 5
 			;;
@@ -489,48 +485,67 @@ descriptor:derive() {
 			;;
 	esac
 
+	# All currently-supported functions wrap a wpkh-shaped key body
+	# ('<xpub>/<path>'). _parse_wpkh accepts both 'wpkh(...)' and
+	# 'pkh(...)' because the inner shape is identical.
 	local parsed
-	if ! parsed="$(descriptor:_parse_wpkh "$body")"; then
-		error "descriptor derive: malformed wpkh() descriptor (need 'wpkh(<xpub>/<path>)' with at least one '/')"
+	if ! parsed="$(descriptor:_parse_key_body "$inner_body")"; then
+		error "descriptor derive: malformed descriptor body '$inner_body' (need '<fn>(<xpub>/<path>)' with at least one '/')"
 		return 7
 	fi
 	local xpub="${parsed%%	*}"
 	local path="${parsed#*	}"
 
-	# Replace the terminal '*' with the index; refuse if there's
-	# nothing to instantiate.
 	if [[ "$path" != *"*"* ]]; then
 		error "descriptor derive: descriptor has no '*' placeholder to instantiate"
 		return 8
 	fi
-	# Per BIP-380: '*' is the wildcard at any depth; for our purposes
-	# we accept the simple terminal '*' case (the wallet's standard).
 	path="${path//\*/$idx}"
 
-	# Build the derivation argument. The input is an xpub (a depth-3
-	# extended public key — m/84h/0h/0h account level for a wallet-
-	# emitted descriptor), so we use a bare relative path:
-	#   - 'm/...'  requires private master, not what we have.
-	#   - 'M/...'  requires public master with depth=0, also wrong.
-	#   - '/<path>' walks from the supplied key at whatever depth it is.
-	local derive_path="/$path"
+	local pubkey
+	if ! pubkey="$(descriptor:_derive_pubkey "$xpub" "$path")"; then
+		# _derive_pubkey already emitted a specific error.
+		return 9
+	fi
 
+	case "$fn" in
+		wpkh) p2wpkh "$pubkey" ;;
+		pkh)  descriptor:_pkh_address "$pubkey" ;;
+		sh)   descriptor:_p2sh_p2wpkh_address "$pubkey" ;;
+	esac
+}
+
+# Extract '<xpub>/<path>' from a function body like 'wpkh(<xpub>/...)
+# or 'pkh(<xpub>/...)'. Emits "<xpub><TAB><path>"; non-zero on a
+# malformed body or a missing '/'.
+descriptor:_parse_key_body() {
+	local body="$1"
+	if [[ ! "$body" =~ ^(wpkh|pkh)\((.*)\)$ ]]; then
+		return 1
+	fi
+	local inner="${BASH_REMATCH[2]}"
+	if [[ "$inner" != */* ]]; then
+		return 2
+	fi
+	printf '%s\t%s\n' "${inner%%/*}" "${inner#*/}"
+}
+
+# Derive a compressed child pubkey from <xpub> at <path>. <path> is
+# the post-substitution path (no '*'). Reuses the bip32 plugin via
+# the same tmpfile dance the inline wpkh code used to use, so the
+# 78-byte serialisation survives the null-byte hostile environment
+# of bash command substitution.
+descriptor:_derive_pubkey() {
+	local xpub="$1" path="$2"
 	local libexec="${SELF_LIBEXEC:?descriptor derive: SELF_LIBEXEC must be set}"
 	if [ ! -x "$libexec/${SELF:-bitcoin}/bip32" ]; then
 		error "descriptor derive: bip32 plugin not found at $libexec/${SELF:-bitcoin}/bip32"
-		return 9
+		return 1
 	fi
 	if [ ! -x "$libexec/${SELF:-bitcoin}/bip13" ]; then
 		error "descriptor derive: bip13 plugin not found at $libexec/${SELF:-bitcoin}/bip13"
-		return 10
+		return 1
 	fi
-
-	# Pipeline: base58-decode the xpub, strip the 4-byte BIP-32
-	# checksum to recover the 78-byte serialisation, derive the
-	# child via bip32, take the last 33 bytes (compressed pubkey),
-	# bech32-encode as P2WPKH. Uses tmpfiles because the binary
-	# extended-key bytes contain null bytes which bash command
-	# substitution drops.
 	local raw_decoded raw_serialised
 	raw_decoded="$(mktemp)"
 	raw_serialised="$(mktemp)"
@@ -538,20 +553,18 @@ descriptor:derive() {
 	if [ ! -s "$raw_decoded" ]; then
 		rm -f "$raw_decoded" "$raw_serialised"
 		error "descriptor derive: failed to base58-decode xpub '$xpub'"
-		return 11
+		return 2
 	fi
-	# BIP-32 serialisation is 78 bytes; base58check appends a 4-byte
-	# checksum, so we expect 82 bytes here and strip the last 4.
 	local decoded_len; decoded_len="$(wc -c < "$raw_decoded")"
 	if (( decoded_len != 82 )); then
 		rm -f "$raw_decoded" "$raw_serialised"
 		error "descriptor derive: decoded xpub is $decoded_len bytes, expected 82"
-		return 12
+		return 3
 	fi
 	head -c 78 "$raw_decoded" > "$raw_serialised"
 	local pubkey
 	pubkey="$(
-		"$libexec/${SELF:-bitcoin}/bip32" derive "$derive_path" 2>/dev/null < "$raw_serialised" \
+		"$libexec/${SELF:-bitcoin}/bip32" derive "/$path" 2>/dev/null < "$raw_serialised" \
 			| tail -c 33 \
 			| basenc --base16 -w0 \
 			| tr A-F a-f
@@ -559,9 +572,30 @@ descriptor:derive() {
 	rm -f "$raw_decoded" "$raw_serialised"
 	if [[ ! "$pubkey" =~ ^0[23][[:xdigit:]]{64}$ ]]; then
 		error "descriptor derive: derivation produced unexpected output '$pubkey'"
-		return 13
+		return 4
 	fi
-	p2wpkh "$pubkey"
+	printf '%s\n' "$pubkey"
+}
+
+# BIP-13 P2PKH address from a compressed pubkey hex:
+#   base58check(0x00 || HASH160(pubkey))
+# Mainnet version byte 0x00; the resulting address starts with '1'.
+descriptor:_pkh_address() {
+	local pubkey_hex="$1"
+	local pubkey_hash; pubkey_hash="$(printf '%s' "$pubkey_hex" | psbt:_hash160_hex)"
+	descriptor:_base58check_hex "00$pubkey_hash"
+}
+
+# BIP-13 P2SH wrap of a P2WPKH redeem script:
+#   redeem_script = 00 14 || HASH160(pubkey)
+#   address       = base58check(0x05 || HASH160(redeem_script))
+# Mainnet version byte 0x05; the resulting address starts with '3'.
+descriptor:_p2sh_p2wpkh_address() {
+	local pubkey_hex="$1"
+	local pubkey_hash; pubkey_hash="$(printf '%s' "$pubkey_hex" | psbt:_hash160_hex)"
+	local redeem_script="0014$pubkey_hash"
+	local script_hash; script_hash="$(printf '%s' "$redeem_script" | psbt:_hash160_hex)"
+	descriptor:_base58check_hex "05$script_hash"
 }
 
 # Base58Check-encode a binary file. Used to format the 78-byte
@@ -583,6 +617,41 @@ descriptor:_base58check_file() {
 	} > "$tmp"
 	"$libexec/${SELF:-bitcoin}/bip13" base58-encode < "$tmp"
 	rm -f "$tmp"
+}
+
+# Hex-input sibling of _base58check_file. Used by the pkh / sh
+# address derivations in 1.20.0; the data they hand off is small
+# (21 bytes) and starts with a null version byte that command
+# substitution would drop, so we pipe through bip13 base58-encode
+# without ever capturing the raw bytes into a bash variable.
+#
+# Standard base58check emits one '1' character per leading 0x00
+# byte in the payload (preserving byte count over an otherwise
+# big-int encoding). `bip13 base58-encode` treats its input as a
+# pure integer and drops leading zeros, so we prepend the missing
+# '1's here. The P2PKH path (mainnet prefix 0x00) relies on this.
+descriptor:_base58check_hex() {
+	local data_hex="$1"
+	local libexec="${SELF_LIBEXEC:?descriptor: SELF_LIBEXEC must be set}"
+	# Count leading 0x00 bytes in the hex input.
+	local -i leading_zeros=0
+	while [[ "${data_hex:leading_zeros*2:2}" == "00" ]]; do
+		(( leading_zeros++ ))
+	done
+	local tail
+	tail="$(
+		{
+			printf '%s' "$data_hex" | xxd -r -p
+			printf '%s' "$data_hex" | xxd -r -p \
+				| openssl dgst -sha256 -binary \
+				| openssl dgst -sha256 -binary \
+				| head -c 4
+		} | "$libexec/${SELF:-bitcoin}/bip13" base58-encode
+	)"
+	local prefix=""
+	local -i i
+	for ((i=0; i<leading_zeros; i++)); do prefix+="1"; done
+	printf '%s%s\n' "$prefix" "$tail"
 }
 
 descriptor:wallet() {
