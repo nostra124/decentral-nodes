@@ -1776,6 +1776,91 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-026 (partial, 1.18.0) — descriptor derive + descriptor wallet.
+# Together these turn descriptors from checksum strings into actual
+# address generators. wpkh() only in this release; pkh / sh(wpkh) /
+# tr / combo return a clear "not yet implemented" error.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-026 — descriptor wallet emits a checksummed wpkh() descriptor" {
+	setup_wallet_derive_env
+	run "$BITCOIN_BIN" descriptor wallet alice
+	[ "$status" -eq 0 ]
+	# Shape: wpkh(<xpub>/0/*)#<8-char checksum>
+	[[ "$output" =~ ^wpkh\(xpub[0-9A-Za-z]+/0/\*\)#[a-z0-9]{8}$ ]]
+	# And descriptor verify accepts what wallet emits.
+	run "$BITCOIN_BIN" descriptor verify "$output"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-026 — descriptor wallet rejects a missing wallet" {
+	setup_wallet_derive_env
+	run "$BITCOIN_BIN" descriptor wallet no-such-wallet
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-026 — descriptor derive reproduces wallet derive on the abandon-mnemonic vector" {
+	setup_wallet_derive_env
+	desc="$("$BITCOIN_BIN" descriptor wallet alice)"
+	run "$BITCOIN_BIN" descriptor derive "$desc" 0
+	[ "$status" -eq 0 ]
+	# Canonical BIP-84 first-receive address for the abandon mnemonic.
+	[ "$output" = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu" ]
+}
+
+@test "FEAT-026 — descriptor derive walks the index forward to match consecutive wallet derives" {
+	setup_wallet_derive_env
+	desc="$("$BITCOIN_BIN" descriptor wallet alice)"
+	# Compare descriptor derive against wallet derive for indices 0, 1, 2.
+	for i in 0 1 2; do
+		expected="$("$BITCOIN_BIN" wallet derive alice)"
+		got="$("$BITCOIN_BIN" descriptor derive "$desc" "$i")"
+		[ "$got" = "$expected" ]
+	done
+}
+
+@test "FEAT-026 — descriptor derive rejects non-wpkh functions with a clear error" {
+	setup_wallet_derive_env
+	for fn in pkh tr combo; do
+		run "$BITCOIN_BIN" descriptor derive "${fn}(xpub/0/*)" 0
+		[ "$status" -ne 0 ]
+		[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]] || true
+	done
+}
+
+@test "FEAT-026 — descriptor derive rejects malformed input" {
+	setup_wallet_derive_env
+	# No '*' placeholder.
+	desc="$("$BITCOIN_BIN" descriptor wallet alice)"
+	# Strip the '/*' to leave a non-instantiable path.
+	bad="${desc/\/\*/}"
+	run "$BITCOIN_BIN" descriptor derive "$bad" 0
+	[ "$status" -ne 0 ]
+	# Empty descriptor.
+	run "$BITCOIN_BIN" descriptor derive "" 0
+	[ "$status" -ne 0 ]
+	# Non-numeric index.
+	run "$BITCOIN_BIN" descriptor derive "$desc" notanint
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-026 — descriptor derive rejects a descriptor with a bad checksum" {
+	setup_wallet_derive_env
+	desc="$("$BITCOIN_BIN" descriptor wallet alice)"
+	# Flip one character of the checksum.
+	bad="${desc:0: ${#desc}-1}q"
+	run "$BITCOIN_BIN" descriptor derive "$bad" 0
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-026 — descriptor help mentions derive and wallet" {
+	run "$BITCOIN_BIN" descriptor help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"derive"* ]]
+	[[ "$output" == *"wallet"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`

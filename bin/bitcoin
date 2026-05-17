@@ -384,6 +384,14 @@ descriptor:help() {
 	  checksum <s>      append a BIP-380 checksum to the descriptor body;
 	                    if <s> already ends in '#<8 chars>', replace it
 	  verify <s>        verify a descriptor's checksum; exit 0 on success
+	  derive <desc> <i> instantiate the '*' placeholder in <desc> with <i>
+	                    and emit the resulting address. Only wpkh() is
+	                    supported in this release; pkh / sh(wpkh) / tr /
+	                    combo return a clear 'not yet implemented' error.
+	  wallet <name>     emit a checksummed wpkh(<xpub>/0/*) descriptor for
+	                    an existing wallet. Reads the seed via 'secret get
+	                    <name>/seed' and derives the m/84h/0h/0h account
+	                    xpub via the same pipeline 'wallet derive' uses.
 	  help              this message
 
 	BIP-380 §Checksum defines an 8-character polymod-based suffix after
@@ -404,6 +412,8 @@ command:descriptor() {
 	case "$sub" in
 		checksum) descriptor:checksum "$@" ;;
 		verify)   descriptor:verify   "$@" ;;
+		derive)   descriptor:derive   "$@" ;;
+		wallet)   descriptor:wallet   "$@" ;;
 		help)     descriptor:help ;;
 		*)
 			error "unknown descriptor subcommand: '$sub'"
@@ -411,6 +421,211 @@ command:descriptor() {
 			return 2
 			;;
 	esac
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-026 (partial, 1.18.0): descriptor derive + descriptor wallet.
+#
+# Together these turn descriptors from checksum strings into actual
+# address generators. Only wpkh() is supported in this release; the
+# other four spec functions (pkh / sh(wpkh) / tr / combo) return a
+# clear "not yet implemented" error and are tracked as follow-up.
+# ---------------------------------------------------------------------------
+
+# Parse a wpkh()-form descriptor body and emit "<xpub><TAB><path>".
+# The path's terminal '*' is preserved — the caller substitutes the
+# index. Errors non-zero on a malformed body.
+#   $1 = body (no '#<checksum>' suffix)
+descriptor:_parse_wpkh() {
+	local body="$1"
+	# Strip leading 'wpkh(' and trailing ')'.
+	if [[ ! "$body" =~ ^wpkh\((.*)\)$ ]]; then
+		return 1
+	fi
+	local inner="${BASH_REMATCH[1]}"
+	# inner = <xpub>/<path>  (path may include '*')
+	if [[ "$inner" != */* ]]; then
+		# Bare key, no derivation — also valid per BIP-380 but for
+		# `derive <desc> <index>` we require the '*' placeholder.
+		return 2
+	fi
+	local xpub="${inner%%/*}"
+	local path="${inner#*/}"
+	printf '%s\t%s\n' "$xpub" "$path"
+}
+
+descriptor:derive() {
+	local desc="${1:-}" idx="${2:-}"
+	if [ -z "$desc" ] || [ -z "$idx" ]; then
+		error "descriptor derive: usage: descriptor derive <descriptor> <index>"
+		return 2
+	fi
+	if [[ ! "$idx" =~ ^[0-9]+$ ]]; then
+		error "descriptor derive: <index> must be a non-negative integer (got '$idx')"
+		return 3
+	fi
+
+	# Strip and verify optional checksum suffix.
+	local body="$desc"
+	if (( ${#desc} > 9 )) && [[ "${desc: -9: 1}" == "#" ]]; then
+		if ! descriptor:verify "$desc" >/dev/null 2>&1; then
+			error "descriptor derive: checksum suffix on '$desc' is invalid"
+			return 4
+		fi
+		body="${desc:0: ${#desc}-9}"
+	fi
+
+	# Dispatch on the descriptor function. Only wpkh() ships here.
+	local fn="${body%%(*}"
+	case "$fn" in
+		wpkh) ;;
+		pkh|sh|tr|combo)
+			error "descriptor derive: '$fn()' is not yet implemented (tracked as FEAT-026 follow-up)"
+			return 5
+			;;
+		*)
+			error "descriptor derive: unknown descriptor function '$fn'"
+			return 6
+			;;
+	esac
+
+	local parsed
+	if ! parsed="$(descriptor:_parse_wpkh "$body")"; then
+		error "descriptor derive: malformed wpkh() descriptor (need 'wpkh(<xpub>/<path>)' with at least one '/')"
+		return 7
+	fi
+	local xpub="${parsed%%	*}"
+	local path="${parsed#*	}"
+
+	# Replace the terminal '*' with the index; refuse if there's
+	# nothing to instantiate.
+	if [[ "$path" != *"*"* ]]; then
+		error "descriptor derive: descriptor has no '*' placeholder to instantiate"
+		return 8
+	fi
+	# Per BIP-380: '*' is the wildcard at any depth; for our purposes
+	# we accept the simple terminal '*' case (the wallet's standard).
+	path="${path//\*/$idx}"
+
+	# Build the derivation argument. The input is an xpub (a depth-3
+	# extended public key — m/84h/0h/0h account level for a wallet-
+	# emitted descriptor), so we use a bare relative path:
+	#   - 'm/...'  requires private master, not what we have.
+	#   - 'M/...'  requires public master with depth=0, also wrong.
+	#   - '/<path>' walks from the supplied key at whatever depth it is.
+	local derive_path="/$path"
+
+	local libexec="${SELF_LIBEXEC:?descriptor derive: SELF_LIBEXEC must be set}"
+	if [ ! -x "$libexec/${SELF:-bitcoin}/bip32" ]; then
+		error "descriptor derive: bip32 plugin not found at $libexec/${SELF:-bitcoin}/bip32"
+		return 9
+	fi
+	if [ ! -x "$libexec/${SELF:-bitcoin}/bip13" ]; then
+		error "descriptor derive: bip13 plugin not found at $libexec/${SELF:-bitcoin}/bip13"
+		return 10
+	fi
+
+	# Pipeline: base58-decode the xpub, strip the 4-byte BIP-32
+	# checksum to recover the 78-byte serialisation, derive the
+	# child via bip32, take the last 33 bytes (compressed pubkey),
+	# bech32-encode as P2WPKH. Uses tmpfiles because the binary
+	# extended-key bytes contain null bytes which bash command
+	# substitution drops.
+	local raw_decoded raw_serialised
+	raw_decoded="$(mktemp)"
+	raw_serialised="$(mktemp)"
+	printf '%s' "$xpub" | "$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null > "$raw_decoded"
+	if [ ! -s "$raw_decoded" ]; then
+		rm -f "$raw_decoded" "$raw_serialised"
+		error "descriptor derive: failed to base58-decode xpub '$xpub'"
+		return 11
+	fi
+	# BIP-32 serialisation is 78 bytes; base58check appends a 4-byte
+	# checksum, so we expect 82 bytes here and strip the last 4.
+	local decoded_len; decoded_len="$(wc -c < "$raw_decoded")"
+	if (( decoded_len != 82 )); then
+		rm -f "$raw_decoded" "$raw_serialised"
+		error "descriptor derive: decoded xpub is $decoded_len bytes, expected 82"
+		return 12
+	fi
+	head -c 78 "$raw_decoded" > "$raw_serialised"
+	local pubkey
+	pubkey="$(
+		"$libexec/${SELF:-bitcoin}/bip32" derive "$derive_path" 2>/dev/null < "$raw_serialised" \
+			| tail -c 33 \
+			| basenc --base16 -w0 \
+			| tr A-F a-f
+	)"
+	rm -f "$raw_decoded" "$raw_serialised"
+	if [[ ! "$pubkey" =~ ^0[23][[:xdigit:]]{64}$ ]]; then
+		error "descriptor derive: derivation produced unexpected output '$pubkey'"
+		return 13
+	fi
+	p2wpkh "$pubkey"
+}
+
+# Base58Check-encode a binary file. Used to format the 78-byte
+# extended-key serialisation into the canonical xpub/xprv/zpub
+# textual form. BIP-32 §Serialization specifies the 4-byte SHA256d
+# checksum appended to the data before base58 encoding; the bip13
+# base58-encode plugin is plain base58 (no checksum), so this helper
+# adds the checksum first.
+descriptor:_base58check_file() {
+	local infile="$1"
+	local libexec="${SELF_LIBEXEC:?descriptor: SELF_LIBEXEC must be set}"
+	local tmp; tmp="$(mktemp)"
+	# data || sha256d(data)[:4]
+	{
+		cat "$infile"
+		openssl dgst -sha256 -binary < "$infile" \
+			| openssl dgst -sha256 -binary \
+			| head -c 4
+	} > "$tmp"
+	"$libexec/${SELF:-bitcoin}/bip13" base58-encode < "$tmp"
+	rm -f "$tmp"
+}
+
+descriptor:wallet() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "descriptor wallet: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "descriptor wallet: no such wallet '$name' at $path"
+		return 3
+	fi
+	if ! command -v secret >/dev/null 2>&1; then
+		error "descriptor wallet: 'secret' not in PATH (cannot read seed)"
+		return 4
+	fi
+	local libexec="${SELF_LIBEXEC:?descriptor wallet: SELF_LIBEXEC must be set}"
+
+	# Same pipeline wallet:_derive_address uses, but stops at the
+	# m/84h/0h/0h xpub (the account-level public key) rather than
+	# walking down to an address. We pipe through a tmpfile so the
+	# binary 78-byte serialisation survives — bash command
+	# substitution strips null bytes which corrupts the checksum.
+	local raw; raw="$(mktemp)"
+	secret get "$name/seed" |
+		"$libexec/${SELF:-bitcoin}/mnemonic-to-seed" |
+		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/N" 2>/dev/null \
+		> "$raw"
+	if [ ! -s "$raw" ]; then
+		rm -f "$raw"
+		error "descriptor wallet: xpub derivation for '$name' produced empty output"
+		return 5
+	fi
+	local xpub; xpub="$(descriptor:_base58check_file "$raw")"
+	rm -f "$raw"
+	if [ -z "$xpub" ]; then
+		error "descriptor wallet: base58check encoding failed for '$name'"
+		return 6
+	fi
+	descriptor:checksum "wpkh($xpub/0/*)"
 }
 
 # ---------------------------------------------------------------------------
