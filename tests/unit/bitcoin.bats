@@ -1435,6 +1435,96 @@ signed_alice_psbt() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-014 (extend, 1.21.0) — wallet send --mainnet guard. Sends
+# against a wallet whose config says `network=mainnet` are refused
+# unless --mainnet is supplied; other networks (including the
+# default testnet) pass through unchanged whether --mainnet is set
+# or not.
+# ---------------------------------------------------------------------------
+
+# Helper: set the wallet's config network= line. Assumes
+# setup_wallet_derive_env has already initialised alice.
+wallet_set_network() {
+	local name="$1" net="$2"
+	local cfg="$XDG_DATA_HOME/bitcoin/wallets/$name/config"
+	printf 'network=%s\n' "$net" > "$cfg"
+	(
+		cd "$XDG_DATA_HOME/bitcoin/wallets/$name"
+		git -c user.email=t@t -c user.name=t -c commit.gpgsign=false \
+			commit -q -am "set network=$net" 2>/dev/null || true
+	)
+}
+
+@test "FEAT-014 — wallet send on a testnet wallet proceeds without --mainnet" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	# Set the network explicitly. (setup_wallet_derive_env writes an
+	# empty config; the helper defaults to testnet anyway, but pinning
+	# this in the test keeps the intent visible.)
+	wallet_set_network alice testnet
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	curl_fixture "https://mempool.space/api/tx" \
+		"f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d"
+	run "$BITCOIN_BIN" wallet send alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	[ "$status" -eq 0 ]
+	[ "$output" = "f00df00df00df00df00df00df00df00df00df00df00df00df00df00df00df00d" ]
+}
+
+@test "FEAT-014 — wallet send on an empty-config wallet defaults to testnet (no --mainnet needed)" {
+	# Per wallet:_network's default-to-testnet fallback, a wallet
+	# whose config has no network= line is treated as testnet — so
+	# send proceeds without --mainnet. This is the pre-existing
+	# setup_wallet_derive_env shape (config is empty).
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	curl_fixture "https://mempool.space/api/tx" \
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	# Confirm the config has no network= line.
+	! grep -q '^network=' "$XDG_DATA_HOME/bitcoin/wallets/alice/config"
+	run "$BITCOIN_BIN" wallet send alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-014 — wallet send on a mainnet wallet refuses without --mainnet" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	wallet_set_network alice mainnet
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	run "$BITCOIN_BIN" wallet send alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"mainnet"* ]] || [[ "$stderr" == *"mainnet"* ]] || true
+}
+
+@test "FEAT-014 — wallet send on a mainnet wallet succeeds with --mainnet" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	wallet_set_network alice mainnet
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	curl_fixture "https://mempool.space/api/tx" \
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	run "$BITCOIN_BIN" wallet send alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1 --mainnet
+	[ "$status" -eq 0 ]
+	[ "$output" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ]
+}
+
+@test "FEAT-014 — wallet send accepts --mainnet on non-mainnet wallets as a silent no-op" {
+	setup_wallet_derive_env
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	wallet_set_network alice regtest
+	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
+	curl_fixture "https://mempool.space/api/tx" \
+		"00000000deadbeef00000000deadbeef00000000deadbeef00000000deadbeef"
+	run "$BITCOIN_BIN" wallet send alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1 --mainnet
+	[ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # FEAT-015 (partial, 1.15.0) — man page + bash completion + walkthrough.
 # The man-page assertions read straight from the source roff so they
 # are independent of whether mandoc/groff is installed on CI runners.
