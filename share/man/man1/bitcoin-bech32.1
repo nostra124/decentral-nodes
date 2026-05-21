@@ -1,0 +1,135 @@
+.\" Manpage for bitcoin-bech32(1) — BIP-173 / BIP-350 bech32(m).
+.TH BITCOIN-BECH32 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+
+.SH NAME
+bitcoin\-bech32 \- bech32 and bech32m encoding (BIP-173, BIP-350)
+
+.SH SYNOPSIS
+.B bitcoin bech32
+.RI [ -m ]
+.I hrp
+.I data
+.br
+.B bitcoin bech32-encode
+.RI [ -m ]
+.I hrp
+.br
+.B bitcoin bech32-decode
+.RI [ -m ]
+.I string
+.br
+.B bitcoin bech32-verify
+.RI [ -m ]
+.I string
+
+.SH DESCRIPTION
+.B bitcoin bech32
+implements the bech32 string format (BIP-173) and its bech32m
+variant (BIP-350). The base verb emits a bech32 (or, with
+.BR -m ,
+bech32m) string from a human-readable part and a non-checked data
+part of pre-encoded 5-bit symbols; the
+.BR -encode "/" -decode "/" -verify
+sibling verbs operate on binary input and address-shaped data
+respectively.
+
+Bech32 is not by itself a binary-to-text encoding; it requires
+additional padding conventions (e.g. the segwit "witness version
++ program" framing) to map raw bytes to and from a checksummed
+string. Callers that want segwit addresses should layer on top of
+this plugin.
+
+.SH OPTIONS
+.TP
+.B -m
+Use the bech32m constant
+.RB ( 0x2bc830a3 )
+instead of the bech32 constant
+.RB ( 1 ).
+Required for segwit v1+ (Taproot) addresses per BIP-350.
+
+.SH SUBCOMMANDS
+.TP
+.BR "bech32 " [ -m ]
+.I "hrp data"
+Emit a bech32(m) string from an explicit human-readable part
+.RI ( hrp ,
+1\-83 chars, all-lowercase or all-uppercase) and a data part of
+characters drawn from the bech32 charset
+.RB ( "qpzry9x8gf2tvdw0s3jn54khce6mua7l" ).
+The 6-character checksum is computed and appended.
+.TP
+.BR "bech32-encode " [ -m ]
+.I "hrp"
+Encode raw binary data on stdin (after 8-to-5-bit regrouping with
+the conventions documented in BIP-173 §Encoding) under
+.I hrp .
+.TP
+.BR "bech32-decode " [ -m ]
+.I "string"
+Decode a bech32(m)
+.I string ;
+print the human-readable part and the decoded raw data part on
+stdout.
+.TP
+.BR "bech32-verify " [ -m ]
+.I "string"
+Verify the checksum of
+.I string
+without producing data; exit 0 on success.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success (or, for
+.BR bech32-verify ,
+checksum is valid).
+.TP
+.B 1
+Mixed-case input (per BIP-173 §Checksum verification, all-upper
+and all-lower are valid but mixing is rejected).
+.TP
+.B 2
+Combined length of HRP + data + 6-char checksum exceeds 90.
+.TP
+.B 3
+HRP length out of range (must be 1\-83).
+.TP
+.B 4
+HRP contained a character outside the printable ASCII range
+33\-126.
+.TP
+.B 5
+Data part contained a character outside the bech32 charset.
+
+.SH FILES
+None. The plugin is stateless.
+
+.SH ENVIRONMENT
+None specific.
+
+.SH STANDARDS
+.IP \(bu 2
+BIP-173 (Base32 address format for native v0\-16 witness outputs),
+shipped at
+.IR share/doc/bitcoin/standards/bip-0173.mediawiki .
+.IP \(bu 2
+BIP-350 (Bech32m format for v1+ witness addresses), shipped at
+.IR share/doc/bitcoin/standards/bip-0350.mediawiki .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip13 (1),
+.BR bitcoin-descriptor (1)
+
+.SH HISTORY
+Verb introduced in bitcoin 1.0.0. Man page added in 1.23.0
+(FEAT-041).
+
+In a future release the verb family will split: bech32 (BIP-173)
+moves to
+.B bitcoin bip173
+and bech32m (BIP-350) to
+.B bitcoin bip350
+(FEAT-035, target 1.23.0+); the existing names remain as
+deprecated aliases for one release after the split.

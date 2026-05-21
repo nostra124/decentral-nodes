@@ -1,0 +1,165 @@
+.\" Manpage for bitcoin-bip32(1) — BIP-32 HD wallets.
+.TH BITCOIN-BIP32 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+
+.SH NAME
+bitcoin\-bip32 \- hierarchical deterministic key derivation (BIP-32)
+
+.SH SYNOPSIS
+.B bitcoin bip32
+.RI [ options ]
+.B create
+.RI [ -st ]
+.RI [ "passphrase" ]
+.br
+.B bitcoin bip32
+.RI [ options ]
+.B derive
+.I path
+.br
+.B bitcoin bip32
+.RI [ options ]
+.B ser32
+.I i
+.br
+.B bitcoin bip32
+.RI [ options ]
+.B ser256
+.I p
+.br
+.B bitcoin bip32
+.RI [ options ]
+.B hash160
+.br
+.B bitcoin bip32 is-secret
+.I key
+.br
+.B bitcoin bip32 is-public
+.I key
+.br
+.B bitcoin bip32 help
+.RI [ command ]
+
+.SH DESCRIPTION
+.B bitcoin bip32
+implements the hierarchical-deterministic key tree from BIP-32.
+
+With no derivation argument, the plugin reads a binary seed from
+stdin and emits the corresponding master extended key. When stdout
+is a terminal, the output is base58check-encoded
+.RB ( xprv "/" xpub );
+otherwise the raw 78-byte serialised form is written.
+
+With a derivation path, the plugin reads a serialised extended key
+from stdin and emits the derived key. Hardened steps are written
+as
+.IR i'
+or
+.IR iH ;
+unhardened steps as
+.IR i .
+A leading
+.B m
+expects a master private key; leading
+.B M
+expects a master public key; a leading
+.B /
+applies the derivation to whatever key is on stdin.
+
+.SH OPTIONS
+.TP
+.B -d
+Enable debug output (shell trace).
+.TP
+.B -q
+Quiet mode (suppress info logging).
+.TP
+.B -t
+Generate keys for the test network (4-byte version prefix swap).
+.TP
+.B -s
+On
+.BR create ,
+interpret stdin as a seed in hex format rather than raw bytes.
+
+.SH SUBCOMMANDS
+.TP
+.B "create " [ "-st" "] [" "passphrase" ]
+Generate a master extended key from a binary (or hex with
+.BR -s )
+seed on stdin.
+.TP
+.BI "derive " path
+Derive the child key at
+.I path
+from the serialised extended key on stdin.
+.TP
+.BI "ser32 " i
+Serialise the 32-bit unsigned integer
+.I i
+as a 4-byte big-endian sequence (BIP-32 §Serialisation helper).
+.TP
+.BI "ser256 " p
+Serialise
+.I p
+as a 32-byte big-endian sequence (BIP-32 §Serialisation helper).
+.TP
+.B hash160
+Compute
+.B RIPEMD160(SHA256(input))
+for the bytes on stdin.
+.TP
+.BI "is-secret " key
+Exit 0 if
+.I key
+is an extended private key
+.RB ( xprv "/" tprv );
+non-zero otherwise.
+.TP
+.BI "is-public " key
+Exit 0 if
+.I key
+is an extended public key
+.RB ( xpub "/" tpub );
+non-zero otherwise.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B \(>=1
+General error. Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10.
+
+.SH FILES
+None. The plugin is stateless.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+Equivalent to
+.BR -d .
+.TP
+.B SELF_QUIET
+Equivalent to
+.BR -q .
+
+.SH STANDARDS
+.IP \(bu 2
+BIP-32 (Hierarchical Deterministic Wallets), shipped at
+.IR share/doc/bitcoin/standards/bip-0032.mediawiki .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip13 (1),
+.BR bitcoin-bip39 (1),
+.BR bitcoin-descriptor (1),
+.BR bitcoin-mnemonic-to-seed (1),
+.BR bitcoin-wallet (1)
+
+.SH HISTORY
+Plugin introduced in bitcoin 1.0.0. Man page added in 1.23.0
+(FEAT-041).

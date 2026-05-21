@@ -1,0 +1,295 @@
+.\" Manpage for bitcoin-wallet(1) — wallet lifecycle and operations.
+.TH BITCOIN-WALLET 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+
+.SH NAME
+bitcoin\-wallet \- create, derive, sign, send, and synchronise wallets
+
+.SH SYNOPSIS
+.B bitcoin wallet new
+.I name
+.br
+.B bitcoin wallet ls
+.br
+.B bitcoin wallet rm
+.RI [ -f ]
+.I name
+.br
+.B bitcoin wallet derive
+.I name
+.br
+.B bitcoin wallet addresses
+.I name
+.br
+.B bitcoin wallet label
+.RI [ "tx | utxo | addr" ]
+.I name
+.I key
+.I text
+.br
+.B bitcoin wallet balance
+.I name
+.br
+.B bitcoin wallet build
+.I name
+.I addr
+.I sats
+.RI [ "--fee-rate sat/vB" ]
+.br
+.B bitcoin wallet sign
+.I name
+.br
+.B bitcoin wallet send
+.I name
+.I addr
+.I sats
+.RI [ "--fee-rate sat/vB" "] [" --mainnet ]
+.br
+.B bitcoin wallet broadcast
+.I name
+.br
+.B bitcoin wallet index
+.I name
+.br
+.B bitcoin wallet tx
+.I name
+.I txid
+.br
+.B bitcoin wallet history
+.I name
+.RI [ "--label pattern" ]
+.br
+.B bitcoin wallet remote add
+.I name
+.I remote
+.I url
+.br
+.B bitcoin wallet push
+.I name
+.RI [ remote ]
+.br
+.B bitcoin wallet pull
+.I name
+.RI [ remote ]
+.br
+.B bitcoin wallet help
+
+.SH OPTIONS
+.B bitcoin wallet
+takes no top-level flags. Per-subcommand flags are documented
+under SUBCOMMANDS below. The dispatcher honors
+.B $SELF_DEBUG
+and
+.B $SELF_QUIET
+inherited from
+.BR bitcoin (1).
+
+.SH DESCRIPTION
+.B bitcoin wallet
+is the wallet-lifecycle and wallet-operations verb. Each wallet
+is a per-name git repository under
+.I ~/.local/var/bitcoin/wallets/<name>/
+holding the signing context: config, descriptors, derived-address
+ledger, label store, and (after
+.BR "wallet index" )
+cached transactions. The seed phrase lives in
+.BR secret (1),
+not in the wallet repo, so the repo can be safely pushed to a
+remote via
+.B wallet push
+without leaking key material (FEAT-011).
+
+The default derivation path is
+.B m/84h/0h/0h/0/i
+(BIP-84 native segwit). Address generation, signing, and balance
+queries all go through that path; the active backend (see
+.BR bitcoin-backend (1))
+provides chain data.
+
+.SH SUBCOMMANDS
+.TP
+.BI "new " name
+Create a new wallet at
+.IB ~/.local/var/bitcoin/wallets/ name /.
+Generates a BIP-39 mnemonic and stores it via
+.B secret put
+.IB name /seed.
+.TP
+.B ls
+List existing wallets (one per line).
+.TP
+.BR "rm " [ -f ]
+.I name
+Remove a wallet. With
+.BR -f ,
+also removes
+.BR "secret " name /seed.
+.TP
+.BI "derive " name
+Derive the next BIP-84 receive address; append it to the wallet's
+address ledger and commit.
+.TP
+.BI "addresses " name
+List every derived address with its index and label.
+.TP
+.BR "label " { "tx | utxo | addr" }
+.I name
+.I key
+.I text
+Set or clear a label.
+.B tx
+labels by
+.IR txid ;
+.B utxo
+labels by
+.IR txid:vout ;
+.B addr
+labels by address. Empty
+.I text
+clears the entry. The compat form
+.BI "label " "name addr text"
+(no kind prefix) is treated as
+.BR "label addr ..."
+for pre-1.19.0 callers.
+.TP
+.BI "balance " name
+Sum UTXO values for all derived addresses via the active backend.
+.TP
+.BI "build " "name addr sats" " [--fee-rate sat/vB]"
+Greedy-select wallet UTXOs, build an unsigned tx that pays
+.I sats
+to
+.IR addr ,
+wrap as a PSBT, print as hex. Without
+.BR --fee-rate ,
+reads
+.B "bitcoin backend estimate-fee 3"
+and falls back to 1 sat/vB on backend failure. P2WPKH / P2WSH
+outputs only.
+.TP
+.BI "sign " name
+Read a PSBT (hex) from stdin, derive a private key for every
+address in the wallet's ledger, pipe the PSBT through
+.B "bitcoin psbt sign"
+for each. Inputs the keys can't sign pass through unmodified.
+.TP
+.BI "send " "name addr sats" " [--fee-rate sat/vB] [--mainnet]"
+End-to-end: build | sign | psbt finalize | psbt extract |
+broadcast. Prints the txid the backend returned.
+.BR --mainnet
+is required when the wallet's config says
+.B network=mainnet ;
+ignored on other networks.
+.TP
+.BI "broadcast " name
+POST raw-tx hex from stdin to the active backend; print the
+returned txid.
+.TP
+.BI "index " name
+For every address in the wallet's ledger, fetch every tx via
+.B "bitcoin backend get-address-txs"
+and cache the raw hex + decoded JSON under
+.IB <wallet>/transactions/ <txid> "" .{ hex,json }.
+Updates the history ledger and commits. Idempotent.
+.TP
+.BI "tx " "name txid"
+Print the cached
+.IB transactions/ txid .hex
+(and
+.BR .json )
+without re-querying the backend.
+.TP
+.BI "history " name " [--label pattern]"
+List the wallet's history ledger:
+.BR txid ", " height ", " direction ", " "net sats" .
+With
+.BR --label ,
+filter rows whose tx-label matches
+.I pattern
+(case-insensitive substring).
+.TP
+.BI "remote add " "name remote url"
+Set or replace a git remote on the wallet repo.
+.TP
+.BI "push " name
+.RI [ remote ]
+.B git push
+the wallet (default remote:
+.BR origin ).
+.TP
+.BI "pull " name
+.RI [ remote ]
+.B git pull --rebase
+the wallet (default remote:
+.BR origin ).
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B \(>=1
+General error. Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10.
+
+.SH FILES
+.TP
+.I ~/.local/var/bitcoin/wallets/<name>/
+The wallet's git repository.
+.TP
+.I ~/.local/var/bitcoin/wallets/<name>/config
+Per-wallet config (network, derivation path overrides).
+.TP
+.I ~/.local/var/bitcoin/wallets/<name>/addresses
+Append-only ledger of derived addresses with their indexes.
+.TP
+.I ~/.local/var/bitcoin/wallets/<name>/labels/{tx,utxo}
+TSV label stores keyed by txid and outpoint.
+.TP
+.I ~/.local/var/bitcoin/wallets/<name>/transactions/<txid>.{hex,json}
+Cached raw and decoded transactions populated by
+.BR "wallet index" .
+.TP
+.I ~/.local/var/bitcoin/wallets/<name>/history
+History ledger:
+.BR txid ", " height ", " direction ", " "net sats" .
+
+.SH ENVIRONMENT
+.TP
+.B XDG_DATA_HOME
+If set, wallets root at
+.IB $XDG_DATA_HOME /bitcoin/wallets/
+instead of
+.IR ~/.local/var/bitcoin/wallets/ .
+.TP
+.B BITCOIN_BACKEND
+See
+.BR bitcoin-backend (1).
+Overrides the active backend used for balance / index / broadcast.
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-backend (1),
+.BR bitcoin-bip32 (1),
+.BR bitcoin-bip39 (1),
+.BR bitcoin-descriptor (1),
+.BR bitcoin-psbt (1),
+.BR secret (1)
+
+.SH HISTORY
+Verb introduced in bitcoin 1.0.0; functionality has grown through
+FEAT-010 (wallet store as git), FEAT-011 (push/pull), FEAT-013
+(derive/addresses), FEAT-018 (index/history), FEAT-019 (labels),
+and FEAT-026 (send). Man page added in 1.23.0 (FEAT-041).
+
+In a future release the
+.BR build ", " sign ", " broadcast ", " index
+verbs will rename to the
+.B bitcoin tx
+and
+.B bitcoin utxo
+object surfaces (FEAT-036, FEAT-037, target 1.23.0+);
+.B wallet send
+will remain the high-level convenience verb.

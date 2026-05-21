@@ -1,0 +1,118 @@
+.\" Manpage for bitcoin-daemon(1) — bitcoind lifecycle.
+.TH BITCOIN-DAEMON 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+
+.SH NAME
+bitcoin\-daemon \- start, stop, monitor, and inspect the local bitcoind
+
+.SH SYNOPSIS
+.B bitcoin daemon
+.RI [ options ]
+.B start
+.br
+.B bitcoin daemon
+.RI [ options ]
+.B stop
+.br
+.B bitcoin daemon
+.RI [ options ]
+.B monitor
+.br
+.B bitcoin daemon
+.RI [ options ]
+.B space
+.br
+.B bitcoin daemon help
+.RI [ command ]
+
+.SH DESCRIPTION
+.B bitcoin daemon
+provides a thin lifecycle wrapper over the Bitcoin Core
+.BR bitcoind (1)
+process: start it, stop it, watch its progress, and report how
+much disk the chainstate is consuming. The plugin manages
+.BR bitcoind
+as a local long-running process; it does not configure systemd
+units, nor does it run multiple instances side-by-side.
+
+.SH OPTIONS
+.TP
+.B -d
+Enable debug output (shell trace).
+.TP
+.B -q
+Quiet mode (suppress info logging).
+
+.SH SUBCOMMANDS
+.TP
+.B start
+Start the local
+.BR bitcoind ,
+respecting the user's
+.I ~/.bitcoin/bitcoin.conf
+configuration. Idempotent: if a daemon is already running, prints
+its pid and exits 0.
+.TP
+.B stop
+Send the configured shutdown RPC to
+.BR bitcoind ;
+wait for the process to exit. Idempotent.
+.TP
+.B monitor
+Tail
+.BR bitcoind 's
+log and emit one progress line per new block (height, time,
+sync %).
+.TP
+.B space
+Print disk usage of the chainstate, blocks, indexes, and mempool
+directories under
+.IR ~/.bitcoin/ .
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B \(>=1
+General error. Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10.
+
+.SH FILES
+.TP
+.I ~/.bitcoin/bitcoin.conf
+Bitcoin Core configuration the daemon reads at startup.
+.TP
+.I ~/.bitcoin/blocks/
+.TQ
+.I ~/.bitcoin/chainstate/
+Block and chainstate directories
+.B space
+reports on.
+.TP
+.I ~/.bitcoin/debug.log
+The log
+.B monitor
+tails.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+Equivalent to
+.BR -d .
+.TP
+.B SELF_QUIET
+Equivalent to
+.BR -q .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-backend (1),
+.BR bitcoind (1),
+.BR bitcoin-cli (1)
+
+.SH HISTORY
+Plugin introduced in bitcoin 1.0.0. Man page added in 1.23.0
+(FEAT-041).
