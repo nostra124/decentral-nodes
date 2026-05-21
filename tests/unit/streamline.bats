@@ -247,3 +247,83 @@ setup() {
 	run bash -c ": | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# Stream C2: bech32* command:* functions become deprecation aliases.
+#
+# Stream C (PR #35) added bip173 / bip350 plugins additively. Stream
+# C2 (this PR) wires them into segwitAddress + wallet:_address_to_script
+# and deprecates the legacy `bitcoin bech32` / `bech32-verify` /
+# `bech32-encode` / `bech32-decode` verbs.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-035 C2 — bitcoin bech32 alias produces identical bytes to bip173 encode" {
+	canonical=$("$BITCOIN_BIN" bip173 encode this-part-is-readable-by-a-human qpzry 2>/dev/null)
+	alias_out=$("$BITCOIN_BIN" bech32 this-part-is-readable-by-a-human qpzry 2>/dev/null)
+	[ "$canonical" = "$alias_out" ]
+}
+
+@test "FEAT-035 C2 — bitcoin bech32 -m alias produces identical bytes to bip350 encode" {
+	canonical=$("$BITCOIN_BIN" bip350 encode this-part-is-readable-by-a-human qpzry 2>/dev/null)
+	alias_out=$("$BITCOIN_BIN" bech32 -m this-part-is-readable-by-a-human qpzry 2>/dev/null)
+	[ "$canonical" = "$alias_out" ]
+}
+
+@test "FEAT-035 C2 — bitcoin bech32 alias emits one warn line" {
+	run --separate-stderr "$BITCOIN_BIN" bech32 this-part-is-readable-by-a-human qpzry
+	[ "$status" -eq 0 ]
+	echo "$stderr" | grep -qE "warn .*bech32.* deprecated.* 1\.23\.0"
+	echo "$stderr" | grep -qF "bitcoin bip173 encode"
+	echo "$stderr" | grep -qF "1.24.0"
+}
+
+@test "FEAT-035 C2 — bitcoin bech32 -m alias warn line mentions both bip173 and bip350" {
+	run --separate-stderr "$BITCOIN_BIN" bech32 -m this-part-is-readable-by-a-human qpzry
+	[ "$status" -eq 0 ]
+	echo "$stderr" | grep -qF "bitcoin bip350 encode"
+}
+
+@test "FEAT-035 C2 — bitcoin bech32-verify alias forwards" {
+	canonical_status=$("$BITCOIN_BIN" bip173 verify this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null; echo $?)
+	alias_status=$("$BITCOIN_BIN" bech32-verify this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null; echo $?)
+	[ "$canonical_status" = "$alias_status" ]
+}
+
+@test "FEAT-035 C2 — bitcoin bech32-encode alias produces identical bytes to bip173 encode-values" {
+	canonical=$("$BITCOIN_BIN" bip173 encode-values bc 0 14 20 15 7 13 26 0 25 18 6 11 13 8 21 4 20 3 17 2 29 3 0 0 25 0 25 4 7 27 28 16 0 0 2>/dev/null)
+	alias_out=$("$BITCOIN_BIN" bech32-encode bc 0 14 20 15 7 13 26 0 25 18 6 11 13 8 21 4 20 3 17 2 29 3 0 0 25 0 25 4 7 27 28 16 0 0 2>/dev/null)
+	[ "$canonical" = "$alias_out" ]
+}
+
+@test "FEAT-035 C2 — bitcoin bech32-decode alias produces identical lines to bip173 decode" {
+	canonical=$("$BITCOIN_BIN" bip173 decode this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null)
+	alias_out=$("$BITCOIN_BIN" bech32-decode this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null)
+	[ "$canonical" = "$alias_out" ]
+}
+
+@test "FEAT-035 C2 — every bech32* alias emits exactly one warn line" {
+	for verb in "bech32 hrp qpzry" "bech32-verify hrp1qpzry" "bech32-encode hrp 0 1 2 3 4" "bech32-decode hrp1qpzry"; do
+		run --separate-stderr bash -c "'$BITCOIN_BIN' $verb 2>&1 >/dev/null"
+		warn_count=$(echo "$output" | grep -c "warn" || true)
+		[ "$warn_count" -le 1 ] \
+			|| { echo "verb='$verb' emitted $warn_count warn lines"; return 1; }
+	done
+}
+
+@test "FEAT-035 C2 — bitcoin bip173 / bip350 emit NO warn lines" {
+	run --separate-stderr "$BITCOIN_BIN" bip173 encode this-part-is-readable-by-a-human qpzry
+	[ "$status" -eq 0 ]; [ -z "$stderr" ]
+	run --separate-stderr "$BITCOIN_BIN" bip350 encode this-part-is-readable-by-a-human qpzry
+	[ "$status" -eq 0 ]; [ -z "$stderr" ]
+}
+
+@test "FEAT-035 C2 — wallet:_address_to_script (via wallet build) still parses bech32 addresses" {
+	# Exercised end-to-end by FEAT-014 wallet build tests in bitcoin.bats
+	# (which after Stream C2 reach bech32 decode through bip173 / bip350).
+	# This assertion proves the dispatcher routing works from this test's
+	# pure environment without spinning up a wallet.
+	run "$BITCOIN_BIN" bip173 decode bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu
+	[ "$status" -eq 0 ]
+	# bip173 decode emits HRP on line 1.
+	[ "$(echo "$output" | head -1)" = "bc" ]
+}

@@ -107,6 +107,38 @@ command:help() {
 
 command:version() { echo "$VERSION"; }
 
+# encode-values: low-level form of encode. Takes HRP plus a list
+# of 5-bit integer values (one per positional arg) and emits the
+# bech32 string. Used by segwitAddress and the wpkh/wsh address
+# paths which build the witness-version + program 5-bit list with
+# convertbits 8 5 and don't want to round-trip through chars.
+command:encode-values() {
+	local hrp="${1,,}"
+	shift || true
+	if [ -z "$hrp" ]; then
+		error "encode-values: usage: $SELF encode-values <hrp> <value> ..."
+		return 2
+	fi
+	if (( $# == 0 )); then
+		error "encode-values: at least one 5-bit data value required"
+		return 3
+	fi
+	local -i v
+	for v; do
+		if (( v < 0 || v > 31 )); then
+			error "encode-values: data value '$v' out of range (0-31)"
+			return 4
+		fi
+	done
+	local -ai data=("$@")
+	local -ai checksum_digits=( $(_create_checksum "$hrp" "${data[@]}") )
+	echo -n "${hrp}1"
+	local d
+	for d in "${data[@]}";          do echo -n "${BECH32_CHARSET:d:1}"; done
+	for d in "${checksum_digits[@]}"; do echo -n "${BECH32_CHARSET:d:1}"; done
+	echo
+}
+
 command:encode() {
 	local hrp="${1,,}" data="${2,,}"
 	if [ -z "$hrp" ] || [ -z "$data" ]; then

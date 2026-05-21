@@ -1382,10 +1382,12 @@ wallet:_address_to_script() {
 		return 1
 	fi
 	local out
-	if ! out="$(command:bech32-decode "$addr" 2>/dev/null)"; then
+	local libexec="${SELF_LIBEXEC:?wallet:_address_to_script: SELF_LIBEXEC must be set}"
+	# FEAT-035 Stream C2: bech32 decode moved to bip173/bip350.
+	if ! out="$("$libexec/${SELF:-bitcoin}/bip173" decode "$addr" 2>/dev/null)"; then
 		# Fall through to bech32m so we can emit a clearer "v1+ not
 		# supported" error rather than a cryptic checksum failure.
-		if ! out="$(command:bech32-decode -m "$addr" 2>/dev/null)"; then
+		if ! out="$("$libexec/${SELF:-bitcoin}/bip350" decode "$addr" 2>/dev/null)"; then
 			return 2
 		fi
 	fi
@@ -2279,238 +2281,60 @@ wallet:rm() {
 # plugin reads unprefixed `*_VERSION_CODE`) is tracked as an open
 # audit follow-up; not in scope here.
 
-# bip173 (segregated witness outputs address format) commands
-command:bech32() {
-	declare -r bech32_charset="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-	declare -Ai bech32_charset_reverse
-	for i in {0..31}; do
-		bech32_charset_reverse[${bech32_charset:i:1}]=i
-	done
+# ---------------------------------------------------------------------------
+# FEAT-035 Stream C2 (1.23.0): the bech32 / bech32m verbs and their
+# private helpers moved to `libexec/bitcoin/bip173` and
+# `libexec/bitcoin/bip350` per the BIP-faithful naming convention.
+# `command:bech32`, `command:bech32-verify`, `command:bech32-encode`
+# and `command:bech32-decode` remain as deprecated aliases that emit
+# one warn line and forward to bip173 / bip350 based on the `-m`
+# flag. Removal target 1.24.0.
+# ---------------------------------------------------------------------------
 
-	while getopts "c:m" flag; do
-		if [ x"$1" = x'-m' ]; then
-			local OPTION_M=1
-			BECH32_CONST=0x2bc830a3
-		fi
-		shift 1
-	done
-
-	local hrp="${1,,}" data="${2,,}"
-	if [[ "$1$2" =~ [A-Z] && "$1$2" =~ [a-z] ]]; then
-		return 1
-	elif (( ${#hrp} + ${#data} + 6 > 90 )); then
-		return 2
-	elif (( ${#hrp} < 1 || ${#hrp} > 83 )); then
-		return 3
+# Helper: pick the canonical plugin target based on a leading -m.
+_bech32_target() {
+	if [ "$1" = "-m" ]; then
+		echo bip350
+	else
+		echo bip173
 	fi
-
-	local -i ord p out_of_range=0
-	for ((p=0;p<${#hrp};p++)); do
-		printf -v ord "%d" "'${hrp:p:1}"
-		if ((ord < 33 || ord > 126)); then
-			break
-		fi
-	done
-	if ((out_of_range == 1)); then
-		return 4
-	elif [[ "$data" =~ [^$bech32_charset] ]]; then
-		return 5
-	fi
-
-	# Convert the data part to its 5-bit digit representation
-	# (each character maps to a value via bech32_charset_reverse).
-	local -ai data_digits=()
-	for ((p=0; p<${#data}; p++)); do
-		data_digits+=( ${bech32_charset_reverse[${data:p:1}]} )
-	done
-
-	# Compute the 6-digit checksum and map both data and checksum
-	# digits back through bech32_charset for the final output.
-	local -ai checksum_digits=( $(bech32-create-checksum "$hrp" "${data_digits[@]}") )
-	echo -n "${hrp}1${data}"
-	local d
-	for d in "${checksum_digits[@]}"; do
-		echo -n "${bech32_charset:d:1}"
-	done
-	echo
 }
 
-help:bech32() {
-	cat << ENDHELP
-Usage: $SELF bech32 [-m] <human-readable-part> <data>
-
-Bech32 is a string format used to encode segwit addresses, but by itself it is
-not a binary-to-text encoding, as it needs additional conventions for padding.
-Therefore, the bech32 command does not read binary data, but merely creates a 
-Bech32 string from a human readable part and a non checked data part.
-
-$ $SELF bech32 this-part-is-readable-by-a-human qpzry
-this-part-is-readable-by-a-human1qpzrylhvwcq
-
-The -m option creates a bech32m string:
-
-$ bech32 -m this-part-is-readable-by-a-human qpzry
-this-part-is-readable-by-a-human1qpzry2tuzaz
-ENDHELP
-	cite 173 "Bech32 segwit address format"
-	cite 350 "Bech32m for v1+ witness addresses"
+command:bech32() {
+	warn "'bech32' is deprecated since 1.23.0; use 'bitcoin bip173 encode' or 'bitcoin bip350 encode' (will be removed in 1.24.0)"
+	local target; target="$(_bech32_target "$@")"
+	[ "$1" = "-m" ] && shift
+	local libexec="${SELF_LIBEXEC:?command:bech32: SELF_LIBEXEC must be set}"
+	exec "$libexec/${SELF:-bitcoin}/$target" encode "$@"
 }
 
 command:bech32-verify() {
-	declare -r bech32_charset="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-
-	while getopts "c:m" flag; do
-		if [ x"$1" = x'-m' ]; then
-			local OPTION_M=1
-		fi
-		shift 1
-	done
-	if [[ "$1" =~ ^(.{1,83})1([$bech32_charset]{6,})$ ]]; then
-		if [ -n "${OPTION_M}" ]; then
-			command:bech32 -m "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]::-6}" | grep -q "^$1$"
-		else
-			command:bech32 "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]::-6}" | grep -q "^$1$"
-		fi
-	else
-		return 33
-	fi
-}
-
-help:bech32-verify() {
-	cat << ENDHELP
-Usage: $SELF bech32-verify [-m] <human-readable-part> <data>
-
-This command can be used to verify the checksum of a bech32 string.
-
-$ $SELF bech32-verify this-part-is-readable-by-a-human1qpzrylhvwcq && echo good checksum
-good checksum
-
-$ $SELF bech32-verify -m this-part-is-readable-by-a-human1qpzry2tuzaz && echo good checksum
-good checksum
-ENDHELP
-	cite 173 "Bech32 segwit address format"
-	cite 350 "Bech32m for v1+ witness addresses"
-}
-
-bech32-polymod() {
-	local -ai generator=(0x3b6a57b2 0x26508e6d 0x1ea119fa 0x3d4233dd 0x2a1462b3)
-	local -i chk=1 value
-	for value; do
-		local -i top i
-		(( top = chk >> 25, chk = (chk & 0x1ffffff) << 5 ^ value ))
-		for i in {0..4}; do
-			(( ((top >> i) & 1) && (chk^=${generator[i]}) )) || true
-		done
-	done
-	echo $chk
-}
-
-bech32-hrp-expand() {
-	local -i p ord
-	for ((p=0; p < ${#1}; ++p)); do
-		printf -v ord "%d" "'${1:p:1}"
-		echo $(( ord >> 5 ))
-	done
-	echo 0
-	for ((p=0; p < ${#1}; ++p)); do
-		printf -v ord "%d" "'${1:p:1}"
-		echo $(( ord & 31 ))
-	done
-}
-
-bech32-create-checksum() {
-	local hrp="$1"
-	shift
-	local -i p mod=$(bech32-polymod $(bech32-hrp-expand "$hrp") "$@" 0 0 0 0 0 0)^${BECH32_CONST:-1}
-	for p in {0..5}; do
-		echo $(( (mod >> 5 * (5 - p)) & 31 ))
-	done
-}
-
-bech32-verify-checksum() {
-	local hrp="$1"
-	shift
-	local -i pmod="$(bech32-polymod $(bech32-hrp-expand "$hrp") "$@")"
-	(( pmod == ${BECH32_CONST:-1} ))
+	warn "'bech32-verify' is deprecated since 1.23.0; use 'bitcoin bip173 verify' or 'bitcoin bip350 verify' (will be removed in 1.24.0)"
+	local target; target="$(_bech32_target "$@")"
+	[ "$1" = "-m" ] && shift
+	local libexec="${SELF_LIBEXEC:?command:bech32-verify: SELF_LIBEXEC must be set}"
+	exec "$libexec/${SELF:-bitcoin}/$target" verify "$@"
 }
 
 command:bech32-encode() {
-	declare -r bech32_charset="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-	while getopts "c:m" flag; do
-		if [ x"$1" = x'-m' ]; then
-			BECH32_CONST=0x2bc830a3
-		fi
-		shift 1
-	done
-	
-	local hrp=$1 i
-	shift
-	set - "$@" $(bech32-create-checksum "$hrp" "$@")
-	echo -n "${hrp}1"
-	for i; do echo -n "${bech32_charset:i:1}"; done
-	echo
-}
-
-help:bech32-encode() {
-	cat << ENDHELP
-usage: $SELF bech32-encode [-m] human-readable-part text
-
-Encodes the text together with the human-readable-part to a bech32 string.
-ENDHELP
-	cite 173 "Bech32 segwit address format"
+	warn "'bech32-encode' is deprecated since 1.23.0; use 'bitcoin bip173 encode-values' or 'bitcoin bip350 encode-values' (will be removed in 1.24.0)"
+	local target; target="$(_bech32_target "$@")"
+	[ "$1" = "-m" ] && shift
+	local libexec="${SELF_LIBEXEC:?command:bech32-encode: SELF_LIBEXEC must be set}"
+	exec "$libexec/${SELF:-bitcoin}/$target" encode-values "$@"
 }
 
 command:bech32-decode() {
-	declare -r bech32_charset="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-	declare -Ai bech32_charset_reverse
-	for i in {0..31}; do
-		bech32_charset_reverse[${bech32_charset:i:1}]=i
-	done
+	warn "'bech32-decode' is deprecated since 1.23.0; use 'bitcoin bip173 decode' or 'bitcoin bip350 decode' (will be removed in 1.24.0)"
+	local target; target="$(_bech32_target "$@")"
+	[ "$1" = "-m" ] && shift
+	local libexec="${SELF_LIBEXEC:?command:bech32-decode: SELF_LIBEXEC must be set}"
+	exec "$libexec/${SELF:-bitcoin}/$target" decode "$@"
+}
 
-	while getopts "c:m" flag; do
-		if [ x"$1" = x'-m' ]; then
-			BECH32_CONST=0x2bc830a3
-		fi
-		shift 1
-	done
-
-	local bechString=$1
-	local -i p has_lower=0 has_upper=0 ord
-	for ((p=0;p<${#bechString};++p)); do
-		printf -v ord "%d" "'${bechString:p:1}"
-		if   ((ord <  33 || ord >  126)); then
-			return 1
-		elif ((ord >= 97 && ord <= 122)); then
-			has_lower=1
-		elif ((ord >= 65 && ord <= 90)); then
-			has_upper=1
-		fi
-	done
-	if ((has_upper && has_lower)); then
-		return 2 # mixed case
-	elif bechString="${bechString,,}"; ((${#bechString} > 90)); then
-		return 3 # string is too long
-	elif [[ ! "$bechString" =~ 1 ]]; then
-		return 4 # no separator
-	elif local hrp="${bechString%1*}"; test -z $hrp; then 
-		return 5 # no human readable part
-	elif local data="${bechString##*1}"; ((${#data} < 6)); then
-		return 6 # data is too short
-	else
-		for ((p=0;p<${#data};++p)); do
-			echo "${bech32_charset_reverse[${data:p:1}]}"
-		done | {
-			mapfile -t
-			if bech32-verify-checksum "$hrp" "${MAPFILE[@]}"; then
-				echo $hrp
-				for p in "${MAPFILE[@]::${#MAPFILE[@]}-6}"; do
-					echo $p
-				done
-			else
-				return 8
-			fi
-		}
-	fi
+help:bech32() {
+	cite 173 "Bech32 segwit address format"
+	cite 350 "Bech32m for v1+ witness addresses"
 }
 
 # bip-0173/bip-0350 code starts here {{{
@@ -2576,8 +2400,9 @@ segwitAddress()
   then
     if [[ "$witness_program" =~ ^(.{40}|.{64})$ ]] # 20 or 32 bytes
     then
-      # P2WPKH or P2WSH
-      command:bech32-encode "$hrp" $(
+      # P2WPKH or P2WSH — FEAT-035 Stream C2: bech32 encode moved
+      # to bip173 (v0) / bip350 (v1+).
+      "${SELF_LIBEXEC:?segwitAddress: SELF_LIBEXEC must be set}/${SELF:-bitcoin}/bip173" encode-values "$hrp" $(
         echo $version;
         echo -n "$witness_program" |
         while read -n 2; do echo 0x$REPLY; done |
@@ -2589,7 +2414,7 @@ segwitAddress()
     fi
   elif ((version <= 16))
   then
-    command:bech32-encode -m "$hrp" $(
+    "${SELF_LIBEXEC:?segwitAddress: SELF_LIBEXEC must be set}/${SELF:-bitcoin}/bip350" encode-values "$hrp" $(
       echo $version
       echo -n "$witness_program" |
       while read -n 2; do echo 0x$REPLY; done |
