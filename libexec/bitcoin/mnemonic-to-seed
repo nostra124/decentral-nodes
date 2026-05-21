@@ -1,65 +1,19 @@
 #!/usr/bin/env bash
 #
-# libexec/bitcoin/mnemonic-to-seed — BIP-39 §From mnemonic to seed.
+# DEPRECATED: 'bitcoin mnemonic-to-seed' is an alias for
+# 'bitcoin bip39 mnemonic-to-seed' as of 1.23.0 (FEAT-035).
+# This shim emits one warn line and forwards every argument and
+# stdin byte to the canonical subcommand. Removal target: 1.24.0.
 #
-# Read a BIP-39 mnemonic from $@ (or stdin if none), apply PBKDF2-
-# HMAC-SHA512 with the spec-mandated parameters (salt = "mnemonic" +
-# passphrase, 2048 iterations, 64-byte output), and write the
-# resulting binary seed to stdout.
-#
-# Usage:
-#   mnemonic-to-seed [word...]                — words from argv
-#   echo "<words>" | mnemonic-to-seed         — words from stdin
-#   BIP39_PASSPHRASE=foo mnemonic-to-seed …   — non-empty passphrase
-#
-# Per CLAUDE.md §10 (logging): every failure branch emits a clear
-# warn/error line that names the condition.
+# The implementation moved to libexec/bitcoin/bip39 verbatim. See
+# bitcoin-bip39(1) and bitcoin-mnemonic-to-seed(1).
 
 [ -n "$SELF_DEBUG" ] && set -vx
 
 SELF=$(basename "$0")
 
-die() {
-	echo "$SELF: error - $1" >&2
-	exit "${2:-1}"
-}
+# Match the existing logging convention (skills/logging.md §4) so
+# the warn line styles match every other plugin.
+echo -e "$SELF: warn - \033[31;1;m'$SELF' is deprecated since 1.23.0; use 'bitcoin bip39 mnemonic-to-seed' (will be removed in 1.24.0)\033[0m" >&2
 
-# Acceptable BIP-39 mnemonic word counts.
-declare -ar VALID_LENGTHS=(12 15 18 21 24)
-
-if [ $# -gt 0 ]; then
-	words=( "$@" )
-else
-	if [ -t 0 ]; then
-		die "no mnemonic provided (give words on argv or pipe via stdin)" 2
-	fi
-	read -r line || die "stdin closed before mnemonic was read" 3
-	# shellcheck disable=SC2206
-	words=( $line )
-fi
-
-ok=0
-for n in "${VALID_LENGTHS[@]}"; do
-	(( ${#words[@]} == n )) && ok=1
-done
-if (( !ok )); then
-	die "expected ${VALID_LENGTHS[*]} words; got ${#words[@]}" 4
-fi
-
-mnemonic="${words[*]}"
-
-# Per BIP-39: salt is the literal string "mnemonic" concatenated
-# with the (optional) passphrase. No NFKD normalisation needed for
-# English; if non-English wordlists are supported later, normalise
-# the passphrase upstream.
-salt="mnemonic${BIP39_PASSPHRASE:-}"
-
-openssl kdf \
-	-keylen 64 \
-	-kdfopt "digest:SHA512" \
-	-kdfopt "pass:$mnemonic" \
-	-kdfopt "salt:$salt" \
-	-kdfopt "iter:2048" \
-	-binary \
-	PBKDF2 \
-	|| die "openssl PBKDF2 failed (need openssl >= 3.0 with kdf subcommand)" 5
+exec "$(dirname "$0")/bip39" mnemonic-to-seed "$@"

@@ -29,7 +29,15 @@ setup() {
 COMMAND_VERBS="wallet descriptor psbt bech32 backend"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
-LIBEXEC_VERBS="bip13 bip32 bip39 daemon mnemonic-to-seed wif"
+# mnemonic-to-seed dropped to DEPRECATED_ALIASES in 1.23.0
+# (FEAT-035): the standalone shim still exists but the canonical
+# subcommand is now `bitcoin bip39 mnemonic-to-seed`.
+LIBEXEC_VERBS="bip13 bip32 bip39 daemon wif"
+
+# Deprecated aliases that ship a `.so`-include man page pointing
+# at their canonical replacement (FEAT-041 alias convention).
+# Each entry is "<alias>=<canonical>".
+DEPRECATED_ALIASES="mnemonic-to-seed=bip39"
 
 @test "every command: verb has a bitcoin-<verb>.1 source file" {
 	for v in $COMMAND_VERBS; do
@@ -86,8 +94,10 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-daemon.1"
 }
 
-@test "bitcoin-mnemonic-to-seed.1 has all required sections" {
-	assert_sections "$MAN_DIR/bitcoin-mnemonic-to-seed.1"
+@test "bitcoin-mnemonic-to-seed.1 is a .so-include alias to bitcoin-bip39.1" {
+	# FEAT-041 alias convention: a deprecated-alias page is a tiny
+	# file that resolves to its canonical via groff's .so directive.
+	grep -qE '^\.so man1/bitcoin-bip39\.1$' "$MAN_DIR/bitcoin-mnemonic-to-seed.1"
 }
 
 @test "bitcoin-wallet.1 has all required sections" {
@@ -116,7 +126,9 @@ assert_sections() {
 # ---------------------------------------------------------------------------
 
 @test "BIP-plugin pages carry .SH STANDARDS" {
-	for v in bip13 bip32 bip39 bech32 descriptor psbt mnemonic-to-seed wif; do
+	# Deprecated-alias pages (.so includes) inherit STANDARDS from
+	# their canonical, so we skip them here.
+	for v in bip13 bip32 bip39 bech32 descriptor psbt wif; do
 		grep -qE "^\.SH STANDARDS$" "$MAN_DIR/bitcoin-$v.1" \
 			|| { echo "$MAN_DIR/bitcoin-$v.1: missing .SH STANDARDS"; return 1; }
 	done
@@ -127,6 +139,8 @@ assert_sections() {
 # ---------------------------------------------------------------------------
 
 @test "every per-verb page has a well-formed NAME line" {
+	# Deprecated-alias pages (.so includes) inherit NAME from their
+	# canonical, so we skip them here.
 	for v in $COMMAND_VERBS $LIBEXEC_VERBS; do
 		page="$MAN_DIR/bitcoin-$v.1"
 		# The line after .SH NAME should match `bitcoin\-<verb> \- summary`.
@@ -134,6 +148,25 @@ assert_sections() {
 		name_line=$(awk '/^\.SH NAME$/{getline; print; exit}' "$page")
 		echo "$name_line" | grep -qE "^bitcoin\\\\-[a-z0-9\\\\-]+ \\\\- " \
 			|| { echo "$page: NAME line malformed: $name_line"; return 1; }
+	done
+}
+
+# ---------------------------------------------------------------------------
+# Deprecated-alias man pages resolve to their canonical via `.so`.
+# `man -l <alias.1>` should render the canonical page's content
+# (proves the include path is correct and resolvable).
+# ---------------------------------------------------------------------------
+
+@test "deprecated-alias pages resolve to their canonical via .so" {
+	for entry in $DEPRECATED_ALIASES; do
+		alias="${entry%%=*}"
+		canonical="${entry##*=}"
+		alias_page="$MAN_DIR/bitcoin-$alias.1"
+		canonical_page="$MAN_DIR/bitcoin-$canonical.1"
+		[ -f "$alias_page" ] || { echo "missing $alias_page"; return 1; }
+		[ -f "$canonical_page" ] || { echo "missing $canonical_page"; return 1; }
+		grep -qE "^\.so man1/bitcoin-$canonical\.1$" "$alias_page" \
+			|| { echo "$alias_page: missing .so include for bitcoin-$canonical.1"; return 1; }
 	done
 }
 
@@ -164,6 +197,13 @@ assert_sections() {
 	# `man -l` (BSD-style "local file" mode, supported by both
 	# man-db and mandoc) parses the file as a manpage. If the macro
 	# usage is malformed, man exits non-zero.
+	#
+	# Alias pages (`.so` includes) are NOT covered here: `man -l`
+	# resolves `.so man1/<file>` relative to MANDIR, which isn't
+	# set when invoking on an explicit source path. The earlier
+	# "resolve to canonical via .so" assertion already proves the
+	# include path is well-formed; the canonical's own `man -l`
+	# pass below proves the included file renders.
 	command -v man >/dev/null || skip "man not installed"
 	for v in $COMMAND_VERBS $LIBEXEC_VERBS; do
 		run man -l "$MAN_DIR/bitcoin-$v.1"

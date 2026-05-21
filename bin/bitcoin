@@ -678,7 +678,7 @@ descriptor:wallet() {
 	# substitution strips null bytes which corrupts the checksum.
 	local raw; raw="$(mktemp)"
 	secret get "$name/seed" |
-		"$libexec/${SELF:-bitcoin}/mnemonic-to-seed" |
+		"$libexec/${SELF:-bitcoin}/bip39" mnemonic-to-seed |
 		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
 		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
 		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/N" 2>/dev/null \
@@ -2047,14 +2047,14 @@ wallet:_derive_address() {
 		error "wallet derive: 'secret' not in PATH (cannot read seed)"
 		return 5
 	fi
-	# Resolve libexec for the bip32/bip13/mnemonic-to-seed plugins.
+	# Resolve libexec for the bip32/bip13/bip39 plugins.
 	# When sourced, SELF_LIBEXEC must be set by caller; when dispatched,
 	# the parent bin/bitcoin sets it.
 	local libexec="${SELF_LIBEXEC:?wallet derive: SELF_LIBEXEC must be set}"
 	local pubkey
 	pubkey="$(
 		secret get "$name/seed" |
-		"$libexec/${SELF:-bitcoin}/mnemonic-to-seed" |
+		"$libexec/${SELF:-bitcoin}/bip39" mnemonic-to-seed |
 		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
 		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
 		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/0/$idx/N" 2>/dev/null |
@@ -2594,7 +2594,7 @@ wallet:_derive_privkey_hex() {
 	local priv_hex
 	priv_hex="$(
 		secret get "$name/seed" |
-		"$libexec/${SELF:-bitcoin}/mnemonic-to-seed" |
+		"$libexec/${SELF:-bitcoin}/bip39" mnemonic-to-seed |
 		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
 		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
 		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/0/$idx" 2>/dev/null |
