@@ -15,17 +15,17 @@ description: |
 
 ## 0. Repository policy: which mode is active
 
-This repository uses **manual merge by an agent watching the PR**,
-because repository-level auto-merge (Settings → General → Pull
-Requests → *Allow auto-merge*) is currently **off**. The agent is
-subscribed to the PR via `mcp__github__subscribe_pr_activity` and
-merges on the first green CI run.
+This repository uses **GitHub auto-merge** (Mode A). Repository-level
+auto-merge (Settings → General → Pull Requests → *Allow auto-merge*)
+is **on**. Every PR an agent opens should be marked ready-for-review
+and armed with `mcp__github__enable_pr_auto_merge` before the agent
+ends its turn.
 
-If the policy changes to *Allow auto-merge*, §3 (Enabling
-auto-merge via the GitHub MCP tool) becomes the preferred path and
-§3b (Manual merge by an agent) becomes the fallback. Either way,
-the CI-fail loop in §4 is unchanged — that is the contract this
-skill exists to defend.
+§3 below is the active path. §3b (manual merge by an agent watching
+CI) is the fallback — useful when auto-merge can't evaluate a
+required check, when the author wants to watch CI by hand, or when
+debugging a flaky workflow. Either way, the CI-fail loop in §4 is
+unchanged — that is the contract this skill exists to defend.
 
 ## 1. Why "merge the moment CI is green"
 
@@ -61,13 +61,9 @@ strictly speaking they are not blockers for *arming* the merge —
 but if you arm it and then find one of these unmet, you waste a
 loop on yourself. Check first.
 
-## 3. Mode A — GitHub auto-merge (when the repo setting is on)
+## 3. Mode A — GitHub auto-merge (active default)
 
-Currently **inactive** for this repo. To switch to this mode, an
-admin must enable *Settings → General → Pull Requests → Allow
-auto-merge*, then update §0 above.
-
-When active, arm via the GitHub MCP tool:
+Currently **active** for this repo. Arm via the GitHub MCP tool:
 
 ```
 mcp__github__enable_pr_auto_merge
@@ -92,12 +88,14 @@ Once armed, GitHub will:
    auto-merge armed (a new push will re-trigger the wait).
 4. If the PR goes back to draft, disarm auto-merge.
 
-## 3b. Mode B — manual merge by an agent watching CI (active here)
+## 3b. Mode B — manual merge by an agent watching CI (fallback)
 
-This is the path this repo uses today, because `Allow auto-merge`
-is off at the repo level. The contract is the same — wait for
-green, then merge — but the wait is held by an agent receiving PR
-webhook events instead of by GitHub's auto-merge daemon.
+Used when Mode A is unavailable for a specific PR — for example, a
+required check that auto-merge can't evaluate, a PR where the
+author wants to watch CI by hand, or a workflow currently being
+debugged. The contract is the same — wait for green, then merge —
+but the wait is held by an agent receiving PR webhook events
+instead of by GitHub's auto-merge daemon.
 
 Setup, in order:
 
@@ -209,10 +207,11 @@ Why this mode is acceptable: the merge action still gates on
 commit / squash commit. The only thing that changes versus Mode A
 is *who* presses the button.
 
-Why this mode is **not** as good: it depends on the agent's
-session being live (or re-subscribed) when CI finishes. The
-preferred long-term state is Mode A; flip the repo setting when
-convenient.
+Why this mode is **not** as good as Mode A: it depends on the
+agent's session being live (or re-subscribed) when CI finishes,
+and the poll-on-resume rule in §3b.3 is non-negotiable to avoid
+hangs. Mode A has neither failure mode — prefer it whenever the
+repo and PR allow.
 
 ## 4. When CI fails
 
@@ -317,10 +316,10 @@ Common:
 - [ ] No merge conflicts with master
 - [ ] mergeMethod chosen (SQUASH unless TDD commit history matters)
 
-Mode A (if `Allow auto-merge` is on for the repo):
+Mode A (current default for this repo):
 - [ ] enable_pr_auto_merge called
 
-Mode B (current default for this repo):
+Mode B (fallback only):
 - [ ] subscribe_pr_activity called for this PR
 - [ ] Agent session will remain live (or will be re-subscribed)
       long enough to receive the CI completion event
