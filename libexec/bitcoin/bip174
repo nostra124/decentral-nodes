@@ -979,6 +979,12 @@ command:extract() {
 
 
 # ---- dispatch ----
+#
+# Source-safe: when this file is sourced (e.g. for white-box tests
+# that reach into `psbt:_*` helpers directly), define every function
+# and return without running the dispatcher. Mirrors the pattern
+# used by bin/bitcoin (FEAT-006).
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
 if [[ $# == 0 ]]; then
 	command:help

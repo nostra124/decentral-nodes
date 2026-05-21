@@ -1235,8 +1235,12 @@ build_alice_psbt() {
 	psig="$(echo "$dec" | awk -F'\t' '/type=02/ {sub("^value=","",$4); print $4; exit}')"
 	der_sig="${psig%01}"
 	# Compute the same sighash the signer used and verify with openssl.
-	sighash="$(bash -c '
-		source "$BITCOIN_BIN"
+	# FEAT-035 Stream D: psbt:_bip143_sighash moved from bin/bitcoin
+	# into the libexec/bitcoin/bip174 plugin (PR #36); source the
+	# plugin to reach the private helper. bip174 is source-safe (it
+	# checks BASH_SOURCE before running its dispatcher).
+	sighash="$(BITCOIN_BIP174="$BATS_TEST_DIRNAME/../../libexec/bitcoin/bip174" bash -c '
+		source "$BITCOIN_BIP174"
 		psbt:_bip143_sighash "'"$tx_hex"'" 0 \
 			"1976a914c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e288ac" \
 			"a086010000000000" 01
