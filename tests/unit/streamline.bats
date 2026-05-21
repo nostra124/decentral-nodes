@@ -398,3 +398,76 @@ setup() {
 	echo "$output" | grep -q "verify"
 	echo "$output" | grep -q "derive"
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-036 (1.23.0): `bitcoin tx` object verb.
+#
+# Initial PR: additive `tx` namespace. tx build / sign / broadcast
+# delegate to wallet:* (no rename yet); tx decode / finalize /
+# extract pass through to bip174. Deprecation of wallet:build /
+# sign / broadcast and `--utxo` coin-control land in a follow-up.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-036 — bitcoin tx help lists every subcommand" {
+	run bash -c "'$BITCOIN_BIN' tx help 2>&1"
+	[ "$status" -eq 0 ]
+	for sub in build sign decode finalize extract broadcast; do
+		echo "$output" | grep -qE "(^|[[:space:]])$sub([[:space:]]|$)" \
+			|| { echo "help missing subcommand: $sub"; return 1; }
+	done
+}
+
+@test "FEAT-036 — bitcoin tx decode passes through to bip174 decode" {
+	# Single-record global PSBT.
+	original="70736274ff0100010000"
+	canonical=$(printf '%s\n' "$original" | "$BITCOIN_BIN" bip174 decode 2>/dev/null)
+	via_tx=$(printf '%s\n' "$original" | "$BITCOIN_BIN" tx decode 2>/dev/null)
+	[ "$canonical" = "$via_tx" ]
+	# And the output is non-empty (proves the decode actually ran).
+	[ -n "$via_tx" ]
+}
+
+@test "FEAT-036 — bitcoin tx finalize exit code matches bip174 finalize" {
+	# Same input → same exit code through both surfaces. (Specific
+	# PSBTs that successfully finalise are exercised in the FEAT-008
+	# tests in bitcoin.bats; this assertion just proves the tx
+	# dispatcher forwards stdin and exit status faithfully.)
+	original="70736274ff0100010000"
+	canonical_status=$(printf '%s\n' "$original" | "$BITCOIN_BIN" bip174 finalize 2>/dev/null; echo $?)
+	via_tx_status=$(printf '%s\n' "$original" | "$BITCOIN_BIN" tx finalize 2>/dev/null; echo $?)
+	[ "$canonical_status" = "$via_tx_status" ]
+}
+
+@test "FEAT-036 — bitcoin tx extract rejects unfinalised PSBTs (same as bip174)" {
+	# extract refuses a PSBT lacking FINAL_SCRIPTWITNESS.
+	run bash -c "echo '70736274ff0100010000' | '$BITCOIN_BIN' tx extract"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-036 — bitcoin tx build with no args usage-errors like wallet build" {
+	run "$BITCOIN_BIN" tx build
+	[ "$status" -ne 0 ]
+	# error message comes from wallet:build (delegation target).
+	echo "$output" | grep -q "wallet build:"
+}
+
+@test "FEAT-036 — bitcoin tx broadcast with no args usage-errors like wallet broadcast" {
+	run "$BITCOIN_BIN" tx broadcast
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "wallet broadcast:"
+}
+
+@test "FEAT-036 — bitcoin tx <unknown> errors with the valid subcommand list" {
+	run "$BITCOIN_BIN" tx not-a-subcommand
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "unknown tx subcommand"
+	for sub in build sign decode finalize extract broadcast; do
+		echo "$output" | grep -q "$sub"
+	done
+}
+
+@test "FEAT-036 — bitcoin tx (no subcommand) prints help" {
+	run "$BITCOIN_BIN" tx
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "Usage:"
+}

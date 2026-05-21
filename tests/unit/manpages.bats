@@ -34,7 +34,9 @@ setup() {
 # stays in bin/bitcoin. The page is a .so include to bip380.
 # tax verb added in 1.23.0 (FEAT-038); label subcommand today,
 # report-de + price land in 1.25.0.
-COMMAND_VERBS="wallet tax backend"
+# tx verb added in 1.23.0 (FEAT-036); additive surface delegating
+# to wallet:* in this release.
+COMMAND_VERBS="wallet tx tax backend"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
 # mnemonic-to-seed dropped to DEPRECATED_ALIASES in 1.23.0
@@ -136,6 +138,10 @@ assert_sections() {
 
 @test "bitcoin-tax.1 has all required sections" {
 	assert_sections "$MAN_DIR/bitcoin-tax.1"
+}
+
+@test "bitcoin-tx.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-tx.1"
 }
 
 @test "bitcoin-descriptor.1 is a .so-include alias to bitcoin-bip380.1" {
