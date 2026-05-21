@@ -62,7 +62,12 @@ and either:
 - (c) Folds the verbs into FEAT-012's backend layer (bitcoind
   start/stop are a natural fit for the `auto` selection logic).
 
-This bug captures the gap; the resolution chooses the path.
+**Resolution chosen (ROADMAP-1.22.0): branch (c).** The legacy
+`start` / `stop` / `monitor` / `space` verbs are folded into the
+new daemon abstraction that FEAT-033 (`daemon install`) and
+FEAT-034 (`daemon enable / disable`) introduce. The folded verbs
+gain bats coverage and a docs/man-page citation in the same PR
+that closes this bug (PR 3 of the ROADMAP-1.22.0 sequence).
 
 ## Regression Protection
 
