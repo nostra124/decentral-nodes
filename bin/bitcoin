@@ -685,6 +685,57 @@ command:wallet() {
 	esac
 }
 
+# FEAT-038 shorthand. `bitcoin tax label <wallet> <outpoint> --as
+# <category>` is byte-identical to `bitcoin wallet label <wallet>
+# <outpoint> --tax <category>`. Same backing code; just a more
+# discoverable entry point for the tax workflow. report-de
+# (FEAT-039) and price (FEAT-040) subcommands land in 1.25.0.
+command:tax() {
+	local sub="${1:-help}"
+	shift 2>/dev/null || true
+	case "$sub" in
+		label)
+			# Rewrite `tax label <wallet> <outpoint> --as <cat>` →
+			# `wallet label <wallet> <outpoint> --tax <cat>`. Forward
+			# any other flags unchanged.
+			local -a args=()
+			local a
+			for a in "$@"; do
+				if [ "$a" = "--as" ]; then
+					args+=( --tax )
+				else
+					args+=( "$a" )
+				fi
+			done
+			wallet:label "${args[@]}"
+			;;
+		help)
+			cat <<-ENDHELP
+			Usage: $SELF tax <subcommand>
+
+			  label <wallet> <outpoint> --as <category> [--note <text>]
+			        Shorthand for 'bitcoin wallet label <wallet> <outpoint>
+			        --tax <category> [--note <text>]'. Persists the
+			        tax-category tag on a transaction / utxo / address.
+
+			Valid categories (FEAT-038 closed taxonomy):
+			  $(wallet:_tax_categories_str)
+
+			Reporting (FEAT-039 report-de, FEAT-040 price oracle) lands
+			in 1.25.0. This release ships only the labeling vocabulary.
+			ENDHELP
+			;;
+		*)
+			error "unknown tax subcommand: '$sub' (expected: label, help)"
+			return 2
+			;;
+	esac
+}
+
+help:tax() {
+	command:tax help
+}
+
 help:wallet() {
 	wallet:help
 	cite 39 "Mnemonic seed phrases"
@@ -842,21 +893,40 @@ wallet:addresses() {
 }
 
 wallet:label() {
-	# Two signatures are accepted:
-	#   wallet label <kind> <name> <key> <text>   (1.19.0 form)
-	#   wallet label <name> <addr> <text>         (pre-1.19.0 compat)
+	# Three signatures are accepted:
 	#
-	# The compat form is dispatched as `wallet label addr <name>
-	# <addr> <text>`. Detection: the first arg matches the kind
-	# vocabulary (tx | utxo | addr) → new form; otherwise →
-	# compat form.
+	#   FEAT-038 (1.23.0) — flag-based, tax-vocabulary aware:
+	#     wallet label <wallet> <outpoint> --tax <category> [--note <text>]
+	#     wallet label <wallet> <outpoint> --free-text <text>
+	#     wallet label <wallet> --show [<outpoint>]
+	#     wallet label <wallet> --validate
+	#
+	#   1.19.0 form:
+	#     wallet label <kind> <name> <key> <text>     (kind = tx|utxo|addr)
+	#
+	#   pre-1.19.0 compat:
+	#     wallet label <name> <addr> <text>
+	#
+	# Detection precedence: a `--` flag in any position → FEAT-038
+	# form; first arg in (tx|utxo|addr) → 1.19.0 form; otherwise
+	# → pre-1.19.0 compat. The taxonomy is enforced ONLY in
+	# FEAT-038 form (the older positional forms continue to take
+	# free-text).
+	local arg has_dashdash=0
+	for arg in "$@"; do
+		[[ "$arg" == --* ]] && has_dashdash=1
+	done
+	if (( has_dashdash )); then
+		wallet:_label_v2 "$@"
+		return $?
+	fi
 	local kind name key text
 	case "${1:-}" in
 		tx|utxo|addr)
 			kind="$1"; name="${2:-}"; key="${3:-}"; text="${4:-}"
 			;;
 		"")
-			error "wallet label: usage: wallet label <kind> <name> <key> <text>"
+			error "wallet label: usage: wallet label <wallet> <outpoint> --tax <category>"
 			return 2
 			;;
 		*)
@@ -880,15 +950,138 @@ wallet:label() {
 	fi
 	case "$kind" in
 		addr) wallet:_label_addr "$name" "$path" "$key" "$text" ;;
-		tx)   wallet:_label_kv   "$name" "$path" "tx"   "$key" "$text" ;;
+		tx)   wallet:_label_kv   "$name" "$path" "tx"   "$key" "" "$text" ;;
 		utxo)
 			if [[ ! "$key" =~ ^[[:xdigit:]]+:[0-9]+$ ]]; then
 				error "wallet label utxo: <key> must look like '<txid>:<vout>' (got '$key')"
 				return 5
 			fi
-			wallet:_label_kv   "$name" "$path" "utxo" "$key" "$text"
+			wallet:_label_kv   "$name" "$path" "utxo" "$key" "" "$text"
 			;;
 	esac
+}
+
+# FEAT-038 closed taxonomy. Adding a new category here is a
+# release-gate event: it changes the schema downstream FEAT-039
+# tax-reporting code reads. Keep this list aligned with
+# issues/feature/038-tax-label-vocabulary.md §Taxonomy.
+declare -ar WALLET_TAX_CATEGORIES=(
+	self-transfer income gift-in gift-out purchase sale spend fee
+	lending-out lending-in loss-claim channel-open channel-close
+)
+
+# Return 0 if $1 is in the closed taxonomy; non-zero otherwise.
+wallet:_is_tax_category() {
+	local cat="$1" c
+	for c in "${WALLET_TAX_CATEGORIES[@]}"; do
+		[ "$c" = "$cat" ] && return 0
+	done
+	return 1
+}
+
+# Print the closed taxonomy as a space-separated list. Used in
+# error messages so users see the valid set.
+wallet:_tax_categories_str() {
+	echo "${WALLET_TAX_CATEGORIES[*]}"
+}
+
+# Infer the label kind from the shape of <outpoint>:
+#   <txid>:<vout>  → utxo
+#   <txid>         → tx (64 hex chars exactly)
+#   <addr>         → addr
+# Echoes the kind on stdout; non-zero on unrecognised shape.
+wallet:_infer_label_kind() {
+	local outpoint="$1"
+	if [[ "$outpoint" =~ ^[[:xdigit:]]+:[0-9]+$ ]]; then
+		echo utxo
+	elif [[ "$outpoint" =~ ^[[:xdigit:]]{64}$ ]]; then
+		echo tx
+	elif [ -n "$outpoint" ]; then
+		echo addr
+	else
+		return 1
+	fi
+}
+
+# FEAT-038 flag-based label dispatcher. Three modes:
+#   wallet label <wallet> <outpoint> --tax <cat> [--note <text>]
+#   wallet label <wallet> <outpoint> --free-text <text>
+#   wallet label <wallet> --show [<outpoint>]
+#   wallet label <wallet> --validate
+wallet:_label_v2() {
+	local wallet="" outpoint="" tax="" note="" free_text="" show=0 validate=0
+	local got_outpoint=0
+	while (( $# > 0 )); do
+		case "$1" in
+			--tax)        tax="$2";       shift 2 ;;
+			--note)       note="$2";      shift 2 ;;
+			--free-text)  free_text="$2"; shift 2 ;;
+			--show)       show=1;         shift ;;
+			--validate)   validate=1;     shift ;;
+			--*)          error "wallet label: unknown flag '$1'"; return 2 ;;
+			*)
+				if [ -z "$wallet" ]; then
+					wallet="$1"
+				elif (( !got_outpoint )); then
+					outpoint="$1"; got_outpoint=1
+				else
+					error "wallet label: unexpected positional arg '$1'"
+					return 2
+				fi
+				shift
+				;;
+		esac
+	done
+	if [ -z "$wallet" ]; then
+		error "wallet label: usage: wallet label <wallet> <outpoint> --tax <category>"
+		return 2
+	fi
+	# Validate the tax category FIRST — it's a schema check that
+	# doesn't depend on wallet state, so users get the "valid set"
+	# error even on a typo'd wallet name.
+	if [ -n "$tax" ] && ! wallet:_is_tax_category "$tax"; then
+		error "wallet label: '$tax' is not a tax category (valid: $(wallet:_tax_categories_str))"
+		return 6
+	fi
+	local path; path="$(wallet:_path "$wallet")"
+	if [ ! -d "$path" ]; then
+		error "wallet label: no such wallet '$wallet' at $path"
+		return 4
+	fi
+	if (( show )); then
+		wallet:_label_show "$wallet" "$path" "$outpoint"
+		return $?
+	fi
+	if (( validate )); then
+		wallet:_label_validate "$wallet" "$path"
+		return $?
+	fi
+	if [ -z "$outpoint" ]; then
+		error "wallet label: <outpoint> required (got --tax/--free-text without one)"
+		return 2
+	fi
+	local kind; kind="$(wallet:_infer_label_kind "$outpoint")" \
+		|| { error "wallet label: cannot infer kind from outpoint '$outpoint'"; return 5; }
+	if [ -n "$tax" ]; then
+		wallet:_label_kv "$wallet" "$path" "$kind" "$outpoint" "$tax" "$note"
+		return $?
+	fi
+	if [ -n "$free_text" ]; then
+		if [[ "$free_text" == *$'\t'* ]] || [[ "$free_text" == *$'\n'* ]]; then
+			error "wallet label: <text> must not contain tabs or newlines"
+			return 3
+		fi
+		# kind=addr is handled by wallet:_label_addr (no tax col);
+		# kind={tx,utxo} go through wallet:_label_kv with empty tax.
+		if [ "$kind" = "addr" ]; then
+			wallet:_label_addr "$wallet" "$path" "$outpoint" "$free_text"
+		else
+			wallet:_label_kv "$wallet" "$path" "$kind" "$outpoint" "" "$free_text"
+		fi
+		return $?
+	fi
+	error "wallet label: one of --tax / --free-text / --show / --validate required"
+	return 2
 }
 
 # Helper: rewrite the addresses-ledger label column for <addr>.
@@ -922,19 +1115,28 @@ wallet:_label_addr() {
 }
 
 # Helper: set / clear / append the label for <key> in
-# labels/<kind>. Storage is plain TSV (key TAB text). Empty
-# <text> removes the row.
+# labels/<kind>. Storage is TSV. FEAT-038 (1.23.0) extends the
+# format from 2 columns to 3:
+#   key TAB tax_category TAB text
+# Legacy 2-column rows are read as `tax_category=""`; new writes
+# always emit 3 columns. Empty <text> AND empty <tax> removes
+# the row.
 wallet:_label_kv() {
-	local name="$1" path="$2" kind="$3" key="$4" text="$5"
+	local name="$1" path="$2" kind="$3" key="$4" tax="$5" text="$6"
 	local store="$path/labels"
 	local file="$store/$kind"
 	mkdir -p "$store" || { error "wallet label $kind: cannot mkdir $store"; return 3; }
 	[ -f "$file" ] || : > "$file"
-	# Rewrite: drop any existing row for <key>; if <text> non-empty,
-	# append the new row at the end. Preserves order otherwise.
+	# Rewrite: drop any existing row for <key>; on append, choose
+	# the 2-column or 3-column form based on whether <tax> is set.
+	# Pre-1.23.0 callers passing just <text> stay on the legacy
+	# 2-column shape so their assertions and `git diff` output are
+	# unchanged. FEAT-038 callers passing --tax always emit 3 cols.
 	local tmp="$file.tmp"
 	awk -v k="$key" -F '\t' '$1 != k { print }' "$file" > "$tmp"
-	if [ -n "$text" ]; then
+	if [ -n "$tax" ]; then
+		printf '%s\t%s\t%s\n' "$key" "$tax" "$text" >> "$tmp"
+	elif [ -n "$text" ]; then
 		printf '%s\t%s\n' "$key" "$text" >> "$tmp"
 	fi
 	mv "$tmp" "$file"
@@ -942,17 +1144,105 @@ wallet:_label_kv() {
 		cd "$path"
 		git add "labels/$kind"
 		if ! git diff --cached --quiet 2>/dev/null; then
-			local action; if [ -z "$text" ]; then action="cleared"; else action="-> '$text'"; fi
+			local action
+			if [ -z "$tax" ] && [ -z "$text" ]; then
+				action="cleared"
+			elif [ -n "$tax" ]; then
+				action="--tax $tax${text:+ (note: \"$text\")}"
+			else
+				action="-> '$text'"
+			fi
 			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
 			    -c commit.gpgsign=false \
 				commit -q -m "wallet label $kind: $name $key $action"
 		fi
 	) || { error "wallet label $kind: commit failed"; return 5; }
-	if [ -z "$text" ]; then
+	if [ -z "$tax" ] && [ -z "$text" ]; then
 		info "label cleared for $kind:$key"
 	else
 		info "label set for $kind:$key"
 	fi
+}
+
+# FEAT-038: print current labels. With no outpoint, dumps every
+# label across the addr/tx/utxo stores in a uniform 4-column
+# format: kind, key, tax_category, text. Empty fields render as "-".
+wallet:_label_show() {
+	local wallet="$1" path="$2" outpoint="${3:-}"
+	local addrs="$path/addresses"
+	local tx_file="$path/labels/tx"
+	local utxo_file="$path/labels/utxo"
+	{
+		# addresses ledger: <idx>\t<addr>\t<label>
+		if [ -f "$addrs" ]; then
+			awk -F'\t' -v op="$outpoint" '
+				{ k=$2; lab=$3 }
+				op == "" || op == k {
+					printf "addr\t%s\t-\t%s\n", k, (lab == "" ? "-" : lab)
+				}
+			' "$addrs"
+		fi
+		# labels/tx: <txid>\t<tax>\t<text>  (legacy: <txid>\t<text>)
+		if [ -f "$tx_file" ]; then
+			awk -F'\t' -v op="$outpoint" '
+				NF >= 3 { k=$1; tax=$2; txt=$3 }
+				NF == 2 { k=$1; tax=""; txt=$2 }
+				op == "" || op == k {
+					printf "tx\t%s\t%s\t%s\n", k,
+						(tax == "" ? "-" : tax),
+						(txt == "" ? "-" : txt)
+				}
+			' "$tx_file"
+		fi
+		# labels/utxo: <outpoint>\t<tax>\t<text>  (legacy: 2 col)
+		if [ -f "$utxo_file" ]; then
+			awk -F'\t' -v op="$outpoint" '
+				NF >= 3 { k=$1; tax=$2; txt=$3 }
+				NF == 2 { k=$1; tax=""; txt=$2 }
+				op == "" || op == k {
+					printf "utxo\t%s\t%s\t%s\n", k,
+						(tax == "" ? "-" : tax),
+						(txt == "" ? "-" : txt)
+				}
+			' "$utxo_file"
+		fi
+	}
+}
+
+# FEAT-038 release-gate helper: walk every UTXO (from labels/utxo
+# rows that exist after `wallet index`) and every tx-output (from
+# labels/tx) and report ones without a tax_category. Exits 0 only
+# if every row has one — useful as a pre-report gate for FEAT-039.
+# Unlabeled UTXOs in `wallet history` (rows that have NO label
+# entry at all) are not yet enumerated here; that integration
+# comes with FEAT-037 (utxo object verb).
+wallet:_label_validate() {
+	local wallet="$1" path="$2"
+	local tx_file="$path/labels/tx"
+	local utxo_file="$path/labels/utxo"
+	# A row "has a tax category" iff it has >= 3 fields AND the
+	# tax_category column ($2) is non-empty. Legacy 2-col rows
+	# (NF == 2) and 3-col rows with empty $2 both fail the check.
+	# awk handles NF cleanly where bash `read -r` can't distinguish
+	# "empty trailing field" from "no trailing field".
+	local report
+	report="$(
+		for kind_file in "tx:$tx_file" "utxo:$utxo_file"; do
+			local kind="${kind_file%%:*}" file="${kind_file#*:}"
+			[ -f "$file" ] || continue
+			awk -F'\t' -v kind="$kind" '
+				NF < 3 || $2 == "" { print kind "\t" $1 "\t(unlabeled)" }
+			' "$file"
+		done
+	)"
+	if [ -n "$report" ]; then
+		printf '%s\n' "$report"
+		local -i n; n=$(printf '%s' "$report" | grep -c .)
+		info "$n label rows are missing a tax category"
+		return 7
+	fi
+	info "every label row has a tax category"
+	return 0
 }
 
 # FEAT-014 (partial, 1.8.0): wallet broadcast. Reads a raw hex
