@@ -134,24 +134,24 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "bech32 round-trips a known BIP-173 vector" {
-	encoded="$($BITCOIN_BIN bech32 abcdef qpzry9x8gf2tvdw0s3jn54khce6mua7l | tail -n 1)"
+	encoded="$($BITCOIN_BIN bip173 encode abcdef qpzry9x8gf2tvdw0s3jn54khce6mua7l | tail -n 1)"
 	[ "$encoded" = "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw" ]
 }
 
 @test "bech32 reproduces the help-doc example" {
-	encoded="$($BITCOIN_BIN bech32 this-part-is-readable-by-a-human qpzry | tail -n 1)"
+	encoded="$($BITCOIN_BIN bip173 encode this-part-is-readable-by-a-human qpzry | tail -n 1)"
 	[ "$encoded" = "this-part-is-readable-by-a-human1qpzrylhvwcq" ]
 }
 
 @test "bech32-verify accepts a value that bech32 just produced" {
-	encoded="$($BITCOIN_BIN bech32 abcdef qpzry9x8gf2tvdw0s3jn54khce6mua7l | tail -n 1)"
-	run "$BITCOIN_BIN" bech32-verify "$encoded"
+	encoded="$($BITCOIN_BIN bip173 encode abcdef qpzry9x8gf2tvdw0s3jn54khce6mua7l | tail -n 1)"
+	run "$BITCOIN_BIN" bip173 verify "$encoded"
 	[ "$status" -eq 0 ]
 }
 
 @test "bech32-verify rejects a tampered checksum" {
 	# Flip the last character of a known-good bech32 string.
-	run "$BITCOIN_BIN" bech32-verify "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxq"
+	run "$BITCOIN_BIN" bip173 verify "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxq"
 	[ "$status" -ne 0 ]
 }
 
@@ -162,13 +162,13 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "bech32-decode decodes a known BIP-173 vector" {
-	run "$BITCOIN_BIN" bech32-decode "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw"
+	run "$BITCOIN_BIN" bip173 decode "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"abcdef"* ]]
 }
 
 @test "bech32-decode rejects a tampered checksum" {
-	run "$BITCOIN_BIN" bech32-decode "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxq"
+	run "$BITCOIN_BIN" bip173 decode "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxq"
 	[ "$status" -ne 0 ]
 }
 
@@ -179,14 +179,14 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "bech32 accepts all-uppercase input (BIP-173 allows)" {
-	run "$BITCOIN_BIN" bech32 "ABCDEF" "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L"
+	run "$BITCOIN_BIN" bip173 encode "ABCDEF" "QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L"
 	[ "$status" -eq 0 ]
 	# Output is normalised to lowercase per BIP-173.
 	[ "$(echo "$output" | tail -n 1)" = "abcdef1qpzry9x8gf2tvdw0s3jn54khce6mua7lmqqqxw" ]
 }
 
 @test "bech32 rejects mixed-case input" {
-	run "$BITCOIN_BIN" bech32 "aBc" "qpzry"
+	run "$BITCOIN_BIN" bip173 encode "aBc" "qpzry"
 	[ "$status" -ne 0 ]
 }
 
@@ -198,13 +198,13 @@ teardown() {
 
 @test "bech32 rejects hrp longer than 83 characters" {
 	long_hrp="$(printf 'a%.0s' {1..84})"
-	run "$BITCOIN_BIN" bech32 "$long_hrp" "qpzry"
+	run "$BITCOIN_BIN" bip173 encode "$long_hrp" "qpzry"
 	[ "$status" -ne 0 ]
 }
 
 @test "bech32 rejects data with non-charset characters" {
 	# 'b', 'i', 'o' are excluded from the bech32 charset.
-	run "$BITCOIN_BIN" bech32 "test" "biox"
+	run "$BITCOIN_BIN" bip173 encode "test" "biox"
 	[ "$status" -ne 0 ]
 }
 
