@@ -151,6 +151,52 @@ clears the entry. The compat form
 .BR "label addr ..."
 for pre-1.19.0 callers.
 .TP
+.BI "label " name " " outpoint " --tax " category " [--note " text ]
+FEAT-038 (1.23.0) tax-vocabulary form. Persist a tax category
+on the outpoint (txid, txid:vout, or address \(em kind inferred
+from shape). The category must be one of:
+.BR self-transfer ,
+.BR income ,
+.BR gift-in ,
+.BR gift-out ,
+.BR purchase ,
+.BR sale ,
+.BR spend ,
+.BR fee ,
+.BR lending-out ,
+.BR lending-in ,
+.BR loss-claim ,
+.BR channel-open ,
+.BR channel-close .
+See
+.BR bitcoin-tax (1)
+for the workflow shorthand
+.BR "bitcoin tax label --as " category .
+.TP
+.BI "label " name " " outpoint " --free-text " text
+FEAT-038 free-text escape hatch. Stores
+.I text
+without a tax category; preserves the pre-1.23.0 2-column TSV
+shape so existing readers continue to work.
+.TP
+.BR "label " name " --show " [ outpoint ]
+Print every label in the wallet (or just the row for
+.IR outpoint ).
+Output columns:
+.BR kind ", " key ", " tax_category ", " text .
+Empty fields render as
+.IR - .
+.TP
+.BR "label " name " --validate"
+Walk every row in
+.B labels/tx
+and
+.BR labels/utxo ;
+print any rows that lack a tax category and exit non-zero if
+any are found. Useful as a release-time gate before running
+.BR "bitcoin tax report-de"
+(1.25.0).
+.TP
 .BI "balance " name
 Sum UTXO values for all derived addresses via the active backend.
 .TP

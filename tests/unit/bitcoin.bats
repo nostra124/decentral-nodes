@@ -2166,6 +2166,120 @@ setup_indexed_alice() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-038: tax-label vocabulary. Extends `wallet label` with a
+# closed 13-category taxonomy and a `--free-text` escape hatch.
+# Adds `wallet label --show` / `--validate` and the `tax label
+# --as` shorthand.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-038 — wallet label --tax persists the category" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet label alice abc123:0 --tax income
+	[ "$status" -eq 0 ]
+	labels="$XDG_DATA_HOME/bitcoin/wallets/alice/labels/utxo"
+	[ -s "$labels" ]
+	# 3-column TSV: key TAB tax_category TAB note
+	grep -qE $'^abc123:0\tincome\t' "$labels"
+}
+
+@test "FEAT-038 — wallet label --tax rejects a category not in the closed set" {
+	setup_indexed_alice
+	run "$BITCOIN_BIN" wallet label alice abc123:0 --tax not-a-real-category
+	[ "$status" -ne 0 ]
+	# Error message should list the valid set so users can see the closed taxonomy.
+	[[ "$output" == *"income"* ]]
+	[[ "$output" == *"self-transfer"* ]]
+	[[ "$output" == *"channel-close"* ]]
+}
+
+@test "FEAT-038 — wallet label --tax with --note stores both" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label alice abc123:0 --tax purchase --note "kraken Q1" >/dev/null
+	labels="$XDG_DATA_HOME/bitcoin/wallets/alice/labels/utxo"
+	grep -qE $'^abc123:0\tpurchase\tkraken Q1$' "$labels"
+}
+
+@test "FEAT-038 — wallet label --tax infers tx kind from a 64-hex-char outpoint" {
+	setup_indexed_alice
+	txid="abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	"$BITCOIN_BIN" wallet label alice "$txid" --tax sale >/dev/null
+	tx_labels="$XDG_DATA_HOME/bitcoin/wallets/alice/labels/tx"
+	grep -qE "^${txid}"$'\tsale\t' "$tx_labels"
+}
+
+@test "FEAT-038 — wallet label --show <outpoint> reads back what --tax wrote" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label alice abc123:0 --tax gift-in --note "from B" >/dev/null
+	run "$BITCOIN_BIN" wallet label alice --show abc123:0
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"utxo"*"abc123:0"*"gift-in"*"from B"* ]]
+}
+
+@test "FEAT-038 — wallet label --show with no outpoint dumps every row" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label alice abc123:0 --tax income >/dev/null
+	"$BITCOIN_BIN" wallet label alice abc123:1 --tax fee >/dev/null
+	run "$BITCOIN_BIN" wallet label alice --show
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"income"* ]]
+	[[ "$output" == *"fee"* ]]
+}
+
+@test "FEAT-038 — wallet label --validate exits 0 when every row has a tax category" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label alice abc123:0 --tax income >/dev/null
+	run "$BITCOIN_BIN" wallet label alice --validate
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-038 — wallet label --validate exits non-zero when an unlabeled row exists" {
+	setup_indexed_alice
+	# Free-text label has no tax category → should fail validation.
+	"$BITCOIN_BIN" wallet label alice abc123:0 --free-text "raw note" >/dev/null
+	run "$BITCOIN_BIN" wallet label alice --validate
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"abc123:0"* ]]
+}
+
+@test "FEAT-038 — wallet label --free-text behaves like the legacy free-text path" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label alice abc123:0 --free-text "rent payment" >/dev/null
+	labels="$XDG_DATA_HOME/bitcoin/wallets/alice/labels/utxo"
+	# 2-column TSV: key TAB text. (FEAT-038 keeps the legacy storage
+	# shape for the free-text path; only --tax callers emit 3 cols.)
+	grep -qE $'^abc123:0\trent payment$' "$labels"
+}
+
+@test "FEAT-038 — tax label --as is byte-identical to wallet label --tax" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" tax label alice abc123:0 --as income >/dev/null
+	labels1="$(cat "$XDG_DATA_HOME/bitcoin/wallets/alice/labels/utxo")"
+	"$BITCOIN_BIN" wallet label alice abc123:0 --tax income >/dev/null
+	labels2="$(cat "$XDG_DATA_HOME/bitcoin/wallets/alice/labels/utxo")"
+	[ "$labels1" = "$labels2" ]
+}
+
+@test "FEAT-038 — tax help mentions every category" {
+	run "$BITCOIN_BIN" tax help
+	[ "$status" -eq 0 ]
+	for cat in self-transfer income gift-in gift-out purchase sale spend fee \
+	           lending-out lending-in loss-claim channel-open channel-close; do
+		[[ "$output" == *"$cat"* ]] || { echo "missing category: $cat"; return 1; }
+	done
+}
+
+@test "FEAT-038 — push round-trips the new tax_category column" {
+	setup_indexed_alice
+	"$BITCOIN_BIN" wallet label alice abc123:0 --tax purchase >/dev/null
+	# A label change commits to the wallet's git repo.
+	committed=$(git -C "$XDG_DATA_HOME/bitcoin/wallets/alice" log --oneline -n 1 -- labels/utxo)
+	[ -n "$committed" ]
+	# And the committed file has the 3-col shape.
+	git -C "$XDG_DATA_HOME/bitcoin/wallets/alice" show "HEAD:labels/utxo" \
+		| grep -qE $'^abc123:0\tpurchase\t'
+}
+
+# ---------------------------------------------------------------------------
 # BUG-016 regression — `command:bip49-create` and `command:bip84-create`
 # were dispatcher entries calling undefined `command:bip32-create`.
 # Removed in 1.7.1; the bash-function wrappers `bip49()` / `bip84()`
