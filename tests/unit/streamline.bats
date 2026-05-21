@@ -179,3 +179,71 @@ setup() {
 	echo "$output" | grep -q "decode"
 	echo "$output" | grep -q "verify"
 }
+
+# ---------------------------------------------------------------------------
+# Stream D: psbt → bitcoin bip174 (BIP-174 PSBT).
+#
+# Full rename: psbt block moved verbatim from bin/bitcoin into
+# libexec/bitcoin/bip174. command:psbt remains as a deprecated
+# alias that emits one warn line and execs bip174. Internal callers
+# in wallet:sign / wallet:send migrated to call bip174 directly
+# (same pattern as Stream A's mnemonic-to-seed fix).
+# ---------------------------------------------------------------------------
+
+@test "FEAT-035 D — bitcoin bip174 help renders" {
+	run bash -c "'$BITCOIN_BIN' bip174 help 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "decode"
+	echo "$output" | grep -q "encode"
+	echo "$output" | grep -q "sign"
+	echo "$output" | grep -q "finalize"
+	echo "$output" | grep -q "extract"
+}
+
+@test "FEAT-035 D — bitcoin bip174 encode empty stdin produces magic + terminator" {
+	got=$(printf '' | "$BITCOIN_BIN" bip174 encode 2>/dev/null)
+	[ "$got" = "70736274ff00" ]
+}
+
+@test "FEAT-035 D — bitcoin bip174 decode + encode round-trip is identity" {
+	# A single-record global-section PSBT: magic + 0x01 key 0x00 value
+	# 0x00 (length-1 record) + 0x00 section terminator.
+	original="70736274ff0100010000"
+	tsv=$(printf '%s\n' "$original" | "$BITCOIN_BIN" bip174 decode 2>/dev/null)
+	roundtrip=$(printf '%s\n' "$tsv" | "$BITCOIN_BIN" bip174 encode 2>/dev/null)
+	[ "$roundtrip" = "$original" ]
+}
+
+@test "FEAT-035 D — bitcoin bip174 decode == bitcoin psbt decode (same bytes)" {
+	original="70736274ff0100010000"
+	canonical=$(printf '%s\n' "$original" | "$BITCOIN_BIN" bip174 decode 2>/dev/null)
+	# Alias path emits warn on stderr; strip with 2>/dev/null.
+	alias_out=$(printf '%s\n' "$original" | "$BITCOIN_BIN" psbt decode 2>/dev/null)
+	[ "$canonical" = "$alias_out" ]
+}
+
+@test "FEAT-035 D — bitcoin psbt alias emits one warn line" {
+	run --separate-stderr bash -c "echo '70736274ff00' | '$BITCOIN_BIN' psbt decode"
+	[ "$status" -eq 0 ]
+	echo "$stderr" | grep -qE "warn .*psbt.* deprecated.* 1\.23\.0"
+	echo "$stderr" | grep -qF "bitcoin bip174"
+	echo "$stderr" | grep -qF "1.24.0"
+}
+
+@test "FEAT-035 D — bitcoin bip174 decode does NOT emit a warn line" {
+	run --separate-stderr bash -c "echo '70736274ff00' | '$BITCOIN_BIN' bip174 decode"
+	[ "$status" -eq 0 ]
+	# SELF_QUIET=1 from setup suppresses info; canonical path stays silent.
+	[ -z "$stderr" ] \
+		|| { echo "unexpected stderr on canonical path: $stderr"; return 1; }
+}
+
+@test "FEAT-035 D — bitcoin bip174 decode rejects bad magic" {
+	run bash -c "echo 'ff00' | '$BITCOIN_BIN' bip174 decode"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-035 D — bitcoin bip174 decode rejects empty input" {
+	run bash -c ": | '$BITCOIN_BIN' bip174 decode"
+	[ "$status" -ne 0 ]
+}

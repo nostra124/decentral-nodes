@@ -103,6 +103,9 @@ Mnemonic generation and validation \(em BIP-39.
 .BR bitcoin-bip173 (1)
 Bech32 string encoding \(em BIP-173.
 .TP
+.BR bitcoin-bip174 (1)
+Partially-signed Bitcoin transactions \(em BIP-174.
+.TP
 .BR bitcoin-bip350 (1)
 Bech32m string encoding \(em BIP-350.
 .TP
@@ -124,7 +127,8 @@ Bech32 and bech32m encoding (legacy CLI; prefer
 Output script descriptors \(em BIP-380.
 .TP
 .BR bitcoin-psbt (1)
-Partially-signed Bitcoin transactions \(em BIP-174.
+Partially-signed Bitcoin transactions (deprecated alias for
+.BR bitcoin-bip174 (1)).
 
 .SS Object verbs
 .TP
@@ -313,6 +317,7 @@ Per-subcommand pages:
 .BR bitcoin-bip32 (1),
 .BR bitcoin-bip39 (1),
 .BR bitcoin-bip173 (1),
+.BR bitcoin-bip174 (1),
 .BR bitcoin-bip350 (1),
 .BR bitcoin-daemon (1),
 .BR bitcoin-descriptor (1),

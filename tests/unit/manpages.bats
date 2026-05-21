@@ -26,19 +26,22 @@ setup() {
 # Verbs implemented inside bin/bitcoin as command:<name> functions.
 # Help / version / modules are documented in the parent bitcoin(1)
 # and intentionally do not get their own page.
-COMMAND_VERBS="wallet descriptor psbt bech32 backend"
+# psbt dropped to DEPRECATED_ALIASES in 1.23.0 (FEAT-035 Stream D)
+# — canonical home is now bip174 in libexec.
+COMMAND_VERBS="wallet descriptor bech32 backend"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
 # mnemonic-to-seed dropped to DEPRECATED_ALIASES in 1.23.0
 # (FEAT-035): the standalone shim still exists but the canonical
 # subcommand is now `bitcoin bip39 mnemonic-to-seed`.
 # bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).
-LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip350 daemon wif"
+# bip174 added in 1.23.0 (FEAT-035 Stream D).
+LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 daemon wif"
 
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
 # Each entry is "<alias>=<canonical>".
-DEPRECATED_ALIASES="mnemonic-to-seed=bip39"
+DEPRECATED_ALIASES="mnemonic-to-seed=bip39 psbt=bip174"
 
 @test "every command: verb has a bitcoin-<verb>.1 source file" {
 	for v in $COMMAND_VERBS; do
@@ -95,6 +98,10 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-bip350.1"
 }
 
+@test "bitcoin-bip174.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-bip174.1"
+}
+
 @test "bitcoin-wif.1 has all required sections" {
 	assert_sections "$MAN_DIR/bitcoin-wif.1"
 }
@@ -121,8 +128,9 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-descriptor.1"
 }
 
-@test "bitcoin-psbt.1 has all required sections" {
-	assert_sections "$MAN_DIR/bitcoin-psbt.1"
+@test "bitcoin-psbt.1 is a .so-include alias to bitcoin-bip174.1" {
+	# FEAT-041 alias convention (Stream D made psbt a deprecated alias).
+	grep -qE '^\.so man1/bitcoin-bip174\.1$' "$MAN_DIR/bitcoin-psbt.1"
 }
 
 @test "bitcoin-bech32.1 has all required sections" {
@@ -137,7 +145,7 @@ assert_sections() {
 @test "BIP-plugin pages carry .SH STANDARDS" {
 	# Deprecated-alias pages (.so includes) inherit STANDARDS from
 	# their canonical, so we skip them here.
-	for v in bip13 bip32 bip39 bip173 bip350 bech32 descriptor psbt wif; do
+	for v in bip13 bip32 bip39 bip173 bip174 bip350 bech32 descriptor wif; do
 		grep -qE "^\.SH STANDARDS$" "$MAN_DIR/bitcoin-$v.1" \
 			|| { echo "$MAN_DIR/bitcoin-$v.1: missing .SH STANDARDS"; return 1; }
 	done
