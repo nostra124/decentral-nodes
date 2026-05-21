@@ -1,0 +1,162 @@
+.\" Manpage for bitcoin-bip380(1) — BIP-380 output script descriptors.
+.TH BITCOIN-BIP380 1 "2026-05-21" "bitcoin 1.23.0" "User Commands"
+
+.SH NAME
+bitcoin\-bip380 \- BIP-380 output script descriptors
+
+.SH SYNOPSIS
+.B bitcoin bip380 checksum
+.I descriptor_body
+.br
+.B bitcoin bip380 verify
+.I descriptor_with_checksum
+.br
+.B bitcoin bip380 derive
+.I descriptor
+.I index
+.br
+.B bitcoin bip380 help
+
+.SH DESCRIPTION
+.B bitcoin bip380
+implements the BIP-380 output script descriptor language:
+the 8-character polymod checksum suffix, descriptor checksum
+verification, and address derivation by instantiating the
+.B *
+placeholder.
+
+Per CLAUDE.md §4 no-shared-library, this plugin owns its own
+copies of
+.B hash160
+and
+.B convertbits
+helpers and shells out to sibling plugins
+.RB ( bip13
+for base58check,
+.B bip32
+for HD derivation,
+.B bip173
+for bech32) for primitives that already have a canonical home.
+
+The wallet-touching verb
+.B bitcoin descriptor wallet <name>
+\(em which reads the BIP-39 seed from
+.BR secret (1)
+and derives the
+.B m/84h/0h/0h
+xpub for an existing wallet \(em remains in
+.BR bitcoin (1)
+because it integrates wallet state and the
+.B secret
+sibling tool. A future PR may re-home it under
+.B bitcoin wallet descriptor
+for cleaner separation.
+
+.SH OPTIONS
+.B bitcoin bip380
+takes no top-level flags. The dispatcher honors
+.B $SELF_DEBUG
+and
+.B $SELF_QUIET
+inherited from
+.BR bitcoin (1).
+
+.SH SUBCOMMANDS
+.TP
+.BI "checksum " "descriptor_body"
+Append a BIP-380 §Checksum (8 chars from the bech32 charset)
+after a
+.B #
+separator. If the input already ends in
+.BR # ", "
+the existing 8-character checksum is replaced rather than
+duplicated.
+.TP
+.BI "verify " "descriptor"
+Verify a descriptor's embedded checksum. Exits 0 on success;
+non-zero with a
+.B warn
+line on mismatch.
+.TP
+.BI "derive " "descriptor index"
+Instantiate the
+.B *
+placeholder in
+.I descriptor
+with
+.I index
+and emit the resulting address. Supported descriptor functions:
+.BR wpkh() " (bech32 segwit v0, via " bitcoin-bip173 (1) "), "
+.BR pkh() " (legacy P2PKH '1...'), "
+.BR sh(wpkh()) " (P2SH-nested segwit '3...')."
+.BR tr() " and " combo()
+return a clear "not yet implemented" error.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success (or, for
+.BR verify ,
+checksum is valid).
+.TP
+.B \(>=1
+General error: missing argument, malformed body, unknown
+descriptor function, checksum mismatch. Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10.
+
+.SH FILES
+None. The plugin is stateless.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_LIBEXEC
+Required when invoking
+.B derive
+on a
+.BR wpkh()
+descriptor: the plugin shells out to sibling
+.BR bip13 ", " bip32 ", and " bip173
+plugins for base58check, HD derivation, and bech32 encoding.
+Inherited from
+.BR bitcoin (1)
+when invoked via the dispatcher.
+
+.SH STANDARDS
+.IP \(bu 2
+BIP-380 (Output Script Descriptors, General Operation), shipped
+at
+.IR share/doc/bitcoin/standards/bip-0380.mediawiki .
+.IP \(bu 2
+BIP-381 (Non-segwit output script descriptors), shipped at
+.IR share/doc/bitcoin/standards/bip-0381.mediawiki .
+.IP \(bu 2
+BIP-386 (tr() output script descriptors), shipped at
+.IR share/doc/bitcoin/standards/bip-0386.mediawiki .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip13 (1),
+.BR bitcoin-bip32 (1),
+.BR bitcoin-bip173 (1),
+.BR bitcoin-descriptor (1),
+.BR bitcoin-wallet (1)
+
+.SH HISTORY
+Plugin introduced in bitcoin 1.23.0 (FEAT-035 Stream B), extracted
+from
+.B bin/bitcoin
+where the BIP-380 logic had landed in 1.4.0 (FEAT-009) and 1.18.0
+(FEAT-026). The legacy
+.B bitcoin descriptor checksum
+/
+.B verify
+/
+.B derive
+verbs continue to work as deprecated aliases until 1.24.0.
+.B bitcoin descriptor wallet
+is not deprecated \(em it stays in
+.BR bitcoin (1)
+as a wallet-touching helper.

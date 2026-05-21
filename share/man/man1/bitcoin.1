@@ -109,6 +109,9 @@ Partially-signed Bitcoin transactions \(em BIP-174.
 .BR bitcoin-bip350 (1)
 Bech32m string encoding \(em BIP-350.
 .TP
+.BR bitcoin-bip380 (1)
+Output script descriptors \(em BIP-380.
+.TP
 .BR bitcoin-mnemonic-to-seed (1)
 PBKDF2 seed derivation from a BIP-39 mnemonic
 (deprecated alias for
@@ -124,7 +127,11 @@ Bech32 and bech32m encoding (deprecated alias for
 .BR bitcoin-bip350 (1)).
 .TP
 .BR bitcoin-descriptor (1)
-Output script descriptors \(em BIP-380.
+Output script descriptors (partially deprecated;
+.BR checksum / verify / derive
+forward to
+.BR bitcoin-bip380 (1)
+since 1.23.0).
 .TP
 .BR bitcoin-psbt (1)
 Partially-signed Bitcoin transactions (deprecated alias for
@@ -319,6 +326,7 @@ Per-subcommand pages:
 .BR bitcoin-bip173 (1),
 .BR bitcoin-bip174 (1),
 .BR bitcoin-bip350 (1),
+.BR bitcoin-bip380 (1),
 .BR bitcoin-daemon (1),
 .BR bitcoin-descriptor (1),
 .BR bitcoin-mnemonic-to-seed (1),

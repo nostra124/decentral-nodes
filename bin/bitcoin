@@ -246,364 +246,20 @@ wallet:_valid_name() {
 }
 
 # ---------------------------------------------------------------------------
-# FEAT-009: BIP-380 descriptor checksum + verify.
-#
-# Per BIP-380 §Checksum: the descriptor body is expanded into 5-bit
-# symbols against INPUT_CHARSET (95 chars, 3 groups of 32 + 31 with
-# special-case packing), passed through a polymod with five 40-bit
-# generator constants, and the resulting 40-bit checksum is rendered
-# as 8 chars from CHECKSUM_CHARSET (the bech32 charset).
+# FEAT-035 Stream B (1.23.0): BIP-380 descriptor checksum/verify/derive
+# moved to `libexec/bitcoin/bip380`. `command:descriptor` keeps four
+# subcommands as a single dispatcher:
+#   - wallet  — stays here (reads secret + wallet:_path); not
+#               deprecated yet (re-home into `wallet descriptor` in a
+#               future PR).
+#   - checksum / verify / derive / help — deprecated aliases that
+#               warn + exec the new plugin. Removal target: 1.24.0.
 # ---------------------------------------------------------------------------
 
-# INPUT_CHARSET — 95 chars. Position in string == symbol value.
-declare -gr BIP380_INPUT_CHARSET=$'0123456789()[],\'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#"\\ '
-
-declare -gr BIP380_CHECKSUM_CHARSET="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-
-descriptor:_polymod() {
-	local -a generator=(0xf5dee51989 0xa9fdca3312 0x1bab10e32d 0x3706b1677a 0x644d626ffd)
-	local -i chk=1 v top i
-	for v; do
-		(( top = chk >> 35,
-		   chk = (chk & 0x7ffffffff) << 5 ^ v ))
-		for i in 0 1 2 3 4; do
-			(( ((top >> i) & 1) && (chk ^= generator[i]) )) || true
-		done
-	done
-	echo $chk
-}
-
-descriptor:_expand() {
-	local s="$1"
-	local -ai groups=() symbols=()
-	local -i i v idx j
-	local c
-	for ((i=0; i<${#s}; i++)); do
-		c="${s:i:1}"
-		idx=-1
-		for ((j=0; j<${#BIP380_INPUT_CHARSET}; j++)); do
-			if [[ "${BIP380_INPUT_CHARSET:j:1}" == "$c" ]]; then
-				idx=$j
-				break
-			fi
-		done
-		(( idx < 0 )) && return 1
-		v=$idx
-		symbols+=( $(( v & 31 )) )
-		groups+=( $(( v >> 5 )) )
-		if (( ${#groups[@]} == 3 )); then
-			symbols+=( $(( groups[0] * 9 + groups[1] * 3 + groups[2] )) )
-			groups=()
-		fi
-	done
-	if (( ${#groups[@]} == 1 )); then
-		symbols+=( ${groups[0]} )
-	elif (( ${#groups[@]} == 2 )); then
-		symbols+=( $(( groups[0] * 3 + groups[1] )) )
-	fi
-	printf '%s\n' "${symbols[@]}"
-}
-
-descriptor:_create() {
-	local body="$1"
-	local -a expanded
-	mapfile -t expanded < <(descriptor:_expand "$body") \
-		|| { error "descriptor: invalid character in '$body'"; return 1; }
-	if (( ${#expanded[@]} == 0 )) && [ -n "$body" ]; then
-		error "descriptor: invalid character in '$body'"
-		return 1
-	fi
-	local -i chk
-	chk=$(descriptor:_polymod "${expanded[@]}" 0 0 0 0 0 0 0 0)
-	(( chk ^= 1 ))
-	local -i i val
-	local out="$body#"
-	for i in 0 1 2 3 4 5 6 7; do
-		(( val = (chk >> (5 * (7 - i))) & 31 ))
-		out+="${BIP380_CHECKSUM_CHARSET:val:1}"
-	done
-	printf '%s\n' "$out"
-}
-
-descriptor:checksum() {
-	local s="${1:-}"
-	[ -n "$s" ] || { error "descriptor checksum: argument required"; return 2; }
-	# If the input already ends in `#<8 chars>`, strip and re-compute.
-	if (( ${#s} > 9 )) && [[ "${s: -9: 1}" == "#" ]]; then
-		s="${s:0: ${#s}-9}"
-	fi
-	descriptor:_create "$s"
-}
-
-descriptor:verify() {
-	local s="${1:-}"
-	[ -n "$s" ] || { error "descriptor verify: argument required"; return 2; }
-	if (( ${#s} < 10 )) || [[ "${s: -9: 1}" != "#" ]]; then
-		error "descriptor verify: no '#' separator + 8-char checksum suffix"
-		return 3
-	fi
-	local body="${s:0: ${#s}-9}"
-	local chksum="${s: -8}"
-	local -i i j
-	local c
-	# Every checksum char must be in BIP380_CHECKSUM_CHARSET.
-	for ((i=0; i<8; i++)); do
-		c="${chksum:i:1}"
-		case "$BIP380_CHECKSUM_CHARSET" in
-			*"$c"*) ;;
-			*) error "descriptor verify: checksum char '$c' not in bech32 set"; return 4 ;;
-		esac
-	done
-	local -a expanded
-	mapfile -t expanded < <(descriptor:_expand "$body") \
-		|| { error "descriptor verify: invalid character in body"; return 5; }
-	local -ai cksym=()
-	for ((i=0; i<8; i++)); do
-		c="${chksum:i:1}"
-		for ((j=0; j<32; j++)); do
-			if [[ "${BIP380_CHECKSUM_CHARSET:j:1}" == "$c" ]]; then
-				cksym+=( $j )
-				break
-			fi
-		done
-	done
-	local -i chk
-	chk=$(descriptor:_polymod "${expanded[@]}" "${cksym[@]}")
-	if (( chk == 1 )); then
-		return 0
-	else
-		error "descriptor verify: checksum mismatch (got polymod=$chk, expected 1)"
-		return 6
-	fi
-}
-
-descriptor:help() {
-	cat <<-ENDHELP
-	Usage: $SELF descriptor <subcommand> [args]
-
-	  checksum <s>      append a BIP-380 checksum to the descriptor body;
-	                    if <s> already ends in '#<8 chars>', replace it
-	  verify <s>        verify a descriptor's checksum; exit 0 on success
-	  derive <desc> <i> instantiate the '*' placeholder in <desc> with <i>
-	                    and emit the resulting address. Supports wpkh()
-	                    (bech32 segwit), pkh() (legacy P2PKH '1...'), and
-	                    sh(wpkh()) (P2SH-nested segwit '3...'). tr() and
-	                    combo() return a clear 'not yet implemented'.
-	  wallet <name>     emit a checksummed wpkh(<xpub>/0/*) descriptor for
-	                    an existing wallet. Reads the seed via 'secret get
-	                    <name>/seed' and derives the m/84h/0h/0h account
-	                    xpub via the same pipeline 'wallet derive' uses.
-	  help              this message
-
-	BIP-380 §Checksum defines an 8-character polymod-based suffix after
-	a '#' separator: descriptor body, '#', 8 bech32-charset chars.
-	ENDHELP
-}
-
-help:descriptor() {
-	descriptor:help
-	cite 380 "Output script descriptors (general)"
-	cite 381 "Non-segwit output script descriptors"
-	cite 386 "tr() output script descriptor"
-}
-
-command:descriptor() {
-	local sub="${1:-help}"
-	shift 2>/dev/null || true
-	case "$sub" in
-		checksum) descriptor:checksum "$@" ;;
-		verify)   descriptor:verify   "$@" ;;
-		derive)   descriptor:derive   "$@" ;;
-		wallet)   descriptor:wallet   "$@" ;;
-		help)     descriptor:help ;;
-		*)
-			error "unknown descriptor subcommand: '$sub'"
-			descriptor:help >&2
-			return 2
-			;;
-	esac
-}
-
-# ---------------------------------------------------------------------------
-# FEAT-026 (partial, 1.18.0): descriptor derive + descriptor wallet.
-#
-# Together these turn descriptors from checksum strings into actual
-# address generators. As of 1.20.0 the supported set is wpkh / pkh /
-# sh(wpkh); tr and combo remain stubbed (and tr is gated on FEAT-007
-# Taproot).
-# ---------------------------------------------------------------------------
-
-descriptor:derive() {
-	local desc="${1:-}" idx="${2:-}"
-	if [ -z "$desc" ] || [ -z "$idx" ]; then
-		error "descriptor derive: usage: descriptor derive <descriptor> <index>"
-		return 2
-	fi
-	if [[ ! "$idx" =~ ^[0-9]+$ ]]; then
-		error "descriptor derive: <index> must be a non-negative integer (got '$idx')"
-		return 3
-	fi
-
-	# Strip and verify optional checksum suffix.
-	local body="$desc"
-	if (( ${#desc} > 9 )) && [[ "${desc: -9: 1}" == "#" ]]; then
-		if ! descriptor:verify "$desc" >/dev/null 2>&1; then
-			error "descriptor derive: checksum suffix on '$desc' is invalid"
-			return 4
-		fi
-		body="${desc:0: ${#desc}-9}"
-	fi
-
-	# Dispatch on the outer descriptor function. Each branch extracts
-	# the inner key+path, runs the shared `_derive_pubkey` pipeline,
-	# and hands the resulting compressed pubkey to a per-function
-	# address encoder.
-	local fn inner_body inner_fn
-	if [[ "$body" =~ ^sh\((.*)\)$ ]]; then
-		fn="sh"
-		inner_body="${BASH_REMATCH[1]}"
-		inner_fn="${inner_body%%(*}"
-		# In 1.20.0 the only supported sh() inner is wpkh().
-		if [[ "$inner_fn" != "wpkh" ]]; then
-			error "descriptor derive: 'sh($inner_fn(...))' is not yet implemented (only sh(wpkh()) ships here)"
-			return 5
-		fi
-	else
-		fn="${body%%(*}"
-		inner_body="$body"
-	fi
-
-	case "$fn" in
-		wpkh|pkh|sh) ;;
-		tr|combo)
-			error "descriptor derive: '$fn()' is not yet implemented (tracked as FEAT-026 follow-up)"
-			return 5
-			;;
-		*)
-			error "descriptor derive: unknown descriptor function '$fn'"
-			return 6
-			;;
-	esac
-
-	# All currently-supported functions wrap a wpkh-shaped key body
-	# ('<xpub>/<path>'). _parse_wpkh accepts both 'wpkh(...)' and
-	# 'pkh(...)' because the inner shape is identical.
-	local parsed
-	if ! parsed="$(descriptor:_parse_key_body "$inner_body")"; then
-		error "descriptor derive: malformed descriptor body '$inner_body' (need '<fn>(<xpub>/<path>)' with at least one '/')"
-		return 7
-	fi
-	local xpub="${parsed%%	*}"
-	local path="${parsed#*	}"
-
-	if [[ "$path" != *"*"* ]]; then
-		error "descriptor derive: descriptor has no '*' placeholder to instantiate"
-		return 8
-	fi
-	path="${path//\*/$idx}"
-
-	local pubkey
-	if ! pubkey="$(descriptor:_derive_pubkey "$xpub" "$path")"; then
-		# _derive_pubkey already emitted a specific error.
-		return 9
-	fi
-
-	case "$fn" in
-		wpkh) p2wpkh "$pubkey" ;;
-		pkh)  descriptor:_pkh_address "$pubkey" ;;
-		sh)   descriptor:_p2sh_p2wpkh_address "$pubkey" ;;
-	esac
-}
-
-# Extract '<xpub>/<path>' from a function body like 'wpkh(<xpub>/...)
-# or 'pkh(<xpub>/...)'. Emits "<xpub><TAB><path>"; non-zero on a
-# malformed body or a missing '/'.
-descriptor:_parse_key_body() {
-	local body="$1"
-	if [[ ! "$body" =~ ^(wpkh|pkh)\((.*)\)$ ]]; then
-		return 1
-	fi
-	local inner="${BASH_REMATCH[2]}"
-	if [[ "$inner" != */* ]]; then
-		return 2
-	fi
-	printf '%s\t%s\n' "${inner%%/*}" "${inner#*/}"
-}
-
-# Derive a compressed child pubkey from <xpub> at <path>. <path> is
-# the post-substitution path (no '*'). Reuses the bip32 plugin via
-# the same tmpfile dance the inline wpkh code used to use, so the
-# 78-byte serialisation survives the null-byte hostile environment
-# of bash command substitution.
-descriptor:_derive_pubkey() {
-	local xpub="$1" path="$2"
-	local libexec="${SELF_LIBEXEC:?descriptor derive: SELF_LIBEXEC must be set}"
-	if [ ! -x "$libexec/${SELF:-bitcoin}/bip32" ]; then
-		error "descriptor derive: bip32 plugin not found at $libexec/${SELF:-bitcoin}/bip32"
-		return 1
-	fi
-	if [ ! -x "$libexec/${SELF:-bitcoin}/bip13" ]; then
-		error "descriptor derive: bip13 plugin not found at $libexec/${SELF:-bitcoin}/bip13"
-		return 1
-	fi
-	local raw_decoded raw_serialised
-	raw_decoded="$(mktemp)"
-	raw_serialised="$(mktemp)"
-	printf '%s' "$xpub" | "$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null > "$raw_decoded"
-	if [ ! -s "$raw_decoded" ]; then
-		rm -f "$raw_decoded" "$raw_serialised"
-		error "descriptor derive: failed to base58-decode xpub '$xpub'"
-		return 2
-	fi
-	local decoded_len; decoded_len="$(wc -c < "$raw_decoded")"
-	if (( decoded_len != 82 )); then
-		rm -f "$raw_decoded" "$raw_serialised"
-		error "descriptor derive: decoded xpub is $decoded_len bytes, expected 82"
-		return 3
-	fi
-	head -c 78 "$raw_decoded" > "$raw_serialised"
-	local pubkey
-	pubkey="$(
-		"$libexec/${SELF:-bitcoin}/bip32" derive "/$path" 2>/dev/null < "$raw_serialised" \
-			| tail -c 33 \
-			| basenc --base16 -w0 \
-			| tr A-F a-f
-	)"
-	rm -f "$raw_decoded" "$raw_serialised"
-	if [[ ! "$pubkey" =~ ^0[23][[:xdigit:]]{64}$ ]]; then
-		error "descriptor derive: derivation produced unexpected output '$pubkey'"
-		return 4
-	fi
-	printf '%s\n' "$pubkey"
-}
-
-# BIP-13 P2PKH address from a compressed pubkey hex:
-#   base58check(0x00 || HASH160(pubkey))
-# Mainnet version byte 0x00; the resulting address starts with '1'.
-descriptor:_pkh_address() {
-	local pubkey_hex="$1"
-	local pubkey_hash; pubkey_hash="$(printf '%s' "$pubkey_hex" | _hash160_hex)"
-	descriptor:_base58check_hex "00$pubkey_hash"
-}
-
-# BIP-13 P2SH wrap of a P2WPKH redeem script:
-#   redeem_script = 00 14 || HASH160(pubkey)
-#   address       = base58check(0x05 || HASH160(redeem_script))
-# Mainnet version byte 0x05; the resulting address starts with '3'.
-descriptor:_p2sh_p2wpkh_address() {
-	local pubkey_hex="$1"
-	local pubkey_hash; pubkey_hash="$(printf '%s' "$pubkey_hex" | _hash160_hex)"
-	local redeem_script="0014$pubkey_hash"
-	local script_hash; script_hash="$(printf '%s' "$redeem_script" | _hash160_hex)"
-	descriptor:_base58check_hex "05$script_hash"
-}
-
-# Base58Check-encode a binary file. Used to format the 78-byte
-# extended-key serialisation into the canonical xpub/xprv/zpub
-# textual form. BIP-32 §Serialization specifies the 4-byte SHA256d
-# checksum appended to the data before base58 encoding; the bip13
-# base58-encode plugin is plain base58 (no checksum), so this helper
-# adds the checksum first.
+# Base58Check-encode a binary file. Used by descriptor:wallet to
+# convert the 78-byte bip32 extended-key serialisation into the
+# canonical xpub/xprv string. Duplicated in bip380's helpers per
+# CLAUDE.md §5.
 descriptor:_base58check_file() {
 	local infile="$1"
 	local libexec="${SELF_LIBEXEC:?descriptor: SELF_LIBEXEC must be set}"
@@ -617,41 +273,6 @@ descriptor:_base58check_file() {
 	} > "$tmp"
 	"$libexec/${SELF:-bitcoin}/bip13" base58-encode < "$tmp"
 	rm -f "$tmp"
-}
-
-# Hex-input sibling of _base58check_file. Used by the pkh / sh
-# address derivations in 1.20.0; the data they hand off is small
-# (21 bytes) and starts with a null version byte that command
-# substitution would drop, so we pipe through bip13 base58-encode
-# without ever capturing the raw bytes into a bash variable.
-#
-# Standard base58check emits one '1' character per leading 0x00
-# byte in the payload (preserving byte count over an otherwise
-# big-int encoding). `bip13 base58-encode` treats its input as a
-# pure integer and drops leading zeros, so we prepend the missing
-# '1's here. The P2PKH path (mainnet prefix 0x00) relies on this.
-descriptor:_base58check_hex() {
-	local data_hex="$1"
-	local libexec="${SELF_LIBEXEC:?descriptor: SELF_LIBEXEC must be set}"
-	# Count leading 0x00 bytes in the hex input.
-	local -i leading_zeros=0
-	while [[ "${data_hex:leading_zeros*2:2}" == "00" ]]; do
-		(( leading_zeros++ ))
-	done
-	local tail
-	tail="$(
-		{
-			printf '%s' "$data_hex" | xxd -r -p
-			printf '%s' "$data_hex" | xxd -r -p \
-				| openssl dgst -sha256 -binary \
-				| openssl dgst -sha256 -binary \
-				| head -c 4
-		} | "$libexec/${SELF:-bitcoin}/bip13" base58-encode
-	)"
-	local prefix=""
-	local -i i
-	for ((i=0; i<leading_zeros; i++)); do prefix+="1"; done
-	printf '%s%s\n' "$prefix" "$tail"
 }
 
 descriptor:wallet() {
@@ -671,11 +292,6 @@ descriptor:wallet() {
 	fi
 	local libexec="${SELF_LIBEXEC:?descriptor wallet: SELF_LIBEXEC must be set}"
 
-	# Same pipeline wallet:_derive_address uses, but stops at the
-	# m/84h/0h/0h xpub (the account-level public key) rather than
-	# walking down to an address. We pipe through a tmpfile so the
-	# binary 78-byte serialisation survives — bash command
-	# substitution strips null bytes which corrupts the checksum.
 	local raw; raw="$(mktemp)"
 	secret get "$name/seed" |
 		"$libexec/${SELF:-bitcoin}/bip39" mnemonic-to-seed |
@@ -694,7 +310,50 @@ descriptor:wallet() {
 		error "descriptor wallet: base58check encoding failed for '$name'"
 		return 6
 	fi
-	descriptor:checksum "wpkh($xpub/0/*)"
+	"$libexec/${SELF:-bitcoin}/bip380" checksum "wpkh($xpub/0/*)"
+}
+
+command:descriptor() {
+	local sub="${1:-help}"
+	case "$sub" in
+		wallet)
+			shift 2>/dev/null || true
+			descriptor:wallet "$@"
+			;;
+		help)
+			# Special case: descriptor help shows the bip380 surface
+			# AND the descriptor:wallet subcommand (which stays in
+			# bin/bitcoin and isn't part of bip380's help).
+			local libexec="${SELF_LIBEXEC:?command:descriptor: SELF_LIBEXEC must be set}"
+			"$libexec/${SELF:-bitcoin}/bip380" help
+			cat >&2 <<-EOF
+
+	Additional subcommand (not in bip380, stays in bin/bitcoin):
+	  wallet <name>     emit a checksummed wpkh(<xpub>/0/*) descriptor for an
+	                    existing wallet. Reads the seed via secret get and
+	                    derives the m/84h/0h/0h xpub via the same pipeline
+	                    wallet derive uses.
+
+	'bitcoin descriptor checksum/verify/derive' are deprecated since
+	1.23.0; use the 'bitcoin bip380' canonical forms. Removal: 1.24.0.
+	EOF
+			;;
+		checksum|verify|derive)
+			warn "'descriptor $sub' is deprecated since 1.23.0; use 'bitcoin bip380 $sub' (will be removed in 1.24.0)"
+			local libexec="${SELF_LIBEXEC:?command:descriptor: SELF_LIBEXEC must be set}"
+			exec "$libexec/${SELF:-bitcoin}/bip380" "$@"
+			;;
+		*)
+			error "unknown descriptor subcommand: '$sub'"
+			return 2
+			;;
+	esac
+}
+
+help:descriptor() {
+	cite 380 "Output script descriptors (general)"
+	cite 381 "Non-segwit output script descriptors"
+	cite 386 "tr() output script descriptor"
 }
 
 # ---------------------------------------------------------------------------

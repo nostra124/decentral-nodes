@@ -327,3 +327,74 @@ setup() {
 	# bip173 decode emits HRP on line 1.
 	[ "$(echo "$output" | head -1)" = "bc" ]
 }
+
+# ---------------------------------------------------------------------------
+# Stream B: descriptor → bitcoin bip380 (BIP-380 descriptors).
+#
+# Three pure verbs (checksum / verify / derive) move to libexec.
+# `bitcoin descriptor wallet <name>` stays in bin/bitcoin because it
+# reads `secret`-managed wallet state; not deprecated yet (re-home in
+# a future PR under `wallet descriptor`).
+# ---------------------------------------------------------------------------
+
+@test "FEAT-035 B — bitcoin bip380 checksum matches BIP-380 test vector" {
+	expected="raw(deadbeef)#89f8spxm"
+	run "$BITCOIN_BIN" bip380 checksum 'raw(deadbeef)'
+	[ "$status" -eq 0 ]
+	[ "$output" = "$expected" ]
+}
+
+@test "FEAT-035 B — bitcoin descriptor checksum alias produces identical bytes" {
+	canonical=$("$BITCOIN_BIN" bip380 checksum 'raw(deadbeef)' 2>/dev/null)
+	alias_out=$("$BITCOIN_BIN" descriptor checksum 'raw(deadbeef)' 2>/dev/null)
+	[ "$canonical" = "$alias_out" ]
+}
+
+@test "FEAT-035 B — bitcoin descriptor checksum alias emits one warn line" {
+	run --separate-stderr "$BITCOIN_BIN" descriptor checksum 'raw(deadbeef)'
+	[ "$status" -eq 0 ]
+	echo "$stderr" | grep -qE "warn .*descriptor checksum.* deprecated.* 1\.23\.0"
+	echo "$stderr" | grep -qF "bitcoin bip380 checksum"
+	echo "$stderr" | grep -qF "1.24.0"
+}
+
+@test "FEAT-035 B — bitcoin bip380 verify accepts a known-good checksum" {
+	run "$BITCOIN_BIN" bip380 verify 'raw(deadbeef)#89f8spxm'
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-035 B — bitcoin bip380 verify rejects a tampered checksum" {
+	run "$BITCOIN_BIN" bip380 verify 'raw(deadbeef)#00000000'
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-035 B — bitcoin descriptor verify alias forwards exit code" {
+	canonical_status=$("$BITCOIN_BIN" bip380 verify 'raw(deadbeef)#89f8spxm' 2>/dev/null; echo $?)
+	alias_status=$("$BITCOIN_BIN" descriptor verify 'raw(deadbeef)#89f8spxm' 2>/dev/null; echo $?)
+	[ "$canonical_status" = "$alias_status" ]
+}
+
+@test "FEAT-035 B — bitcoin descriptor wallet (no warn — not deprecated)" {
+	# wallet subcommand stays in bin/bitcoin and should NOT emit a
+	# deprecation warn line. With no args it errors with a clear
+	# "name required" message on stderr; that's not the warn line.
+	run --separate-stderr "$BITCOIN_BIN" descriptor wallet
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -qv "deprecated" \
+		|| { echo "unexpected deprecation warn for non-deprecated subcommand"; return 1; }
+}
+
+@test "FEAT-035 B — bitcoin bip380 emits NO warn lines" {
+	run --separate-stderr "$BITCOIN_BIN" bip380 checksum 'raw(deadbeef)'
+	[ "$status" -eq 0 ]
+	[ -z "$stderr" ] \
+		|| { echo "unexpected stderr on canonical path: $stderr"; return 1; }
+}
+
+@test "FEAT-035 B — bitcoin bip380 help lists checksum, verify, derive" {
+	run bash -c "'$BITCOIN_BIN' bip380 help 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "checksum"
+	echo "$output" | grep -q "verify"
+	echo "$output" | grep -q "derive"
+}

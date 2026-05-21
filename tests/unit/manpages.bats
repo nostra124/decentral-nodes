@@ -29,7 +29,10 @@ setup() {
 # psbt dropped to DEPRECATED_ALIASES in 1.23.0 (FEAT-035 Stream D).
 # bech32 dropped to DEPRECATED_ALIASES in 1.23.0 (FEAT-035 Stream C2)
 # — canonical homes are bip173 (bech32) and bip350 (bech32m).
-COMMAND_VERBS="wallet descriptor backend"
+# descriptor partially deprecated in 1.23.0 (FEAT-035 Stream B):
+# checksum/verify/derive are aliases to bip380; descriptor wallet
+# stays in bin/bitcoin. The page is a .so include to bip380.
+COMMAND_VERBS="wallet backend"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
 # mnemonic-to-seed dropped to DEPRECATED_ALIASES in 1.23.0
@@ -37,12 +40,12 @@ COMMAND_VERBS="wallet descriptor backend"
 # subcommand is now `bitcoin bip39 mnemonic-to-seed`.
 # bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).
 # bip174 added in 1.23.0 (FEAT-035 Stream D).
-LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 daemon wif"
+LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 bip380 daemon wif"
 
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
 # Each entry is "<alias>=<canonical>".
-DEPRECATED_ALIASES="mnemonic-to-seed=bip39 psbt=bip174 bech32=bip173"
+DEPRECATED_ALIASES="mnemonic-to-seed=bip39 psbt=bip174 bech32=bip173 descriptor=bip380"
 
 @test "every command: verb has a bitcoin-<verb>.1 source file" {
 	for v in $COMMAND_VERBS; do
@@ -103,6 +106,10 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-bip174.1"
 }
 
+@test "bitcoin-bip380.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-bip380.1"
+}
+
 @test "bitcoin-wif.1 has all required sections" {
 	assert_sections "$MAN_DIR/bitcoin-wif.1"
 }
@@ -125,8 +132,10 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-backend.1"
 }
 
-@test "bitcoin-descriptor.1 has all required sections" {
-	assert_sections "$MAN_DIR/bitcoin-descriptor.1"
+@test "bitcoin-descriptor.1 is a .so-include alias to bitcoin-bip380.1" {
+	# FEAT-041 alias convention (Stream B made descriptor partially
+	# deprecated — checksum/verify/derive forward to bip380).
+	grep -qE '^\.so man1/bitcoin-bip380\.1$' "$MAN_DIR/bitcoin-descriptor.1"
 }
 
 @test "bitcoin-psbt.1 is a .so-include alias to bitcoin-bip174.1" {
@@ -147,7 +156,7 @@ assert_sections() {
 @test "BIP-plugin pages carry .SH STANDARDS" {
 	# Deprecated-alias pages (.so includes) inherit STANDARDS from
 	# their canonical, so we skip them here.
-	for v in bip13 bip32 bip39 bip173 bip174 bip350 descriptor wif; do
+	for v in bip13 bip32 bip39 bip173 bip174 bip350 bip380 wif; do
 		grep -qE "^\.SH STANDARDS$" "$MAN_DIR/bitcoin-$v.1" \
 			|| { echo "$MAN_DIR/bitcoin-$v.1: missing .SH STANDARDS"; return 1; }
 	done
