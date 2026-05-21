@@ -11,6 +11,16 @@ Schnorr/Taproot (1.26.0). No new cryptographic behavior; no new
 BIP implementations; the existing vector suite must pass
 byte-for-byte against both old and new verb names.
 
+## Status
+
+| Feature | Status | PRs |
+|---------|--------|-----|
+| FEAT-035 streamline (psbt→bip174, descriptor→bip380, bech32→bip173/bip350, mnemonic-to-seed fold) | ✅ shipped | #34 (A), #35 (C), #36 (D), #37 (C2), #38 (B) |
+| FEAT-041 per-subcommand man-page convention | ✅ shipped | #33 |
+| FEAT-038 tax-label vocabulary | open | next in queue |
+| FEAT-036 `bitcoin tx` object verb | open | unblocked by FEAT-035 |
+| FEAT-037 `bitcoin utxo` object verb | open | independent |
+
 ## What lands
 
 1. **FEAT-035 — command-surface streamline.** Rename `psbt` →
