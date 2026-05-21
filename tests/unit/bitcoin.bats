@@ -416,7 +416,7 @@ STUB
 
 @test "FEAT-009 — descriptor checksum matches BIP-380 test vector" {
 	# Spec test vector: raw(deadbeef) → raw(deadbeef)#89f8spxm
-	run "$BITCOIN_BIN" descriptor checksum "raw(deadbeef)"
+	run "$BITCOIN_BIN" bip380 checksum "raw(deadbeef)"
 	[ "$status" -eq 0 ]
 	[ "$output" = "raw(deadbeef)#89f8spxm" ]
 }
@@ -424,30 +424,30 @@ STUB
 @test "FEAT-009 — descriptor checksum is idempotent on an already-checksummed string" {
 	# Passing a string that already ends in `#<8 chars>` should
 	# replace the suffix with the freshly-computed checksum.
-	run "$BITCOIN_BIN" descriptor checksum "raw(deadbeef)#00000000"
+	run "$BITCOIN_BIN" bip380 checksum "raw(deadbeef)#00000000"
 	[ "$status" -eq 0 ]
 	[ "$output" = "raw(deadbeef)#89f8spxm" ]
 }
 
 @test "FEAT-009 — descriptor verify accepts a valid checksum" {
-	run "$BITCOIN_BIN" descriptor verify "raw(deadbeef)#89f8spxm"
+	run "$BITCOIN_BIN" bip380 verify "raw(deadbeef)#89f8spxm"
 	[ "$status" -eq 0 ]
 }
 
 @test "FEAT-009 — descriptor verify rejects a tampered checksum" {
 	# Flip one char of a known-good checksum.
-	run "$BITCOIN_BIN" descriptor verify "raw(deadbeef)#89f8spxq"
+	run "$BITCOIN_BIN" bip380 verify "raw(deadbeef)#89f8spxq"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-009 — descriptor verify rejects a missing checksum" {
-	run "$BITCOIN_BIN" descriptor verify "raw(deadbeef)"
+	run "$BITCOIN_BIN" bip380 verify "raw(deadbeef)"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-009 — descriptor checksum rejects a non-INPUT_CHARSET character" {
 	# £ is outside BIP-380's INPUT_CHARSET (ASCII-only).
-	run "$BITCOIN_BIN" descriptor checksum "raw(£)"
+	run "$BITCOIN_BIN" bip380 checksum "raw(£)"
 	[ "$status" -ne 0 ]
 }
 
@@ -1885,7 +1885,7 @@ EOF
 	# Shape: wpkh(<xpub>/0/*)#<8-char checksum>
 	[[ "$output" =~ ^wpkh\(xpub[0-9A-Za-z]+/0/\*\)#[a-z0-9]{8}$ ]]
 	# And descriptor verify accepts what wallet emits.
-	run "$BITCOIN_BIN" descriptor verify "$output"
+	run "$BITCOIN_BIN" bip380 verify "$output"
 	[ "$status" -eq 0 ]
 }
 
@@ -1898,7 +1898,7 @@ EOF
 @test "FEAT-026 — descriptor derive reproduces wallet derive on the abandon-mnemonic vector" {
 	setup_wallet_derive_env
 	desc="$("$BITCOIN_BIN" descriptor wallet alice)"
-	run "$BITCOIN_BIN" descriptor derive "$desc" 0
+	run "$BITCOIN_BIN" bip380 derive "$desc" 0
 	[ "$status" -eq 0 ]
 	# Canonical BIP-84 first-receive address for the abandon mnemonic.
 	[ "$output" = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu" ]
@@ -1910,7 +1910,7 @@ EOF
 	# Compare descriptor derive against wallet derive for indices 0, 1, 2.
 	for i in 0 1 2; do
 		expected="$("$BITCOIN_BIN" wallet derive alice)"
-		got="$("$BITCOIN_BIN" descriptor derive "$desc" "$i")"
+		got="$("$BITCOIN_BIN" bip380 derive "$desc" "$i")"
 		[ "$got" = "$expected" ]
 	done
 }
@@ -1921,7 +1921,7 @@ EOF
 	setup_wallet_derive_env
 	body="$(alice_xpub_path)"
 	for fn in tr combo; do
-		run "$BITCOIN_BIN" descriptor derive "${fn}($body)" 0
+		run "$BITCOIN_BIN" bip380 derive "${fn}($body)" 0
 		[ "$status" -ne 0 ]
 		[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]] || true
 	done
@@ -1933,13 +1933,13 @@ EOF
 	desc="$("$BITCOIN_BIN" descriptor wallet alice)"
 	# Strip the '/*' to leave a non-instantiable path.
 	bad="${desc/\/\*/}"
-	run "$BITCOIN_BIN" descriptor derive "$bad" 0
+	run "$BITCOIN_BIN" bip380 derive "$bad" 0
 	[ "$status" -ne 0 ]
 	# Empty descriptor.
-	run "$BITCOIN_BIN" descriptor derive "" 0
+	run "$BITCOIN_BIN" bip380 derive "" 0
 	[ "$status" -ne 0 ]
 	# Non-numeric index.
-	run "$BITCOIN_BIN" descriptor derive "$desc" notanint
+	run "$BITCOIN_BIN" bip380 derive "$desc" notanint
 	[ "$status" -ne 0 ]
 }
 
@@ -1948,7 +1948,7 @@ EOF
 	desc="$("$BITCOIN_BIN" descriptor wallet alice)"
 	# Flip one character of the checksum.
 	bad="${desc:0: ${#desc}-1}q"
-	run "$BITCOIN_BIN" descriptor derive "$bad" 0
+	run "$BITCOIN_BIN" bip380 derive "$bad" 0
 	[ "$status" -ne 0 ]
 }
 
@@ -1987,7 +1987,7 @@ alice_xpub_path() {
 @test "FEAT-026 — descriptor derive pkh() produces a legacy P2PKH '1...' address" {
 	setup_wallet_derive_env
 	body="$(alice_xpub_path)"
-	run "$BITCOIN_BIN" descriptor derive "pkh($body)" 0
+	run "$BITCOIN_BIN" bip380 derive "pkh($body)" 0
 	[ "$status" -eq 0 ]
 	# Cross-verified vector for the abandon mnemonic / BIP-84 idx 0.
 	[ "$output" = "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso" ]
@@ -1998,7 +1998,7 @@ alice_xpub_path() {
 @test "FEAT-026 — descriptor derive sh(wpkh()) produces a P2SH '3...' nested-segwit address" {
 	setup_wallet_derive_env
 	body="$(alice_xpub_path)"
-	run "$BITCOIN_BIN" descriptor derive "sh(wpkh($body))" 0
+	run "$BITCOIN_BIN" bip380 derive "sh(wpkh($body))" 0
 	[ "$status" -eq 0 ]
 	# Cross-verified vector.
 	[ "$output" = "3GtVZYzsKF6Feikdjd4bDyPdAiyeHANY9b" ]
@@ -2010,14 +2010,14 @@ alice_xpub_path() {
 	body="$(alice_xpub_path)"
 	# Distinct addresses across indices — the same pubkey can't appear
 	# twice unless derivation is broken.
-	pkh_0="$("$BITCOIN_BIN" descriptor derive "pkh($body)" 0)"
-	pkh_1="$("$BITCOIN_BIN" descriptor derive "pkh($body)" 1)"
+	pkh_0="$("$BITCOIN_BIN" bip380 derive "pkh($body)" 0)"
+	pkh_1="$("$BITCOIN_BIN" bip380 derive "pkh($body)" 1)"
 	[ "$pkh_0" != "$pkh_1" ]
-	sh_0="$("$BITCOIN_BIN" descriptor derive "sh(wpkh($body))" 0)"
-	sh_1="$("$BITCOIN_BIN" descriptor derive "sh(wpkh($body))" 1)"
+	sh_0="$("$BITCOIN_BIN" bip380 derive "sh(wpkh($body))" 0)"
+	sh_1="$("$BITCOIN_BIN" bip380 derive "sh(wpkh($body))" 1)"
 	[ "$sh_0" != "$sh_1" ]
 	# And the three function families never collide on the same index.
-	wpkh_0="$("$BITCOIN_BIN" descriptor derive "wpkh($body)" 0)"
+	wpkh_0="$("$BITCOIN_BIN" bip380 derive "wpkh($body)" 0)"
 	[ "$pkh_0" != "$sh_0" ]
 	[ "$pkh_0" != "$wpkh_0" ]
 	[ "$sh_0"  != "$wpkh_0" ]
@@ -2027,7 +2027,7 @@ alice_xpub_path() {
 	setup_wallet_derive_env
 	body="$(alice_xpub_path)"
 	# sh(pkh(...)) is a valid BIP-380 descriptor; we just don't ship it.
-	run "$BITCOIN_BIN" descriptor derive "sh(pkh($body))" 0
+	run "$BITCOIN_BIN" bip380 derive "sh(pkh($body))" 0
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]] || true
 }
@@ -2038,10 +2038,10 @@ alice_xpub_path() {
 	# Slap a checksum on each new-style descriptor and confirm derive
 	# accepts the checksummed form.
 	for d in "pkh($body)" "sh(wpkh($body))"; do
-		cs="$("$BITCOIN_BIN" descriptor checksum "$d")"
-		run "$BITCOIN_BIN" descriptor verify "$cs"
+		cs="$("$BITCOIN_BIN" bip380 checksum "$d")"
+		run "$BITCOIN_BIN" bip380 verify "$cs"
 		[ "$status" -eq 0 ]
-		run "$BITCOIN_BIN" descriptor derive "$cs" 0
+		run "$BITCOIN_BIN" bip380 derive "$cs" 0
 		[ "$status" -eq 0 ]
 	done
 }
@@ -2051,12 +2051,12 @@ alice_xpub_path() {
 	# No '*' placeholder.
 	body="$(alice_xpub_path)"
 	bad="${body/\/\*/}"
-	run "$BITCOIN_BIN" descriptor derive "pkh($bad)" 0
+	run "$BITCOIN_BIN" bip380 derive "pkh($bad)" 0
 	[ "$status" -ne 0 ]
-	run "$BITCOIN_BIN" descriptor derive "sh(wpkh($bad))" 0
+	run "$BITCOIN_BIN" bip380 derive "sh(wpkh($bad))" 0
 	[ "$status" -ne 0 ]
 	# Bare key (no '/path').
-	run "$BITCOIN_BIN" descriptor derive "pkh(xpubBareKey)" 0
+	run "$BITCOIN_BIN" bip380 derive "pkh(xpubBareKey)" 0
 	[ "$status" -ne 0 ]
 }
 
