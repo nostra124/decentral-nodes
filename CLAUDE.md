@@ -108,13 +108,18 @@ the condition and the offending value. See
 A PR lands the moment CI is green. Two modes are
 documented in `skills/automerging.md`:
 
-- **Mode A** — GitHub auto-merge, when *Allow
-  auto-merge* is enabled at the repo level.
+- **Mode A** — GitHub auto-merge via
+  `mcp__github__enable_pr_auto_merge`. **This is the
+  current default for this repo.** *Allow auto-merge*
+  is on at the repo level; every PR an agent opens
+  should be marked ready-for-review and armed with
+  auto-merge before the agent ends its turn.
 - **Mode B** — agent subscribed via
   `mcp__github__subscribe_pr_activity`, merges on the
-  green CI event. **This is the current default for
-  this repo** because Mode A is off at the org/repo
-  level.
+  green CI event. Fallback when Mode A is unavailable
+  (e.g. branch-protection check that auto-merge can't
+  evaluate, or a one-off PR where the author wants to
+  watch CI by hand).
 
 If CI fails, file a BUG (per §3 and `skills/bugs.md`)
 — never bypass the gate or disable failing tests. See
