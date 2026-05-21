@@ -120,6 +120,10 @@ bip39 (mnemonic) commands:
    create [bits|ent]       create the mnemonic based on bitlenght or entropy
    check <mnemonic>        check the validity of the given mnemonic
    seed <mnemonic>         creates the seed based on the given mnemonic (hex)
+   mnemonic-to-seed [words]
+                           seed in binary form (BIP-39 §From mnemonic to seed).
+                           Permissive on checksum; strict on word count.
+                           Reads words from argv or first stdin line.
 
 ENDHELP
 	fi
@@ -228,6 +232,45 @@ command:seed() {
 			-kdfopt iter:2048 \
 			PBKDF2 | xxd -p -c 256
 	fi
+}
+
+# FEAT-035: bip39 mnemonic-to-seed — binary form of the seed
+# subcommand. Matches the historical standalone
+# libexec/bitcoin/mnemonic-to-seed plugin that this folds in.
+# Permissive on checksum (does not require BIP-39 §3 word-count
+# checksum match), strict on word count. Output is binary.
+command:mnemonic-to-seed() {
+	local -a words
+	local line n valid=0 mnemonic salt
+	if [ $# -gt 0 ]; then
+		words=( "$@" )
+	else
+		if [ -t 0 ]; then
+			error "no mnemonic provided (give words on argv or pipe via stdin)"
+			exit 2
+		fi
+		read -r line || { error "stdin closed before mnemonic was read"; exit 3; }
+		# shellcheck disable=SC2206
+		words=( $line )
+	fi
+	for n in 12 15 18 21 24; do
+		(( ${#words[@]} == n )) && valid=1
+	done
+	if (( !valid )); then
+		error "expected 12 15 18 21 24 words; got ${#words[@]}"
+		exit 4
+	fi
+	mnemonic="${words[*]}"
+	salt="mnemonic${BIP39_PASSPHRASE:-}"
+	openssl kdf \
+		-keylen 64 \
+		-kdfopt "digest:SHA512" \
+		-kdfopt "pass:$mnemonic" \
+		-kdfopt "salt:$salt" \
+		-kdfopt "iter:2048" \
+		-binary \
+		PBKDF2 \
+		|| { error "openssl PBKDF2 failed (need openssl >= 3.0 with kdf subcommand)"; exit 5; }
 }
 
 #------------------------------------------------------------------------------

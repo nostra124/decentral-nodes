@@ -70,9 +70,20 @@ Validate a mnemonic's word count (must be one of 12, 15, 18, 21,
 .BI "seed " mnemonic
 Apply PBKDF2-HMAC-SHA512 (salt =
 .BR "mnemonic" + passphrase ,
-2048 iterations, 64-byte output) to the mnemonic and write the
-binary seed to stdout. Equivalent to piping the mnemonic into
-.BR bitcoin-mnemonic-to-seed (1).
+2048 iterations, 64-byte output) to the mnemonic; output is hex.
+Validates the BIP-39 §3 checksum before deriving.
+.TP
+.BR "mnemonic-to-seed " [ word " ...]"
+Binary form of
+.BR seed
+(suitable for piping into
+.BR "bitcoin bip32 create" ).
+Reads words from positional args or from the first stdin line if
+no args are given. Permissive on checksum (validates word count
+only) so that out-of-spec test vectors pass through. Subsumes the
+deprecated standalone
+.B bitcoin mnemonic-to-seed
+verb (FEAT-035, 1.23.0).
 
 .SH EXIT STATUS
 .TP
@@ -122,4 +133,10 @@ at
 
 .SH HISTORY
 Plugin introduced in bitcoin 1.0.0. Man page added in 1.23.0
-(FEAT-041).
+(FEAT-041). The
+.B mnemonic-to-seed
+subcommand was folded in from the standalone
+.B libexec/bitcoin/mnemonic-to-seed
+plugin in 1.23.0 (FEAT-035); the standalone verb remains as a
+deprecated alias that emits a warn line and forwards here until
+1.24.0.
