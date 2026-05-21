@@ -110,6 +110,11 @@ New bats cases:
    `docs/command-surface.md`.
 6. New bats coverage with a local HTTP mock so unit-tier
    tests don't hit real APIs.
+7. Ships `share/man/man1/bitcoin-price.1` per the FEAT-041
+   convention; FILES section documents
+   `~/.bitcoin/cache/price/btc-eur.tsv` and the "00:00 UTC
+   snapshot" convention; STANDARDS section cites the chosen
+   price-source endpoints with their documentation URLs.
 
 ## Out of scope
 

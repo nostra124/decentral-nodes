@@ -106,3 +106,8 @@ New bats cases:
    include the `tx` namespace.
 6. `tx sign` reads the seed via `secret get`, never reads any
    privkey from disk or args.
+7. Ships `share/man/man1/bitcoin-tx.1` per the FEAT-041
+   convention (10-section structure; SEE ALSO cross-refs
+   `bitcoin-bip174(1)`, `bitcoin-utxo(1)`, `bitcoin-wallet(1)`).
+   Deprecated `wallet build / sign / broadcast` aliases each
+   get a `.so`-include alias page.

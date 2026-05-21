@@ -41,14 +41,23 @@ byte-for-byte against both old and new verb names.
    transaction outputs. **No reporting yet** — that's FEAT-039
    in 1.25.0.
 
+5. **FEAT-041 — per-subcommand man-page convention.** Pins
+   the format (`groff -man`, matching the existing
+   `bitcoin.1`), the naming (`bitcoin-<verb>(1)`, like
+   `git-status(1)`), the 10-section structure, and the
+   `.so`-include strategy for deprecated aliases. Lands the
+   first batch of per-subcommand pages alongside FEAT-035 in
+   PR 1; FEAT-036 / 037 / 038 ship their own pages in their
+   own PRs. Future verbs (1.24.0+) inherit the convention.
+
 ## PR sequence (smallest-first)
 
 | PR | Contains                                          | Notes |
 |----|---------------------------------------------------|-------|
-| 1  | FEAT-035 streamline (renames + aliases)           | Mechanical rename; vector tests prove no behavior change. Smallest, most reviewable. |
-| 2  | FEAT-038 tax-label vocabulary                     | Pure addition to `wallet label`; no migration of existing labels needed (taxonomy is open-set today, becomes the closed-set going forward with a `--free-text` escape hatch for back-compat). |
-| 3  | FEAT-036 `tx` object verb                         | Largest extraction; touches build/sign/broadcast call paths. Depends on PR 1's `bip174` rename being in. |
-| 4  | FEAT-037 `utxo` object verb                       | Extracts `wallet index`; smaller than `tx` but lands after to keep PR 3's diff focused. |
+| 1  | FEAT-035 streamline + FEAT-041 convention + first man-page batch | Mechanical rename; vector tests prove no behavior change. Ships `bitcoin-bipXXX(1)` for every plugin + `.so`-include alias pages for `psbt` / `descriptor` / `mnemonic-to-seed`. Updates `bitcoin(1)` with a `.SH COMMANDS` cross-reference section. |
+| 2  | FEAT-038 tax-label vocabulary + `bitcoin-wallet(1)` / `bitcoin-tax(1)` updates | Pure addition to `wallet label`; no migration of existing labels needed (taxonomy is open-set today, becomes the closed-set going forward with a `--free-text` escape hatch for back-compat). |
+| 3  | FEAT-036 `tx` object verb + `bitcoin-tx(1)` + alias pages | Largest extraction; touches build/sign/broadcast call paths. Depends on PR 1's `bip174` rename being in. |
+| 4  | FEAT-037 `utxo` object verb + `bitcoin-utxo(1)` + alias page | Extracts `wallet index`; smaller than `tx` but lands after to keep PR 3's diff focused. |
 
 ## Depends on
 
@@ -82,6 +91,13 @@ byte-for-byte against both old and new verb names.
 - `bitcoin wallet label <wallet> <txid:vout> --tax
   self-transfer` persists the tag and is readable back by
   `wallet label --show`.
+- Every verb listed in `bitcoin modules` has a corresponding
+  `bitcoin-<verb>(1)` that `man -w` resolves to after `make
+  install`; `bitcoin(1)` `.SH COMMANDS` lists them all.
+- `man bitcoin-psbt` / `bitcoin-descriptor` /
+  `bitcoin-mnemonic-to-seed` render the canonical
+  `bitcoin-bip174(1)` / `bitcoin-bip380(1)` / `bitcoin-bip39(1)`
+  pages (via `.so` include).
 - Pre-push hook + CI green on each milestone PR.
 
 ## Why this shape

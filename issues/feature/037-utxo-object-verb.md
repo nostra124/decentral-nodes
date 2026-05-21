@@ -94,3 +94,7 @@ New bats cases:
    selection whose sum equals `<sats>` exactly when an exact
    subset exists, falling back to greedy when none does.
 6. New bats coverage; full vector suite + pre-push hook green.
+7. Ships `share/man/man1/bitcoin-utxo.1` per the FEAT-041
+   convention; FILES section documents
+   `~/.bitcoin/wallets/<name>/frozen.tsv`. Deprecated `wallet
+   index` alias gets a `.so`-include alias page.

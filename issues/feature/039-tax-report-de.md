@@ -155,6 +155,11 @@ Each fixture has an expected `disposals.csv` checked into
    output file and is not configurable away.
 9. All seven test fixtures' expected CSVs match
    byte-for-byte.
+10. `bitcoin-tax(1)` is extended to document `report-de` in
+    full per the FEAT-041 convention — every flag, every output
+    file, every fixture's expected behavior, the
+    Spekulationsfrist + Verlustverrechnung legal references,
+    and the non-removable disclaimer.
 
 ## Depends on
 

@@ -104,6 +104,30 @@ The alias emits a `warn` line per `skills/logging.md` naming
 the canonical form. The alias is removed in the next minor
 release (1.24.0 removes the 1.23.0 aliases).
 
+## Man pages
+
+Every shipping verb has a `bitcoin-<verb>(1)` man page,
+matching the `git-status(1)` convention. The parent
+`bitcoin(1)` lists them all in `.SH COMMANDS` with
+cross-references.
+
+Format is `groff -man` (matching the existing
+`share/man/man1/bitcoin.1`); pages live at
+`share/man/man1/bitcoin-<verb>.1` and the Makefile globs them
+into `$MANDIR/man1/` at install time.
+
+Deprecated aliases ship as one-line pages that `.so`-include
+their canonical (e.g. `bitcoin-psbt.1` → `.so
+man1/bitcoin-bip174.1`) so `man bitcoin-<alias>` keeps
+working until the alias is removed.
+
+Pages are hand-written, not generated from `--help` — terse
+help output and discursive documentation are two different
+voices.
+
+Full convention pinned in FEAT-041; first batch lands with
+FEAT-035 in 1.23.0.
+
 ## Non-goals for the streamline
 
 - **No behavior changes** in 1.23.0. The streamline is rename +

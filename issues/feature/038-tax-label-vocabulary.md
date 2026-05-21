@@ -109,6 +109,11 @@ New bats cases:
 4. `tax label` shorthand works as documented.
 5. The free-text label path continues to work unchanged.
 6. New bats coverage; full suite green.
+7. `bitcoin-wallet(1)` is updated to document `label --tax`
+   with the full 13-category taxonomy in `.SH OPTIONS`, and
+   `bitcoin-tax(1)` is created (initially documenting only the
+   `label` shorthand; `report-de` is added in 1.25.0 with
+   FEAT-039). Both per the FEAT-041 convention.
 
 ## Why now (1.23.0, not 1.25.0)
 

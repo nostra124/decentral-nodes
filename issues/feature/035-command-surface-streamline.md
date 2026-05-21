@@ -46,6 +46,8 @@ Each new plugin gets:
   BIP citation at the top of the file (per repo convention).
 - Its own `tests/vectors/bipXXX.bats` driven from the BIP's
   appendix vectors.
+- Its own `share/man/man1/bitcoin-bipXXX.1` per the FEAT-041
+  convention (10-section structure, BIP cite in STANDARDS).
 - Logging helpers defined inline per `skills/logging.md` §4 (no
   shared library — per CLAUDE.md §4 no-shared-lib policy).
 
@@ -57,6 +59,10 @@ line on stderr naming the canonical form:
     bitcoin psbt decode
     # → warn: 'psbt' is deprecated since 1.23.0; use 'bip174'.
     # … then runs bip174 decode unchanged.
+
+Each alias also ships a one-line `share/man/man1/bitcoin-<alias>.1`
+that `.so`-includes the canonical man page (per FEAT-041
+convention) so `man bitcoin-psbt` keeps working.
 
 Aliases are removed in 1.24.0. The `warn` line cites the
 removal release so users have one release-cycle of notice.
@@ -112,3 +118,7 @@ New bats cases for each rename:
    assert: object verbs never reach past `bipXXX` plugins to
    reimplement crypto; `bipXXX` plugins never call each other
    or read wallet state.
+7. Every new `bipXXX` plugin and every deprecated alias ships
+   with `share/man/man1/bitcoin-<verb>.1` per FEAT-041; the
+   top-level `bitcoin(1)` `.SH COMMANDS` section is updated to
+   list them.
