@@ -1,37 +1,43 @@
 #!/bin/sh
 # install template for per-script repos (FEAT-191 autoconf umbrella).
 #
+# Standalone equivalent of `rpk install bitcoin`: runs the same
+# stow-based deploy into the rpk-convention prefix ($HOME/.local for
+# non-root, /usr/local for root), but without requiring rpk to be
+# installed. No --prefix knob — the rpk convention is the only
+# supported layout.
+#
 # One-line bootstrap:
-#   curl -sSL https://github.com/nostra124/<pkg>/raw/master/install \
-#     | bash -s -- --prefix=$HOME/.local
+#   curl -sSL https://github.com/nostra124/<pkg>/raw/master/install | sh
 #
 # Or with a clone:
 #   git clone https://github.com/nostra124/<pkg>
 #   cd <pkg>
-#   ./install --prefix=$HOME/.local
+#   ./install
 
 set -e
 
 PACKAGE='bitcoin'   # render-time substitution at PR-create time
 REPO="https://github.com/nostra124/$PACKAGE"
 BRANCH="master"
-PREFIX=""
 
 usage() {
 	cat <<EOF
 Usage: $0 [options]
 
-  --prefix=PATH    install prefix
   --repo=URL       upstream git repo (default: $REPO)
   --branch=NAME    branch to install (default: $BRANCH)
   --help           this message
+
+Installs via stow into the rpk-convention prefix:
+  \$HOME/.local      (non-root)
+  /usr/local         (root)
 EOF
 	exit 0
 }
 
 for arg in "$@"; do
 	case "$arg" in
-		--prefix=*) PREFIX="${arg#--prefix=}" ;;
 		--repo=*)   REPO="${arg#--repo=}" ;;
 		--branch=*) BRANCH="${arg#--branch=}" ;;
 		--help|-h)  usage ;;
@@ -50,10 +56,8 @@ else
 	cd "$tmp/$PACKAGE"
 fi
 
-if [ -n "$PREFIX" ]; then
-	./configure --prefix="$PREFIX"
-else
-	./configure
-fi
-
+# configure verifies bash/stow/git, renders Makefile against the
+# rpk-convention prefix; `make install` builds the build/$PACKAGE
+# mirror and stows it into the prefix.
+./configure
 make install
