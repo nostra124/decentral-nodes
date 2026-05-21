@@ -1,0 +1,98 @@
+.\" Manpage for bitcoin-wif(1) — Wallet Import Format.
+.TH BITCOIN-WIF 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+
+.SH NAME
+bitcoin\-wif \- Wallet Import Format (WIF) encode and decode
+
+.SH SYNOPSIS
+.B bitcoin wif
+.RI [ options ]
+.B encode
+.RI [ -t "] [" -p ]
+.br
+.B bitcoin wif
+.RI [ options ]
+.B decode
+.br
+.B bitcoin wif help
+.RI [ command ]
+
+.SH DESCRIPTION
+.B bitcoin wif
+implements the Wallet Import Format encoding used to ship private
+keys in a human-typeable, checksummed string.
+
+The encoder reads a 32-byte private key (hex on stdin) and emits
+the WIF string. With
+.BR -p
+the input is treated as a public key (no version-byte prepended;
+the standard "public-key WIF" form). With
+.BR -t
+the test-net version byte is used.
+
+The decoder reads a WIF string from stdin and emits the raw
+32-byte private key (hex) on stdout, verifying the embedded
+checksum.
+
+.SH OPTIONS
+.TP
+.B -d
+Enable debug output (shell trace).
+.TP
+.B -q
+Quiet mode (suppress info logging).
+
+.SH SUBCOMMANDS
+.TP
+.B "encode " [ -t "] [" -p ]
+Encode the input key as a WIF string.
+.RB ( -t
+= testnet,
+.B -p
+= treat input as a public key.)
+.TP
+.B decode
+Decode a WIF string and emit the raw key. Exits non-zero on a
+checksum mismatch.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B \(>=1
+General error or checksum failure. Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10.
+
+.SH FILES
+None. The plugin is stateless.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+Equivalent to
+.BR -d .
+.TP
+.B SELF_QUIET
+Equivalent to
+.BR -q .
+
+.SH STANDARDS
+.IP \(bu 2
+Wallet Import Format \(em the de-facto base58check encoding
+documented in the Bitcoin wiki
+.RB ( https://en.bitcoin.it/wiki/Wallet_import_format ).
+WIF is not a numbered BIP, but is reproduced for reference at
+.IR share/doc/bitcoin/standards/wif.md .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip13 (1),
+.BR bitcoin-bip32 (1)
+
+.SH HISTORY
+Plugin introduced in bitcoin 1.0.0. Man page added in 1.23.0
+(FEAT-041).

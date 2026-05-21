@@ -1537,7 +1537,9 @@ wallet_set_network() {
 	man="$BATS_TEST_DIRNAME/../../share/man/man1/bitcoin.1"
 	[ -s "$man" ]
 	# Each section header is a top-level .SH directive in roff.
-	for section in NAME SYNOPSIS DESCRIPTION OPTIONS SUBCOMMANDS \
+	# COMMANDS replaced SUBCOMMANDS in 1.23.0 per FEAT-041 (compact
+	# cross-reference table pointing at bitcoin-<verb>(1) pages).
+	for section in NAME SYNOPSIS DESCRIPTION OPTIONS COMMANDS \
 		ENVIRONMENT FILES "EXIT STATUS" EXAMPLES STANDARDS "SEE ALSO"; do
 		grep -q "^\\.SH $section\$" "$man"
 	done

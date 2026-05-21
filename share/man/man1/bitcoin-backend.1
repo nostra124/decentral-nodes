@@ -1,0 +1,137 @@
+.\" Manpage for bitcoin-backend(1) — RPC backend selection.
+.TH BITCOIN-BACKEND 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+
+.SH NAME
+bitcoin\-backend \- select and query the chain-data backend
+
+.SH SYNOPSIS
+.B bitcoin backend
+.RI [ "view " | " set " name " | " auto " | " name ]
+.br
+.B bitcoin backend chain-height
+.br
+.B bitcoin backend get-address-utxos
+.I address
+.br
+.B bitcoin backend get-address-txs
+.I address
+.br
+.B bitcoin backend broadcast
+.I tx_hex
+.br
+.B bitcoin backend estimate-fee
+.RI [ blocks ]
+.br
+.B bitcoin backend help
+
+.SH OPTIONS
+.B bitcoin backend
+takes no top-level flags. Per-subcommand semantics are documented
+under SUBCOMMANDS below. The dispatcher honors
+.B $SELF_DEBUG
+and
+.B $SELF_QUIET
+inherited from
+.BR bitcoin (1).
+
+.SH DESCRIPTION
+.B bitcoin backend
+abstracts the chain-data source. Three backends are scaffolded:
+.BR mempool " (mempool.space REST API),"
+.BR bitcoind " (local Bitcoin Core JSON-RPC), and"
+.BR blockstream " (blockstream.info REST API)."
+Only the mempool implementation is wired in this release; calling
+the others' verbs returns a clear "not implemented" error.
+
+The "active backend" is, in priority order, the
+.B BITCOIN_BACKEND
+environment variable, the file
+.IR ~/.config/bitcoin/backend ,
+or the built-in default
+.BR mempool .
+
+.SH SUBCOMMANDS
+.TP
+.B view (default)
+Print the active backend's name.
+.TP
+.BI "set " name
+Set the active backend (writes
+.IR ~/.config/bitcoin/backend ).
+.B name
+is one of
+.BR mempool ", " bitcoind ", " blockstream .
+.TP
+.B auto
+Pick
+.B bitcoind
+if reachable locally, else fall back to
+.BR mempool .
+.TP
+.I name
+Shorthand for
+.BI "set " name "."
+.TP
+.B chain-height
+Print the current chain-tip height as an integer.
+.TP
+.BI "get-address-utxos " address
+Print UTXOs at
+.I address
+as backend-native JSON.
+.TP
+.BI "get-address-txs " address
+Print every tx touching
+.I address
+as a backend-native JSON array. Used by
+.B bitcoin wallet index
+(FEAT-018) to build the wallet's local history.
+.TP
+.BI "broadcast " tx_hex
+POST a raw transaction; print the broadcast txid.
+.TP
+.BR "estimate-fee " [ blocks ]
+Print recommended sat/vB for confirmation in
+.I blocks
+(default 3). Buckets used by the mempool backend:
+.B 1
+(fastest),
+.B 3
+(half-hour),
+.B 6
+(hour),
+.B 144
+(economy), else (minimum).
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B \(>=1
+Backend error. Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10, naming the failing backend.
+
+.SH FILES
+.TP
+.I ~/.config/bitcoin/backend
+Persists the active backend name (one of
+.BR mempool ", " bitcoind ", " blockstream ).
+
+.SH ENVIRONMENT
+.TP
+.B BITCOIN_BACKEND
+Highest-priority override for the active backend. One of
+.BR mempool ", " bitcoind ", " blockstream .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-daemon (1),
+.BR bitcoin-wallet (1)
+
+.SH HISTORY
+Verb introduced in bitcoin 1.0.0. Man page added in 1.23.0
+(FEAT-041).

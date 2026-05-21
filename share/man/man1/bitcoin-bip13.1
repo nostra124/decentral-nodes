@@ -1,0 +1,103 @@
+.\" Manpage for bitcoin-bip13(1) — BIP-13 base58 / base58check.
+.TH BITCOIN-BIP13 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+
+.SH NAME
+bitcoin\-bip13 \- BIP-13 address format primitives (base58 / base58check)
+
+.SH SYNOPSIS
+.B bitcoin bip13
+.RI [ options ]
+.B base58-encode
+.RI [ file ]
+.br
+.B bitcoin bip13
+.RI [ options ]
+.B base58-decode
+.RI [ file ]
+.br
+.B bitcoin bip13 help
+.RI [ command ]
+
+.SH DESCRIPTION
+.B bitcoin bip13
+implements the encoding primitives BIP-13 builds on: plain base58
+(no checksum) for arbitrary binary input and base58 decoding back
+to binary. The hashed-script address format documented in BIP-13
+is composed by callers (e.g.
+.BR bitcoin-wallet (1)
+and
+.BR bitcoin-descriptor (1))
+out of these primitives.
+
+Per the no-shared-library policy (CLAUDE.md §4), this plugin is
+self-contained: it depends only on standard Unix utilities
+.RB ( dc ", " basenc ", " openssl )
+and never reaches for another
+.B bipXXX
+plugin or for wallet state.
+
+.SH OPTIONS
+.TP
+.B -d
+Enable debug output (sets shell trace).
+.TP
+.B -q
+Quiet mode (suppress info logging).
+.TP
+.B -p
+Read BIP-39 passphrase from the controlling terminal.
+
+.SH SUBCOMMANDS
+.TP
+.BR "base58-encode " [ file ]
+Encode the binary
+.I file
+(or stdin if omitted) as a base58 string. No checksum is appended;
+callers that want base58check should append the 4-byte SHA256d
+checksum themselves before encoding.
+.TP
+.BR "base58-decode " [ file ]
+Decode the base58 string in
+.I file
+(or stdin) back to raw bytes on stdout.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+General error (unrecognised subcommand, missing argument).
+.TP
+.B 2
+Input contained a character outside the base58 alphabet.
+
+.SH FILES
+None. The plugin is stateless.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+If non-empty, enables shell trace
+.RB ( "set -vx" )
+on every line. Equivalent to passing
+.BR -d .
+.TP
+.B SELF_QUIET
+If non-empty, suppresses info-level logging. Equivalent to
+.BR -q .
+
+.SH STANDARDS
+.IP \(bu 2
+BIP-13 (Address Format for pay-to-script-hash), shipped at
+.IR share/doc/bitcoin/standards/bip-0013.mediawiki .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip32 (1),
+.BR bitcoin-bip39 (1),
+.BR bitcoin-wif (1)
+
+.SH HISTORY
+Plugin introduced in bitcoin 1.0.0. Man page added in 1.23.0
+(FEAT-041).
