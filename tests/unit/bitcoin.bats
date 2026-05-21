@@ -896,7 +896,7 @@ build_utxo_fixture() {
 	[[ "$output" =~ ^70736274ff ]]
 	# Round-trips through `psbt decode` (BIP-174 magic + section layout
 	# are well-formed end-to-end).
-	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	run bash -c "echo '$output' | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"section=0"* ]]
 	[[ "$output" == *"type=00"* ]]
@@ -915,7 +915,7 @@ build_utxo_fixture() {
 	[ "$status" -eq 0 ]
 	# Decode the global unsigned-tx record and pull out the value (hex).
 	psbt="$output"
-	tx_hex="$(echo "$psbt" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	tx_hex="$(echo "$psbt" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	[ -n "$tx_hex" ]
 	# Tx layout: 4-byte version + varint(in) + inputs + varint(out) + outputs + 4-byte locktime.
 	# Version 02000000, 1 input (varint 01), input = 32-byte txid + 4-byte
@@ -938,7 +938,7 @@ build_utxo_fixture() {
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 50500 02)"
 	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
-	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	# Same offset arithmetic as the previous test: output count at hex 92.
 	out_count_hex="${tx_hex:92:2}"
 	[ "$out_count_hex" = "01" ]
@@ -1005,7 +1005,7 @@ build_utxo_fixture() {
 		'{"fastestFee":50,"halfHourFee":10,"hourFee":5,"economyFee":2,"minimumFee":1}'
 	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
 	[ "$status" -eq 0 ]
-	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	# Change-output LE-encoded value sits right after the recipient
 	# output: version(8) + n_in(2) + 1 input(82) + n_out(2) + recipient
 	# value(16) + push 22 (2) + 22-byte scriptPubKey(44) = 156 hex chars.
@@ -1024,7 +1024,7 @@ build_utxo_fixture() {
 		'{"fastestFee":50,"halfHourFee":10,"hourFee":5,"economyFee":2,"minimumFee":1}'
 	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
-	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	change_le="${tx_hex:156:16}"
 	[ "$change_le" = "c4c2000000000000" ]
 }
@@ -1040,7 +1040,7 @@ build_utxo_fixture() {
 	run --separate-stderr "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
 	[ "$status" -eq 0 ]
 	[[ "$stderr" == *"falling back to 1 sat/vB"* ]]
-	tx_hex="$(echo "$output" | "$BITCOIN_BIN" psbt decode | sed -n '1s/.*value=//p')"
+	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	change_le="${tx_hex:156:16}"
 	[ "$change_le" = "c4c2000000000000" ]
 }
@@ -1057,7 +1057,7 @@ psbt_vec1() {
 }
 
 @test "FEAT-008 — psbt decode accepts a known BIP-174 PSBT and emits records" {
-	run bash -c "$(declare -f psbt_vec1); psbt_vec1 | '$BITCOIN_BIN' psbt decode"
+	run bash -c "$(declare -f psbt_vec1); psbt_vec1 | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -eq 0 ]
 	# At minimum the global unsigned-tx record (section 0, type 00) must appear.
 	[[ "$output" == *"section=0"* ]]
@@ -1066,18 +1066,18 @@ psbt_vec1() {
 
 @test "FEAT-008 — psbt decode rejects input without the BIP-174 magic" {
 	# Strip the 5-byte magic+separator (10 hex chars).
-	run bash -c "$(declare -f psbt_vec1); psbt_vec1 | cut -c11- | '$BITCOIN_BIN' psbt decode"
+	run bash -c "$(declare -f psbt_vec1); psbt_vec1 | cut -c11- | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"magic"* ]] || true
 }
 
 @test "FEAT-008 — psbt decode rejects empty input" {
-	run bash -c "echo '' | '$BITCOIN_BIN' psbt decode"
+	run bash -c "echo '' | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-008 — bitcoin help psbt cites BIP-174" {
-	run "$BITCOIN_BIN" help psbt
+	run "$BITCOIN_BIN" bip174 help
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"BIP-174"* ]]
 	[[ "$output" == *"bip-0174.mediawiki"* ]]
@@ -1091,7 +1091,7 @@ psbt_vec1() {
 # ---------------------------------------------------------------------------
 
 @test "FEAT-008 — psbt encode emits the BIP-174 magic + final terminator for empty input" {
-	run bash -c "echo '' | '$BITCOIN_BIN' psbt encode"
+	run bash -c "echo '' | '$BITCOIN_BIN' bip174 encode"
 	[ "$status" -eq 0 ]
 	[ "$output" = "70736274ff00" ]
 }
@@ -1101,7 +1101,7 @@ psbt_vec1() {
 	# Expected: magic(70736274ff) + varint(1)=01 + key(00)
 	#                            + varint(4)=04 + value(deadbeef)
 	#                            + section-close 00.
-	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=deadbeef\n' | '$BITCOIN_BIN' psbt encode"
+	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=deadbeef\n' | '$BITCOIN_BIN' bip174 encode"
 	[ "$status" -eq 0 ]
 	[ "$output" = "70736274ff010004deadbeef00" ]
 }
@@ -1109,7 +1109,7 @@ psbt_vec1() {
 @test "FEAT-008 — psbt encode bumps sections with 0x00 terminators" {
 	# Two records in different sections.
 	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=aa\nsection=1\ttype=00\tkey=00\tvalue=bb\n' \
-		| '$BITCOIN_BIN' psbt encode"
+		| '$BITCOIN_BIN' bip174 encode"
 	[ "$status" -eq 0 ]
 	# magic + (01 00 01 aa) + 00(close 0) + (01 00 01 bb) + 00(close 1)
 	[ "$output" = "70736274ff010001aa00010001bb00" ]
@@ -1117,21 +1117,21 @@ psbt_vec1() {
 
 @test "FEAT-008 — psbt encode | psbt decode round-trips a TSV with records in every section" {
 	tsv=$(printf 'section=0\ttype=00\tkey=00\tvalue=aa\nsection=1\ttype=00\tkey=00\tvalue=bb\nsection=2\ttype=00\tkey=00\tvalue=cc\n')
-	encoded=$(printf '%s\n' "$tsv" | "$BITCOIN_BIN" psbt encode)
-	decoded=$(echo "$encoded" | "$BITCOIN_BIN" psbt decode)
+	encoded=$(printf '%s\n' "$tsv" | "$BITCOIN_BIN" bip174 encode)
+	decoded=$(echo "$encoded" | "$BITCOIN_BIN" bip174 decode)
 	# Decode emits trailing newline; tsv has none. Compare after
 	# trimming.
 	[ "$(printf '%s\n' "$tsv")" = "$(printf '%s\n' "$decoded")" ]
 }
 
 @test "FEAT-008 — psbt encode rejects non-hex values" {
-	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=notHex!\n' | '$BITCOIN_BIN' psbt encode"
+	run bash -c "printf 'section=0\ttype=00\tkey=00\tvalue=notHex!\n' | '$BITCOIN_BIN' bip174 encode"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-008 — psbt encode rejects a section field that goes backwards" {
 	run bash -c "printf 'section=1\ttype=00\tkey=00\tvalue=aa\nsection=0\ttype=00\tkey=00\tvalue=bb\n' \
-		| '$BITCOIN_BIN' psbt encode"
+		| '$BITCOIN_BIN' bip174 encode"
 	[ "$status" -ne 0 ]
 }
 
@@ -1152,7 +1152,7 @@ psbt_vec1() {
 	# Decode and look for a section=1 type=01 record carrying the
 	# UTXO's value (a086010000000000 = 100000 sats LE) followed by
 	# the 22-byte P2WPKH scriptPubKey for alice's index-0 address.
-	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	run bash -c "echo '$output' | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"section=1	type=01	key=01	value=a086010000000000160014c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2"* ]]
 }
@@ -1188,11 +1188,11 @@ build_alice_psbt() {
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	psbt="$(build_alice_psbt)"
-	run bash -c "echo '$psbt' | '$BITCOIN_BIN' psbt sign '$ALICE_PRIV'"
+	run bash -c "echo '$psbt' | '$BITCOIN_BIN' bip174 sign '$ALICE_PRIV'"
 	[ "$status" -eq 0 ]
 	# Decode and check for the PARTIAL_SIG record. type=02, key includes
 	# alice's compressed pubkey, value is a DER signature + sighash byte.
-	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	run bash -c "echo '$output' | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"section=1	type=02"* ]]
 	[[ "$output" == *"key=02${ALICE_PUB}"* ]]
@@ -1207,8 +1207,8 @@ build_alice_psbt() {
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	psbt="$(build_alice_psbt)"
-	signed="$(echo "$psbt" | "$BITCOIN_BIN" psbt sign "$ALICE_PRIV")"
-	psig="$(echo "$signed" | "$BITCOIN_BIN" psbt decode | awk -F'\t' '/type=02/ {sub("^value=","",$4); print $4; exit}')"
+	signed="$(echo "$psbt" | "$BITCOIN_BIN" bip174 sign "$ALICE_PRIV")"
+	psig="$(echo "$signed" | "$BITCOIN_BIN" bip174 decode | awk -F'\t' '/type=02/ {sub("^value=","",$4); print $4; exit}')"
 	# Strip SIGHASH byte (last 2 hex chars). DER layout:
 	#   30 <total> 02 <r-len> <r> 02 <s-len> <s>
 	# r-len at offset 6; r at offset 8; s marker at offset 8+r_len*2;
@@ -1228,9 +1228,9 @@ build_alice_psbt() {
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	psbt="$(build_alice_psbt)"
-	signed="$(echo "$psbt" | "$BITCOIN_BIN" psbt sign "$ALICE_PRIV")"
+	signed="$(echo "$psbt" | "$BITCOIN_BIN" bip174 sign "$ALICE_PRIV")"
 	# Pull unsigned tx + partial-sig out of the decoded PSBT.
-	dec="$(echo "$signed" | "$BITCOIN_BIN" psbt decode)"
+	dec="$(echo "$signed" | "$BITCOIN_BIN" bip174 decode)"
 	tx_hex="$(echo "$dec" | head -1 | sed 's/.*value=//')"
 	psig="$(echo "$dec" | awk -F'\t' '/type=02/ {sub("^value=","",$4); print $4; exit}')"
 	der_sig="${psig%01}"
@@ -1263,9 +1263,9 @@ build_alice_psbt() {
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	psbt="$(build_alice_psbt)"
 	wrong_key="1111111111111111111111111111111111111111111111111111111111111111"
-	signed="$(echo "$psbt" | "$BITCOIN_BIN" psbt sign "$wrong_key")"
+	signed="$(echo "$psbt" | "$BITCOIN_BIN" bip174 sign "$wrong_key")"
 	# Same input record, no PARTIAL_SIG added.
-	dec="$(echo "$signed" | "$BITCOIN_BIN" psbt decode)"
+	dec="$(echo "$signed" | "$BITCOIN_BIN" bip174 decode)"
 	! echo "$dec" | grep -q 'type=02'
 	# Re-emitted PSBT byte-identical to the input (signer is a pure
 	# re-emit on the no-match branch).
@@ -1273,23 +1273,23 @@ build_alice_psbt() {
 }
 
 @test "FEAT-008 — psbt sign rejects a malformed private key" {
-	run bash -c "echo '70736274ff00' | '$BITCOIN_BIN' psbt sign not-a-hex-key"
+	run bash -c "echo '70736274ff00' | '$BITCOIN_BIN' bip174 sign not-a-hex-key"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"privkey-hex"* ]] || [[ "$stderr" == *"privkey-hex"* ]] || true
 }
 
 @test "FEAT-008 — psbt sign rejects empty stdin" {
-	run bash -c "echo '' | '$BITCOIN_BIN' psbt sign $ALICE_PRIV"
+	run bash -c "echo '' | '$BITCOIN_BIN' bip174 sign $ALICE_PRIV"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-008 — psbt sign rejects non-hex stdin" {
-	run bash -c "echo 'not a psbt' | '$BITCOIN_BIN' psbt sign $ALICE_PRIV"
+	run bash -c "echo 'not a psbt' | '$BITCOIN_BIN' bip174 sign $ALICE_PRIV"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-008 — psbt help mentions sign" {
-	run "$BITCOIN_BIN" help psbt
+	run "$BITCOIN_BIN" bip174 help
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"sign"* ]]
 }
@@ -1313,15 +1313,15 @@ signed_alice_psbt() {
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
-	echo "$psbt" | "$BITCOIN_BIN" psbt sign "$ALICE_PRIV"
+	echo "$psbt" | "$BITCOIN_BIN" bip174 sign "$ALICE_PRIV"
 }
 
 @test "FEAT-008 — psbt finalize adds FINAL_SCRIPTWITNESS for a signed input" {
 	signed="$(signed_alice_psbt)"
-	run bash -c "echo '$signed' | '$BITCOIN_BIN' psbt finalize"
+	run bash -c "echo '$signed' | '$BITCOIN_BIN' bip174 finalize"
 	[ "$status" -eq 0 ]
 	# Decode and check the input section now has type=08 (FINAL_SCRIPTWITNESS).
-	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	run bash -c "echo '$output' | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"section=1	type=08	key=08"* ]]
 	# The witness value starts with varint 0x02 (two stack items).
@@ -1331,8 +1331,8 @@ signed_alice_psbt() {
 
 @test "FEAT-008 — psbt finalize strips PARTIAL_SIG (BIP-174 §Finalizer)" {
 	signed="$(signed_alice_psbt)"
-	finalised="$(echo "$signed" | "$BITCOIN_BIN" psbt finalize)"
-	dec="$(echo "$finalised" | "$BITCOIN_BIN" psbt decode)"
+	finalised="$(echo "$signed" | "$BITCOIN_BIN" bip174 finalize)"
+	dec="$(echo "$finalised" | "$BITCOIN_BIN" bip174 decode)"
 	# After finalize, the input section keeps WITNESS_UTXO (01) and
 	# FINAL_SCRIPTWITNESS (08), drops PARTIAL_SIG (02).
 	! echo "$dec" | grep -q 'type=02'
@@ -1342,8 +1342,8 @@ signed_alice_psbt() {
 
 @test "FEAT-008 — psbt extract emits a segwit raw tx with the marker+flag" {
 	signed="$(signed_alice_psbt)"
-	finalised="$(echo "$signed" | "$BITCOIN_BIN" psbt finalize)"
-	run bash -c "echo '$finalised' | '$BITCOIN_BIN' psbt extract"
+	finalised="$(echo "$signed" | "$BITCOIN_BIN" bip174 finalize)"
+	run bash -c "echo '$finalised' | '$BITCOIN_BIN' bip174 extract"
 	[ "$status" -eq 0 ]
 	# Version 02000000, then segwit marker (00) + flag (01) at hex offset 8.
 	[ "${output:0:8}" = "02000000" ]
@@ -1358,7 +1358,7 @@ signed_alice_psbt() {
 @test "FEAT-008 — psbt extract refuses an unfinalised PSBT" {
 	signed="$(signed_alice_psbt)"
 	# Skip the finalize step → input still has PARTIAL_SIG, no witness.
-	run bash -c "echo '$signed' | '$BITCOIN_BIN' psbt extract"
+	run bash -c "echo '$signed' | '$BITCOIN_BIN' bip174 extract"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"not finalised"* ]] || [[ "$stderr" == *"not finalised"* ]] || true
 }
@@ -1370,10 +1370,10 @@ signed_alice_psbt() {
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
-	run bash -c "echo '$psbt' | '$BITCOIN_BIN' psbt finalize"
+	run bash -c "echo '$psbt' | '$BITCOIN_BIN' bip174 finalize"
 	[ "$status" -eq 0 ]
 	# Same input record blob (no FINAL_SCRIPTWITNESS added).
-	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	run bash -c "echo '$output' | '$BITCOIN_BIN' bip174 decode"
 	! echo "$output" | grep -q 'type=08'
 }
 
@@ -1396,7 +1396,7 @@ signed_alice_psbt() {
 	# The signed PSBT carries a PARTIAL_SIG keyed by alice's compressed
 	# pubkey — same shape as the FEAT-008 psbt-sign test, but reached
 	# via the wallet's seed-derived key rather than a hardcoded hex.
-	run bash -c "echo '$output' | '$BITCOIN_BIN' psbt decode"
+	run bash -c "echo '$output' | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"section=1	type=02"* ]]
 	[[ "$output" == *"key=02${ALICE_PUB}"* ]]

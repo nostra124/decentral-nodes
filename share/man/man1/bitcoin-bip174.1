@@ -1,0 +1,167 @@
+.\" Manpage for bitcoin-bip174(1) — BIP-174 PSBT.
+.TH BITCOIN-BIP174 1 "2026-05-21" "bitcoin 1.23.0" "User Commands"
+
+.SH NAME
+bitcoin\-bip174 \- BIP-174 partially-signed Bitcoin transactions
+
+.SH SYNOPSIS
+.B bitcoin bip174 decode
+.br
+.B bitcoin bip174 encode
+.br
+.B bitcoin bip174 sign
+.I privkey_hex
+.br
+.B bitcoin bip174 finalize
+.br
+.B bitcoin bip174 extract
+.br
+.B bitcoin bip174 help
+
+.SH DESCRIPTION
+.B bitcoin bip174
+implements the BIP-174 Partially Signed Bitcoin Transaction
+format end-to-end: decode hex PSBTs to a tab-separated record
+form, re-encode them back to hex, sign v0 P2WPKH inputs, run the
+finaliser, and extract the broadcastable raw transaction.
+
+PSBT records are documented in BIP-174 as
+.B "(section, type, key, value)"
+tuples; this plugin's
+.B decode
+output mirrors that shape line-by-line so any line-oriented
+toolchain (awk, sed,
+.BR jq -shaped scripts) can manipulate PSBTs without parsing the
+binary format.
+
+This plugin is the canonical home for PSBT primitives as of
+1.23.0 (FEAT-035 Stream D). The previous
+.B bitcoin psbt
+verb continues to work as a deprecated alias that emits one
+.B warn
+line and forwards here; removal target is 1.24.0.
+
+.SH OPTIONS
+.B bitcoin bip174
+takes no top-level flags. The dispatcher honors
+.B $SELF_DEBUG
+and
+.B $SELF_QUIET
+inherited from
+.BR bitcoin (1).
+
+.SH SUBCOMMANDS
+.TP
+.B decode
+Read a PSBT (hex) from stdin and emit one TSV line per key-value
+record:
+.B section=<n> type=<hex> key=<hex> value=<hex> .
+.TP
+.B encode
+Read TSV records (the shape
+.B decode
+emits) from stdin and emit a hex PSBT. Tracks section bumps and
+inserts
+.B 0x00
+terminators between sections; one final
+.B 0x00
+closes the last section.
+.TP
+.BI "sign " "privkey_hex"
+Read a PSBT (hex) from stdin and sign every v0 P2WPKH input whose
+.B WITNESS_UTXO scriptPubKey
+matches
+.B HASH160(pubkey of <privkey>) .
+Re-emits the PSBT with
+.B PSBT_IN_PARTIAL_SIG
+records (BIP-174 type 0x02) inserted per signed input.
+.I privkey_hex
+is a 32-byte hex secret key.
+.B SIGHASH_ALL
+only; ECDSA via
+.B openssl pkeyutl
+over secp256k1; signatures are BIP-66 low-S canonicalised.
+.TP
+.B finalize
+Read a PSBT from stdin, promote every input's first
+.B PSBT_IN_PARTIAL_SIG
+(type 0x02) to a finalised witness via
+.B PSBT_IN_FINAL_SCRIPTWITNESS
+(type 0x08), and re-emit. Per BIP-174 §Finalizer, finalised
+inputs keep only
+.BR WITNESS_UTXO " and " FINAL_SCRIPTWITNESS .
+Inputs without a partial sig pass through unfinalised.
+.TP
+.B extract
+Read a finalised PSBT from stdin and emit the broadcastable
+BIP-141 / BIP-144 segwit raw tx as hex. Refuses if any input
+lacks
+.B FINAL_SCRIPTWITNESS .
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B \(>=1
+General error: malformed PSBT, unsigned input on
+.BR extract ,
+unknown script type on
+.BR sign , etc.
+Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10.
+
+.SH FILES
+None. The plugin is stateless.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+Enables shell trace
+.RB ( "set -vx" ).
+.TP
+.B SELF_QUIET
+Suppresses info-level logging.
+
+.SH STANDARDS
+.IP \(bu 2
+BIP-174 (Partially Signed Bitcoin Transaction Format), shipped
+at
+.IR share/doc/bitcoin/standards/bip-0174.mediawiki .
+.IP \(bu 2
+BIP-141 (Segregated Witness consensus layer) and BIP-144 (segwit
+transaction serialisation), consumed by the
+.B extract
+output format.
+.IP \(bu 2
+BIP-66 (Strict DER signatures), enforced on the low-S
+canonicalisation in
+.BR sign .
+.IP \(bu 2
+BIP-143 (Transaction signature verification for v0 witness
+program), implemented by the sighash computation in
+.BR sign .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip32 (1),
+.BR bitcoin-bip173 (1),
+.BR bitcoin-descriptor (1),
+.BR bitcoin-psbt (1),
+.BR bitcoin-wallet (1)
+
+.SH HISTORY
+Plugin introduced in bitcoin 1.23.0 (FEAT-035 Stream D),
+extracted verbatim from the
+.B command:psbt
+block in
+.BR bin/bitcoin .
+The legacy
+.B bitcoin psbt
+verb continues to work as a deprecated alias until 1.24.0. The
+.B tx
+object verb (FEAT-036) will compose these primitives into
+higher-level wallet flows in a future release.
