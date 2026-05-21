@@ -100,14 +100,25 @@ Hierarchical deterministic key derivation \(em BIP-32.
 .BR bitcoin-bip39 (1)
 Mnemonic generation and validation \(em BIP-39.
 .TP
+.BR bitcoin-bip173 (1)
+Bech32 string encoding \(em BIP-173.
+.TP
+.BR bitcoin-bip350 (1)
+Bech32m string encoding \(em BIP-350.
+.TP
 .BR bitcoin-mnemonic-to-seed (1)
-PBKDF2 seed derivation from a BIP-39 mnemonic.
+PBKDF2 seed derivation from a BIP-39 mnemonic
+(deprecated alias for
+.BR "bitcoin bip39 mnemonic-to-seed" ).
 .TP
 .BR bitcoin-wif (1)
 Wallet Import Format encode / decode.
 .TP
 .BR bitcoin-bech32 (1)
-Bech32 and bech32m encoding \(em BIP-173, BIP-350.
+Bech32 and bech32m encoding (legacy CLI; prefer
+.BR bitcoin-bip173 (1)
+/
+.BR bitcoin-bip350 (1)).
 .TP
 .BR bitcoin-descriptor (1)
 Output script descriptors \(em BIP-380.
@@ -301,6 +312,8 @@ Per-subcommand pages:
 .BR bitcoin-bip13 (1),
 .BR bitcoin-bip32 (1),
 .BR bitcoin-bip39 (1),
+.BR bitcoin-bip173 (1),
+.BR bitcoin-bip350 (1),
 .BR bitcoin-daemon (1),
 .BR bitcoin-descriptor (1),
 .BR bitcoin-mnemonic-to-seed (1),

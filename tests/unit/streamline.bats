@@ -81,3 +81,101 @@ setup() {
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q "mnemonic-to-seed"
 }
+
+# ---------------------------------------------------------------------------
+# Stream C: bech32 → bitcoin bip173 (BIP-173) and bitcoin bip350 (BIP-350)
+#
+# Additive-only in this PR: the new plugins ship side-by-side with
+# the existing `bitcoin bech32*` verbs. No deprecation aliases yet
+# (the bech32 verbs are also called internally by segwitAddress /
+# p2wpkh, so deprecation requires coordinated callsite updates that
+# come in a follow-up).
+# ---------------------------------------------------------------------------
+
+@test "FEAT-035 C — bip173 encode matches the bech32 help-doc vector" {
+	expected="this-part-is-readable-by-a-human1qpzrylhvwcq"
+	run "$BITCOIN_BIN" bip173 encode this-part-is-readable-by-a-human qpzry
+	[ "$status" -eq 0 ]
+	[ "$output" = "$expected" ]
+}
+
+@test "FEAT-035 C — bip173 encode == bitcoin bech32 (same bytes)" {
+	canonical=$("$BITCOIN_BIN" bip173 encode this-part-is-readable-by-a-human qpzry)
+	legacy=$("$BITCOIN_BIN" bech32 this-part-is-readable-by-a-human qpzry)
+	[ "$canonical" = "$legacy" ]
+}
+
+@test "FEAT-035 C — bip173 verify accepts a known-good bech32 vector" {
+	run "$BITCOIN_BIN" bip173 verify this-part-is-readable-by-a-human1qpzrylhvwcq
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-035 C — bip173 verify rejects a tampered checksum" {
+	run "$BITCOIN_BIN" bip173 verify this-part-is-readable-by-a-human1qpzrylhvwcz
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-035 C — bip173 verify rejects a bech32m (BIP-350) string" {
+	run "$BITCOIN_BIN" bip173 verify this-part-is-readable-by-a-human1qpzry2tuzaz
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-035 C — bip173 decode round-trips a known-good vector" {
+	run "$BITCOIN_BIN" bip173 decode this-part-is-readable-by-a-human1qpzrylhvwcq
+	[ "$status" -eq 0 ]
+	# HRP then five 5-bit values for "qpzry" (0, 1, 2, 3, 4).
+	[ "$(echo "$output" | head -1)" = "this-part-is-readable-by-a-human" ]
+	[ "$(echo "$output" | sed -n '2p')" = "0" ]
+	[ "$(echo "$output" | sed -n '6p')" = "4" ]
+}
+
+@test "FEAT-035 C — bip350 encode matches the bech32m help-doc vector" {
+	expected="this-part-is-readable-by-a-human1qpzry2tuzaz"
+	run "$BITCOIN_BIN" bip350 encode this-part-is-readable-by-a-human qpzry
+	[ "$status" -eq 0 ]
+	[ "$output" = "$expected" ]
+}
+
+@test "FEAT-035 C — bip350 encode == bitcoin bech32 -m (same bytes)" {
+	canonical=$("$BITCOIN_BIN" bip350 encode this-part-is-readable-by-a-human qpzry)
+	legacy=$("$BITCOIN_BIN" bech32 -m this-part-is-readable-by-a-human qpzry)
+	[ "$canonical" = "$legacy" ]
+}
+
+@test "FEAT-035 C — bip350 verify accepts a known-good bech32m vector" {
+	run "$BITCOIN_BIN" bip350 verify this-part-is-readable-by-a-human1qpzry2tuzaz
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-035 C — bip350 verify rejects a bech32 (BIP-173) string" {
+	run "$BITCOIN_BIN" bip350 verify this-part-is-readable-by-a-human1qpzrylhvwcq
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-035 C — bip173 encode rejects mixed-case input" {
+	run "$BITCOIN_BIN" bip173 encode SomeHRP qpzry
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-035 C — bip173 encode rejects data outside the charset" {
+	run "$BITCOIN_BIN" bip173 encode somehrp 'qpzryb'
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-035 C — bip173 help lists every subcommand" {
+	run "$BITCOIN_BIN" bip173 help
+	# Help is on stderr, so combine streams via 2>&1 in the run.
+	run bash -c "'$BITCOIN_BIN' bip173 help 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "encode"
+	echo "$output" | grep -q "decode"
+	echo "$output" | grep -q "verify"
+}
+
+@test "FEAT-035 C — bip350 help lists every subcommand" {
+	run bash -c "'$BITCOIN_BIN' bip350 help 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "encode"
+	echo "$output" | grep -q "decode"
+	echo "$output" | grep -q "verify"
+}

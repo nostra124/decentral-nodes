@@ -1,0 +1,105 @@
+.\" Manpage for bitcoin-bip350(1) — BIP-350 bech32m encoding.
+.TH BITCOIN-BIP350 1 "2026-05-21" "bitcoin 1.23.0" "User Commands"
+
+.SH NAME
+bitcoin\-bip350 \- bech32m string encoding (BIP-350)
+
+.SH SYNOPSIS
+.B bitcoin bip350
+.B encode
+.I hrp
+.I data
+.br
+.B bitcoin bip350
+.B decode
+.I string
+.br
+.B bitcoin bip350
+.B verify
+.I string
+.br
+.B bitcoin bip350 help
+
+.SH DESCRIPTION
+.B bitcoin bip350
+implements the bech32m variant of BIP-173 introduced by BIP-350.
+Per BIP-350 §Motivation, the only change from bech32 is the
+polymod's final XOR constant
+.RB ( 0x2bc830a3
+instead of
+.BR 1 );
+the change fixes a property where certain insertion/deletion
+mistakes weren't caught by the original bech32 checksum.
+bech32m is required for SegWit v1+ (Taproot) addresses.
+
+The CLI surface mirrors
+.BR bitcoin-bip173 (1)
+exactly:
+.BR encode ,
+.BR decode ,
+.BR verify .
+A bech32m string is incompatible with the bech32 checksum and
+vice-versa; the two plugins each reject the other's output.
+
+.SH OPTIONS
+.B bitcoin bip350
+takes no top-level flags. The dispatcher honors
+.B $SELF_DEBUG
+and
+.B $SELF_QUIET
+inherited from
+.BR bitcoin (1).
+
+.SH SUBCOMMANDS
+.TP
+.BI "encode " "hrp data"
+Emit a bech32m string from an explicit HRP (1\-83 chars,
+printable ASCII, all-lowercase or all-uppercase) and a
+.I data
+part of characters drawn from the bech32 charset. The 6-char
+bech32m checksum is computed and appended.
+.TP
+.BI "decode " string
+Decode a bech32m string. Validates the bech32m checksum, prints
+the HRP and each 5-bit data value. Rejects bech32 (BIP-173)
+checksums.
+.TP
+.BI "verify " string
+Verify the bech32m checksum of
+.I string
+without producing data. Exits 0 on success; rejects bech32
+strings.
+
+.SH EXIT STATUS
+Same exit-code scheme as
+.BR bitcoin-bip173 (1).
+
+.SH FILES
+None. The plugin is stateless.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+Enables shell trace
+.RB ( "set -vx" ).
+.TP
+.B SELF_QUIET
+Suppresses info-level logging.
+
+.SH STANDARDS
+.IP \(bu 2
+BIP-350 (Bech32m format for v1+ witness addresses), shipped at
+.IR share/doc/bitcoin/standards/bip-0350.mediawiki .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip173 (1),
+.BR bitcoin-bech32 (1),
+.BR bitcoin-descriptor (1)
+
+.SH HISTORY
+Plugin introduced in bitcoin 1.23.0 (FEAT-035 Stream C). The
+deprecated
+.B bitcoin bech32 -m
+verb covers the same encoding via a different CLI shape and
+will alias here in a subsequent release.
