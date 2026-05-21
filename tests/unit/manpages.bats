@@ -32,7 +32,8 @@ COMMAND_VERBS="wallet descriptor psbt bech32 backend"
 # mnemonic-to-seed dropped to DEPRECATED_ALIASES in 1.23.0
 # (FEAT-035): the standalone shim still exists but the canonical
 # subcommand is now `bitcoin bip39 mnemonic-to-seed`.
-LIBEXEC_VERBS="bip13 bip32 bip39 daemon wif"
+# bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).
+LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip350 daemon wif"
 
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
@@ -86,6 +87,14 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-bip39.1"
 }
 
+@test "bitcoin-bip173.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-bip173.1"
+}
+
+@test "bitcoin-bip350.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-bip350.1"
+}
+
 @test "bitcoin-wif.1 has all required sections" {
 	assert_sections "$MAN_DIR/bitcoin-wif.1"
 }
@@ -128,7 +137,7 @@ assert_sections() {
 @test "BIP-plugin pages carry .SH STANDARDS" {
 	# Deprecated-alias pages (.so includes) inherit STANDARDS from
 	# their canonical, so we skip them here.
-	for v in bip13 bip32 bip39 bech32 descriptor psbt wif; do
+	for v in bip13 bip32 bip39 bip173 bip350 bech32 descriptor psbt wif; do
 		grep -qE "^\.SH STANDARDS$" "$MAN_DIR/bitcoin-$v.1" \
 			|| { echo "$MAN_DIR/bitcoin-$v.1: missing .SH STANDARDS"; return 1; }
 	done

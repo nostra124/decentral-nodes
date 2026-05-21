@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+#
+# libexec/bitcoin/bip350 — BIP-350 bech32m encoding.
+#
+# BIP-350 is bech32 (BIP-173) with the polymod's final XOR
+# constant changed from 1 to 0x2bc830a3. Per BIP-350 §Motivation,
+# the change fixes a property of bech32 where certain
+# insertion/deletion mistakes weren't caught by the checksum.
+#
+# This plugin owns the BIP-350 constant only. See
+# libexec/bitcoin/bip173 for the bech32 variant; the two are
+# intentionally duplicated per CLAUDE.md §5 so each is
+# self-contained and BIP-faithful.
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+VERSION='0.1'
+
+die()   { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { [ -z "$SELF_QUIET" ] && echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+has() {
+	local KIND=$1 NAME=$2
+	type -t "$KIND:$NAME" 2>/dev/null | grep -q function
+}
+
+# BIP-173 §Specification: 32-char data alphabet. Position == 5-bit value.
+declare -r BECH32_CHARSET="qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+# BIP-350 §Specification: the polymod XOR constant is 0x2bc830a3.
+# (BIP-173 used 1.) The five polymod generator values below are
+# the same in both BIPs; only the final XOR constant differs.
+declare -ri BECH32_CONST=0x2bc830a3
+
+# Internal polymod. Per BIP-173 §Specification (the five generator
+# values are the same in BIP-350; only the final XOR constant differs).
+_polymod() {
+	local -ai generator=(0x3b6a57b2 0x26508e6d 0x1ea119fa 0x3d4233dd 0x2a1462b3)
+	local -i chk=1 value top i
+	for value; do
+		(( top = chk >> 25, chk = (chk & 0x1ffffff) << 5 ^ value ))
+		for i in {0..4}; do
+			(( ((top >> i) & 1) && (chk ^= generator[i]) )) || true
+		done
+	done
+	echo $chk
+}
+
+# Expand HRP per BIP-350 §Specification (identical to BIP-173):
+# upper 3 bits, separator 0, lower 5 bits.
+_hrp_expand() {
+	local -i p ord
+	for ((p=0; p < ${#1}; ++p)); do
+		printf -v ord "%d" "'${1:p:1}"
+		echo $(( ord >> 5 ))
+	done
+	echo 0
+	for ((p=0; p < ${#1}; ++p)); do
+		printf -v ord "%d" "'${1:p:1}"
+		echo $(( ord & 31 ))
+	done
+}
+
+# Compute the 6-element 5-bit checksum (BIP-350 §Specification).
+_create_checksum() {
+	local hrp="$1"; shift
+	local -i p mod=$(_polymod $(_hrp_expand "$hrp") "$@" 0 0 0 0 0 0)^$BECH32_CONST
+	for p in {0..5}; do
+		echo $(( (mod >> 5 * (5 - p)) & 31 ))
+	done
+}
+
+_verify_checksum() {
+	local hrp="$1"; shift
+	local -i pmod="$(_polymod $(_hrp_expand "$hrp") "$@")"
+	(( pmod == BECH32_CONST ))
+}
+
+# ---- public subcommands ----
+
+command:help() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF <subcommand> [args]
+
+	   encode <hrp> <data>
+	        encode a bech32m string from a printable-ASCII HRP and a
+	        data part of bech32-charset chars (BIP-350 §Specification).
+	   decode <string>
+	        decode a bech32m string; emit HRP on the first line and
+	        each 5-bit data value on subsequent lines.
+	   verify <string>
+	        verify a bech32m string's 6-char checksum; exit 0 on success.
+	   help
+	        this message
+	   version
+	        print plugin version
+
+	BIP-350 (bech32m) implementation. For the original bech32
+	(BIP-173) variant, use $(dirname "$0" | xargs basename) bip173.
+	ENDHELP
+}
+
+command:version() { echo "$VERSION"; }
+
+command:encode() {
+	local hrp="${1,,}" data="${2,,}"
+	if [ -z "$hrp" ] || [ -z "$data" ]; then
+		error "encode: usage: $SELF encode <hrp> <data>"
+		return 2
+	fi
+	if [[ "$1$2" =~ [A-Z] && "$1$2" =~ [a-z] ]]; then
+		error "encode: mixed-case input rejected per BIP-350 §Checksum verification"
+		return 3
+	fi
+	if (( ${#hrp} + ${#data} + 6 > 90 )); then
+		error "encode: HRP+data+checksum exceeds 90 chars (got $((${#hrp} + ${#data} + 6)))"
+		return 4
+	fi
+	if (( ${#hrp} < 1 || ${#hrp} > 83 )); then
+		error "encode: HRP length must be 1..83 (got ${#hrp})"
+		return 5
+	fi
+	local -i ord p
+	for ((p=0; p < ${#hrp}; p++)); do
+		printf -v ord "%d" "'${hrp:p:1}"
+		if (( ord < 33 || ord > 126 )); then
+			error "encode: HRP char at index $p is outside printable ASCII (33..126)"
+			return 6
+		fi
+	done
+	if [[ "$data" =~ [^$BECH32_CHARSET] ]]; then
+		error "encode: data part contains a char outside the bech32 charset"
+		return 7
+	fi
+
+	local -ai data_digits=()
+	for ((p=0; p < ${#data}; p++)); do
+		local c="${data:p:1}"
+		local -i v=-1 j
+		for ((j=0; j<32; j++)); do
+			if [[ "${BECH32_CHARSET:j:1}" == "$c" ]]; then
+				v=$j
+				break
+			fi
+		done
+		data_digits+=( $v )
+	done
+
+	local -ai checksum_digits=( $(_create_checksum "$hrp" "${data_digits[@]}") )
+	echo -n "${hrp}1${data}"
+	local d
+	for d in "${checksum_digits[@]}"; do
+		echo -n "${BECH32_CHARSET:d:1}"
+	done
+	echo
+}
+
+command:verify() {
+	local s="${1:-}"
+	if [ -z "$s" ]; then
+		error "verify: usage: $SELF verify <string>"
+		return 2
+	fi
+	if [[ ! "$s" =~ ^(.{1,83})1([${BECH32_CHARSET}]{6,})$ ]]; then
+		error "verify: string is not a well-formed bech32 (HRP, '1', data)"
+		return 3
+	fi
+	local hrp="${BASH_REMATCH[1]}" data="${BASH_REMATCH[2]::-6}"
+	local re_emitted
+	if ! re_emitted="$(command:encode "$hrp" "$data" 2>/dev/null)"; then
+		error "verify: re-encode failed"
+		return 4
+	fi
+	[[ "$re_emitted" == "$s" ]] \
+		|| { error "verify: checksum mismatch"; return 5; }
+}
+
+command:decode() {
+	local bechString="${1:-}"
+	if [ -z "$bechString" ]; then
+		error "decode: usage: $SELF decode <string>"
+		return 2
+	fi
+	local -i p has_lower=0 has_upper=0 ord
+	for ((p=0; p < ${#bechString}; ++p)); do
+		printf -v ord "%d" "'${bechString:p:1}"
+		if   ((ord < 33 || ord > 126)); then
+			error "decode: char at index $p is outside printable ASCII"
+			return 3
+		elif ((ord >= 97 && ord <= 122)); then has_lower=1
+		elif ((ord >= 65 && ord <= 90));  then has_upper=1
+		fi
+	done
+	if ((has_upper && has_lower)); then
+		error "decode: mixed-case input rejected per BIP-173"
+		return 4
+	fi
+	bechString="${bechString,,}"
+	if ((${#bechString} > 90)); then
+		error "decode: string exceeds 90 chars"
+		return 5
+	fi
+	if [[ ! "$bechString" =~ 1 ]]; then
+		error "decode: no '1' separator"
+		return 6
+	fi
+	local hrp="${bechString%1*}" data="${bechString##*1}"
+	if [ -z "$hrp" ]; then
+		error "decode: empty HRP"
+		return 7
+	fi
+	if ((${#data} < 6)); then
+		error "decode: data part too short (need >= 6 chars for the checksum)"
+		return 8
+	fi
+	declare -Ai reverse
+	for p in {0..31}; do reverse[${BECH32_CHARSET:p:1}]=$p; done
+	local -ai values=()
+	for ((p=0; p < ${#data}; ++p)); do
+		values+=( ${reverse[${data:p:1}]} )
+	done
+	if ! _verify_checksum "$hrp" "${values[@]}"; then
+		error "decode: checksum mismatch"
+		return 9
+	fi
+	echo "$hrp"
+	for ((p=0; p < ${#values[@]} - 6; ++p)); do
+		echo "${values[p]}"
+	done
+}
+
+# ---- dispatch ----
+
+if [[ $# == 0 ]]; then
+	command:help
+	exit 0
+fi
+
+if has command "$1"; then
+	debug "executing command:$1 ${*:2}"
+	"command:$1" "${@:2}"
+	exit $?
+else
+	error "unknown command: '$1' (see '$SELF help')"
+	exit 1
+fi
