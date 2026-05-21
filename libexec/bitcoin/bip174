@@ -28,6 +28,18 @@ has() {
 	type -t "$KIND:$NAME" 2>/dev/null | grep -q function
 }
 
+# Encode a non-negative integer as 4-byte little-endian hex. Used by
+# the BIP-143 sighash computation. Duplicated from bin/bitcoin's
+# wallet:_le32 per CLAUDE.md §5 so the plugin stays self-contained.
+_le32() {
+	local -i n=$1
+	printf '%02x%02x%02x%02x' \
+		$((n & 0xff)) \
+		$(((n >> 8) & 0xff)) \
+		$(((n >> 16) & 0xff)) \
+		$(((n >> 24) & 0xff))
+}
+
 command:help() {
 	cat >&2 <<-ENDHELP
 	usage: $SELF <subcommand> [args]
@@ -469,7 +481,7 @@ psbt:_bip143_sighash() {
 	local hashSequence; hashSequence="$(printf '%s' "$sequences" | psbt:_sha256d_hex)"
 	local hashOutputs;  hashOutputs="$(printf '%s' "$outputs"    | psbt:_sha256d_hex)"
 
-	local sighash_type_le4; sighash_type_le4="$(wallet:_le32 "$((16#$sighash_type))")"
+	local sighash_type_le4; sighash_type_le4="$(_le32 "$((16#$sighash_type))")"
 
 	local preimage=""
 	preimage+="$nVersion_le"
