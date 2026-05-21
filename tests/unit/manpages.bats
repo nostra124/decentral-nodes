@@ -197,12 +197,15 @@ assert_sections() {
 	# `man -l` (BSD-style "local file" mode, supported by both
 	# man-db and mandoc) parses the file as a manpage. If the macro
 	# usage is malformed, man exits non-zero.
+	#
+	# Alias pages (`.so` includes) are NOT covered here: `man -l`
+	# resolves `.so man1/<file>` relative to MANDIR, which isn't
+	# set when invoking on an explicit source path. The earlier
+	# "resolve to canonical via .so" assertion already proves the
+	# include path is well-formed; the canonical's own `man -l`
+	# pass below proves the included file renders.
 	command -v man >/dev/null || skip "man not installed"
-	all_verbs="$COMMAND_VERBS $LIBEXEC_VERBS"
-	for entry in $DEPRECATED_ALIASES; do
-		all_verbs="$all_verbs ${entry%%=*}"
-	done
-	for v in $all_verbs; do
+	for v in $COMMAND_VERBS $LIBEXEC_VERBS; do
 		run man -l "$MAN_DIR/bitcoin-$v.1"
 		[ "$status" -eq 0 ] \
 			|| { echo "man -l failed for bitcoin-$v.1: $output"; return 1; }
