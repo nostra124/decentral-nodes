@@ -320,7 +320,25 @@ command:descriptor() {
 			shift 2>/dev/null || true
 			descriptor:wallet "$@"
 			;;
-		checksum|verify|derive|help)
+		help)
+			# Special case: descriptor help shows the bip380 surface
+			# AND the descriptor:wallet subcommand (which stays in
+			# bin/bitcoin and isn't part of bip380's help).
+			local libexec="${SELF_LIBEXEC:?command:descriptor: SELF_LIBEXEC must be set}"
+			"$libexec/${SELF:-bitcoin}/bip380" help
+			cat >&2 <<-EOF
+
+	Additional subcommand (not in bip380, stays in bin/bitcoin):
+	  wallet <name>     emit a checksummed wpkh(<xpub>/0/*) descriptor for an
+	                    existing wallet. Reads the seed via secret get and
+	                    derives the m/84h/0h/0h xpub via the same pipeline
+	                    wallet derive uses.
+
+	'bitcoin descriptor checksum/verify/derive' are deprecated since
+	1.23.0; use the 'bitcoin bip380' canonical forms. Removal: 1.24.0.
+	EOF
+			;;
+		checksum|verify|derive)
 			warn "'descriptor $sub' is deprecated since 1.23.0; use 'bitcoin bip380 $sub' (will be removed in 1.24.0)"
 			local libexec="${SELF_LIBEXEC:?command:descriptor: SELF_LIBEXEC must be set}"
 			exec "$libexec/${SELF:-bitcoin}/bip380" "$@"
