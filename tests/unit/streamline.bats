@@ -653,3 +653,31 @@ feat037_setup_wallet() {
 	frozen="$XDG_DATA_HOME/bitcoin/wallets/alice/frozen.tsv"
 	awk -F'\t' '$1 == "abc123:0" && $2 == "persist test" { ok=1 } END { exit !ok }' "$frozen"
 }
+
+# FEAT-037 follow-up: tx build × utxo freeze integration. When a
+# wallet has frozen UTXOs, tx:build skips them during selection
+# and emits one warn line per skipped outpoint naming the
+# freeze reason.
+
+@test "FEAT-037 followup — utxo:_freeze_reason returns the reason or empty" {
+	feat037_setup_wallet
+	"$BITCOIN_BIN" utxo freeze alice deadbeef:0 --reason "KYC hold" >/dev/null
+	# Source the dispatcher (bin/bitcoin is source-safe per FEAT-006)
+	# and call the helper directly. Lets us assert the helper without
+	# needing a real backend fixture.
+	got=$(bash -c "source '$BITCOIN_BIN'; utxo:_freeze_reason alice deadbeef:0")
+	[ "$got" = "KYC hold" ]
+}
+
+@test "FEAT-037 followup — utxo:_freeze_reason is silent for non-frozen outpoints" {
+	feat037_setup_wallet
+	got=$(bash -c "source '$BITCOIN_BIN'; utxo:_freeze_reason alice never-frozen:99")
+	[ -z "$got" ]
+}
+
+@test "FEAT-037 followup — tx:build warn line text mentions 'skipping frozen UTXO'" {
+	# Verify the warn line wording without spinning up a real wallet
+	# build. Greps the function body in bin/bitcoin.
+	grep -qE "skipping frozen UTXO" "$BITCOIN_BIN" \
+		|| { echo "tx:build missing the frozen-UTXO skip warn"; return 1; }
+}
