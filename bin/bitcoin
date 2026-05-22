@@ -661,7 +661,7 @@ _emit_varint() {
 			$((n & 0xff)) $(((n >> 8) & 0xff)) \
 			$(((n >> 16) & 0xff)) $(((n >> 24) & 0xff))
 	else
-		error "wallet build: varint > 2^32 not supported"
+		error "tx build: varint > 2^32 not supported"
 		return 1
 	fi
 }
@@ -700,9 +700,9 @@ command:tx() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		build)     wallet:build "$@" ;;
-		sign)      wallet:sign  "$@" ;;
-		broadcast) wallet:broadcast "$@" ;;
+		build)     tx:build "$@" ;;
+		sign)      tx:sign  "$@" ;;
+		broadcast) tx:broadcast "$@" ;;
 		decode)
 			local libexec="${SELF_LIBEXEC:?command:tx: SELF_LIBEXEC must be set}"
 			exec "$libexec/${SELF:-bitcoin}/bip174" decode "$@"
@@ -1540,29 +1540,51 @@ wallet:_label_validate() {
 # transaction from stdin and forwards to the active backend. The
 # <name> argument is currently a docs hint — per-wallet backend
 # resolution is deferred until FEAT-012's per-wallet config lands.
-wallet:broadcast() {
+#
+# FEAT-036 follow-up (1.23.0): renamed from wallet:broadcast →
+# tx:broadcast. wallet:broadcast remains as a deprecated alias
+# below; wallet:send was updated to call tx:* directly.
+tx:broadcast() {
 	local name="${1:-}"
 	if [ -z "$name" ]; then
-		error "wallet broadcast: name required (currently a docs hint; per-wallet backend deferred)"
+		error "tx broadcast: name required (currently a docs hint; per-wallet backend deferred)"
 		return 2
 	fi
 	local hex
 	hex="$(cat | tr -d '[:space:]')"
 	if [ -z "$hex" ]; then
-		error "wallet broadcast: empty stdin (expected raw transaction hex)"
+		error "tx broadcast: empty stdin (expected raw transaction hex)"
 		return 3
 	fi
 	if [[ ! "$hex" =~ ^[0-9a-fA-F]+$ ]]; then
-		error "wallet broadcast: stdin is not hex"
+		error "tx broadcast: stdin is not hex"
 		return 4
 	fi
 	if (( ${#hex} % 2 != 0 )); then
-		error "wallet broadcast: hex length is odd (${#hex} chars); truncated input?"
+		error "tx broadcast: hex length is odd (${#hex} chars); truncated input?"
 		return 5
 	fi
 	# Normalise to lowercase.
 	hex="${hex,,}"
 	backend:broadcast "$hex"
+}
+
+# FEAT-036 follow-up (1.23.0): deprecation aliases. wallet:build /
+# wallet:sign / wallet:broadcast each emit one warn line citing
+# the canonical tx form and forward. Removal target 1.24.0.
+# wallet:send was migrated to call tx:* directly so the
+# convenience verb stays warn-free.
+wallet:build() {
+	warn "'wallet build' is deprecated since 1.23.0; use 'bitcoin tx build' (will be removed in 1.24.0)"
+	tx:build "$@"
+}
+wallet:sign() {
+	warn "'wallet sign' is deprecated since 1.23.0; use 'bitcoin tx sign' (will be removed in 1.24.0)"
+	tx:sign "$@"
+}
+wallet:broadcast() {
+	warn "'wallet broadcast' is deprecated since 1.23.0; use 'bitcoin tx broadcast' (will be removed in 1.24.0)"
+	tx:broadcast "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -1663,18 +1685,18 @@ wallet:_address_to_script() {
 	printf '00%02x%s' "$prog_len" "$prog"
 }
 
-wallet:build() {
+tx:build() {
 	local name="" addr="" sats=""
 	local -i fee_rate=0 fee_rate_set=0
 	while [ $# -gt 0 ]; do
 		case "${1:-}" in
 			--fee-rate)
 				if [ -z "${2:-}" ]; then
-					error "wallet build: --fee-rate requires an argument"
+					error "tx build: --fee-rate requires an argument"
 					return 2
 				fi
 				if [[ ! "$2" =~ ^[0-9]+$ ]]; then
-					error "wallet build: --fee-rate must be a positive integer (sat/vB), got '$2'"
+					error "tx build: --fee-rate must be a positive integer (sat/vB), got '$2'"
 					return 2
 				fi
 				fee_rate="$2"
@@ -1683,7 +1705,7 @@ wallet:build() {
 				;;
 			--) shift; break ;;
 			-*)
-				error "wallet build: unknown flag '$1'"
+				error "tx build: unknown flag '$1'"
 				return 2
 				;;
 			*)
@@ -1691,7 +1713,7 @@ wallet:build() {
 				elif [ -z "$addr" ]; then addr="$1"
 				elif [ -z "$sats" ]; then sats="$1"
 				else
-					error "wallet build: too many positional arguments (saw '$1')"
+					error "tx build: too many positional arguments (saw '$1')"
 					return 2
 				fi
 				shift
@@ -1699,11 +1721,11 @@ wallet:build() {
 		esac
 	done
 	if [ -z "$name" ] || [ -z "$addr" ] || [ -z "$sats" ]; then
-		error "wallet build: usage: wallet build <name> <addr> <sats> [--fee-rate sat/vB]"
+		error "tx build: usage: wallet build <name> <addr> <sats> [--fee-rate sat/vB]"
 		return 2
 	fi
 	if [[ ! "$sats" =~ ^[1-9][0-9]*$ ]]; then
-		error "wallet build: <sats> must be a positive integer, got '$sats'"
+		error "tx build: <sats> must be a positive integer, got '$sats'"
 		return 3
 	fi
 	# If --fee-rate wasn't supplied, ask the active backend for a
@@ -1716,24 +1738,24 @@ wallet:build() {
 		if est="$(backend:estimate-fee 3 2>/dev/null)" && [[ "$est" =~ ^[1-9][0-9]*$ ]]; then
 			fee_rate=$est
 		else
-			warn "wallet build: backend estimate-fee unavailable; falling back to 1 sat/vB"
+			warn "tx build: backend estimate-fee unavailable; falling back to 1 sat/vB"
 			fee_rate=1
 		fi
 	fi
 	local path; path="$(wallet:_path "$name")"
 	if [ ! -d "$path" ]; then
-		error "wallet build: no such wallet '$name' at $path"
+		error "tx build: no such wallet '$name' at $path"
 		return 4
 	fi
 	local ledger="$path/addresses"
 	if [ ! -s "$ledger" ]; then
-		error "wallet build: wallet '$name' has no derived addresses (run 'wallet derive')"
+		error "tx build: wallet '$name' has no derived addresses (run 'wallet derive')"
 		return 5
 	fi
 
 	local out_script
 	if ! out_script="$(wallet:_address_to_script "$addr")"; then
-		error "wallet build: invalid output address '$addr' (only v0 P2WPKH/P2WSH supported in this release)"
+		error "tx build: invalid output address '$addr' (only v0 P2WPKH/P2WSH supported in this release)"
 		return 6
 	fi
 
@@ -1746,7 +1768,7 @@ wallet:build() {
 	while IFS=$'\t' read -r _idx addr_ledger _label; do
 		[ -z "$addr_ledger" ] && continue
 		if ! utxo_json="$(backend:get-address-utxos "$addr_ledger" 2>/dev/null)"; then
-			warn "wallet build: backend get-utxos failed for $addr_ledger (continuing)"
+			warn "tx build: backend get-utxos failed for $addr_ledger (continuing)"
 			continue
 		fi
 		while IFS=$'\t' read -r txid vout value; do
@@ -1759,7 +1781,7 @@ wallet:build() {
 	done < "$ledger"
 
 	if (( ${#utxos_txid[@]} == 0 )); then
-		error "wallet build: no UTXOs available for wallet '$name'"
+		error "tx build: no UTXOs available for wallet '$name'"
 		return 7
 	fi
 
@@ -1788,7 +1810,7 @@ wallet:build() {
 		(( selected_total >= needed )) && break
 	done
 	if (( selected_total < needed )); then
-		error "wallet build: insufficient balance: have $selected_total sats, need $needed (sats=$sats, fee~$fee_estimate at $fee_rate sat/vB)"
+		error "tx build: insufficient balance: have $selected_total sats, need $needed (sats=$sats, fee~$fee_estimate at $fee_rate sat/vB)"
 		return 8
 	fi
 
@@ -1801,14 +1823,14 @@ wallet:build() {
 	if (( change > dust )); then
 		local change_addr
 		if ! change_addr="$(wallet:derive "$name" 2>/dev/null)"; then
-			error "wallet build: failed to derive change address for '$name'"
+			error "tx build: failed to derive change address for '$name'"
 			return 9
 		fi
 		# wallet derive may emit other lines (info etc. go to stderr,
 		# but be defensive); take the last line as the address.
 		change_addr="$(printf '%s\n' "$change_addr" | tail -n1)"
 		if ! change_script="$(wallet:_address_to_script "$change_addr")"; then
-			error "wallet build: failed to compute change scriptPubKey for '$change_addr'"
+			error "tx build: failed to compute change scriptPubKey for '$change_addr'"
 			return 10
 		fi
 		n_out=2
@@ -1857,7 +1879,7 @@ wallet:build() {
 		# scriptPubKey for the input's source address (same v0
 		# P2WPKH/P2WSH we accept on the output side).
 		if ! utxo_script="$(wallet:_address_to_script "${utxos_addr[ix]}")"; then
-			error "wallet build: failed to encode scriptPubKey for input address '${utxos_addr[ix]}'"
+			error "tx build: failed to encode scriptPubKey for input address '${utxos_addr[ix]}'"
 			return 11
 		fi
 		utxo_record="$(wallet:_le64 "${utxos_value[ix]}")"
@@ -1894,10 +1916,10 @@ wallet:build() {
 wallet:_derive_privkey_hex() {
 	local name="$1" idx="$2"
 	if ! command -v secret >/dev/null 2>&1; then
-		error "wallet sign: 'secret' not in PATH (cannot read seed for '$name')"
+		error "tx sign: 'secret' not in PATH (cannot read seed for '$name')"
 		return 5
 	fi
-	local libexec="${SELF_LIBEXEC:?wallet sign: SELF_LIBEXEC must be set}"
+	local libexec="${SELF_LIBEXEC:?tx sign: SELF_LIBEXEC must be set}"
 	# The bip32 derive plugin emits the full 78-byte serialised
 	# extended private key. The last 32 bytes are the raw secret key
 	# (the byte just before is the 0x00 marker that distinguishes
@@ -1914,52 +1936,52 @@ wallet:_derive_privkey_hex() {
 		tr -d '\n'
 	)"
 	if [[ ! "$priv_hex" =~ ^[0-9a-f]{64}$ ]]; then
-		error "wallet sign: private-key derivation produced unexpected output for $name/$idx"
+		error "tx sign: private-key derivation produced unexpected output for $name/$idx"
 		return 6
 	fi
 	printf '%s\n' "$priv_hex"
 }
 
-wallet:sign() {
+tx:sign() {
 	local name="${1:-}"
 	if [ -z "$name" ]; then
-		error "wallet sign: usage: wallet sign <name> (PSBT on stdin)"
+		error "tx sign: usage: wallet sign <name> (PSBT on stdin)"
 		return 2
 	fi
 	local path; path="$(wallet:_path "$name")"
 	if [ ! -d "$path" ]; then
-		error "wallet sign: no such wallet '$name' at $path"
+		error "tx sign: no such wallet '$name' at $path"
 		return 3
 	fi
 	local ledger="$path/addresses"
 	if [ ! -s "$ledger" ]; then
-		error "wallet sign: wallet '$name' has no derived addresses"
+		error "tx sign: wallet '$name' has no derived addresses"
 		return 4
 	fi
 
 	local psbt; psbt="$(cat | tr -d '[:space:]' | tr A-F a-f)"
 	if [ -z "$psbt" ]; then
-		error "wallet sign: empty stdin (expected hex-encoded PSBT)"
+		error "tx sign: empty stdin (expected hex-encoded PSBT)"
 		return 5
 	fi
 	if [[ ! "$psbt" =~ ^[0-9a-f]+$ ]]; then
-		error "wallet sign: stdin is not hex"
+		error "tx sign: stdin is not hex"
 		return 6
 	fi
 
 	# Walk the ledger; for each index derive a privkey + re-pipe.
 	# bip174 sign is a no-op for inputs the key can't sign, so this
 	# is safe even when the ledger has many addresses.
-	local libexec="${SELF_LIBEXEC:?wallet sign: SELF_LIBEXEC must be set}"
+	local libexec="${SELF_LIBEXEC:?tx sign: SELF_LIBEXEC must be set}"
 	local idx addr_ledger _label privkey
 	while IFS=$'\t' read -r idx addr_ledger _label; do
 		[ -z "$idx" ] && continue
 		if ! privkey="$(wallet:_derive_privkey_hex "$name" "$idx")"; then
-			warn "wallet sign: skipping index $idx (derivation failed)"
+			warn "tx sign: skipping index $idx (derivation failed)"
 			continue
 		fi
 		psbt="$(printf '%s\n' "$psbt" | "$libexec/${SELF:-bitcoin}/bip174" sign "$privkey")" || {
-			error "wallet sign: bip174 sign failed at index $idx"
+			error "tx sign: bip174 sign failed at index $idx"
 			return 7
 		}
 	done < "$ledger"
@@ -2005,11 +2027,11 @@ wallet:send() {
 	# build-time failure surfaces with its own error message.
 	# fwd_args[] is the original arg list minus --mainnet (which is
 	# a send-only flag; wallet build doesn't know about it).
-	local psbt; psbt="$(wallet:build "${fwd_args[@]}")" || {
+	local psbt; psbt="$(tx:build "${fwd_args[@]}")" || {
 		error "wallet send: wallet build failed"
 		return 4
 	}
-	local signed; signed="$(printf '%s\n' "$psbt" | wallet:sign "$name")" || {
+	local signed; signed="$(printf '%s\n' "$psbt" | tx:sign "$name")" || {
 		error "wallet send: wallet sign failed"
 		return 5
 	}
@@ -2022,7 +2044,7 @@ wallet:send() {
 		error "wallet send: bip174 extract failed"
 		return 7
 	}
-	printf '%s\n' "$raw_tx" | wallet:broadcast "$name"
+	printf '%s\n' "$raw_tx" | tx:broadcast "$name"
 }
 
 # Read the wallet's `network=` line from its config. Returns the
