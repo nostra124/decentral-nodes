@@ -29,6 +29,33 @@ setup() {
 	# must produce these exact bytes.
 	export ABANDON_MNEMONIC="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 	export EXPECTED_SEED_HEX="c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
+	# Isolated XDG paths so FEAT-037 freeze/unfreeze tests don't
+	# clobber a real user's ~/.local/var/bitcoin/wallets.
+	BATS_TMPDIR=${BATS_TMPDIR:-$(mktemp -d)}
+	HOME="$(mktemp -d "$BATS_TMPDIR/home.XXXXXX")"
+	export HOME
+	export XDG_DATA_HOME="$HOME/.local/share"
+	mkdir -p "$XDG_DATA_HOME/bitcoin/wallets"
+}
+
+# Lightweight wallet fixture for FEAT-037 (frozen.tsv) tests.
+# Doesn't need a real seed or backend round-trip: freeze /
+# unfreeze just need the wallet dir + an addresses ledger + git.
+feat037_setup_wallet() {
+	local name="${1:-alice}"
+	local path="$XDG_DATA_HOME/bitcoin/wallets/$name"
+	mkdir -p "$path"
+	printf '0\tbc1qexample\t\n' > "$path/addresses"
+	(
+		cd "$path"
+		git init -q
+		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+		    -c commit.gpgsign=false \
+			add addresses
+		git -c user.email=wallet@bitcoin \
+			-c user.name=bitcoin -c commit.gpgsign=false \
+			commit -q -m "initial"
+	)
 }
 
 # ---------------------------------------------------------------------------
@@ -470,4 +497,115 @@ setup() {
 	run "$BITCOIN_BIN" tx
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q "Usage:"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-037 (1.23.0): `bitcoin utxo` object verb.
+#
+# Initial PR: ls + freeze + unfreeze. `utxo select`, the `tx build`
+# refuse-frozen integration, and the `wallet index` deprecation alias
+# follow in separate PRs per the ROADMAP-1.23.0 PR-sequencing.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-037 — bitcoin utxo help lists ls/freeze/unfreeze" {
+	run bash -c "'$BITCOIN_BIN' utxo help 2>&1"
+	[ "$status" -eq 0 ]
+	for sub in ls freeze unfreeze; do
+		echo "$output" | grep -qE "(^|[[:space:]])$sub([[:space:]]|$)" \
+			|| { echo "help missing subcommand: $sub"; return 1; }
+	done
+}
+
+@test "FEAT-037 — bitcoin utxo (no subcommand) prints help" {
+	run "$BITCOIN_BIN" utxo
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "Usage:"
+}
+
+@test "FEAT-037 — bitcoin utxo <unknown> errors with the valid subcommand list" {
+	run "$BITCOIN_BIN" utxo not-a-subcommand
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "unknown utxo subcommand"
+	for sub in ls freeze unfreeze; do
+		echo "$output" | grep -q "$sub"
+	done
+}
+
+@test "FEAT-037 — utxo freeze rejects a malformed outpoint" {
+	run "$BITCOIN_BIN" utxo freeze any-wallet not-an-outpoint
+	[ "$status" -ne 0 ]
+	# Validation runs before wallet-existence so the user sees the
+	# shape error even on a typo'd wallet name.
+	echo "$output" | grep -q "must look like"
+}
+
+@test "FEAT-037 — utxo freeze rejects --reason with tabs" {
+	run "$BITCOIN_BIN" utxo freeze any-wallet abc123:0 --reason "tab	in	reason"
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "must not contain tabs"
+}
+
+@test "FEAT-037 — utxo freeze on a real wallet writes frozen.tsv and commits" {
+	feat037_setup_wallet
+	run "$BITCOIN_BIN" utxo freeze alice abc123:0 --reason "KYC concern"
+	[ "$status" -eq 0 ]
+	frozen="$XDG_DATA_HOME/bitcoin/wallets/alice/frozen.tsv"
+	[ -s "$frozen" ]
+	# 3-column TSV: outpoint, reason, unix-timestamp.
+	awk -F'\t' '
+		NR == 1 && $1 == "abc123:0" && $2 == "KYC concern" && $3 ~ /^[0-9]+$/ { ok=1 }
+		END { exit !ok }
+	' "$frozen"
+	# Commit landed in the wallet repo (per FEAT-011 push/pull model).
+	committed="$(git -C "$XDG_DATA_HOME/bitcoin/wallets/alice" log --oneline -n 1 -- frozen.tsv)"
+	[ -n "$committed" ]
+}
+
+@test "FEAT-037 — utxo freeze is idempotent on the same outpoint" {
+	feat037_setup_wallet
+	"$BITCOIN_BIN" utxo freeze alice abc123:0 --reason "first reason" >/dev/null
+	"$BITCOIN_BIN" utxo freeze alice abc123:0 --reason "updated reason" >/dev/null
+	frozen="$XDG_DATA_HOME/bitcoin/wallets/alice/frozen.tsv"
+	# Only one row for the outpoint, and the reason matches the latest write.
+	[ "$(awk -F'\t' '$1 == "abc123:0"' "$frozen" | wc -l)" = "1" ]
+	awk -F'\t' '$1 == "abc123:0" && $2 == "updated reason" { found=1 } END { exit !found }' "$frozen"
+}
+
+@test "FEAT-037 — utxo unfreeze removes the row and commits" {
+	feat037_setup_wallet
+	"$BITCOIN_BIN" utxo freeze alice abc123:0 --reason "freeze me" >/dev/null
+	run "$BITCOIN_BIN" utxo unfreeze alice abc123:0
+	[ "$status" -eq 0 ]
+	frozen="$XDG_DATA_HOME/bitcoin/wallets/alice/frozen.tsv"
+	# Row gone.
+	! grep -q "^abc123:0	" "$frozen"
+	# Commit for the removal.
+	last_msg="$(git -C "$XDG_DATA_HOME/bitcoin/wallets/alice" log -1 --format=%s -- frozen.tsv)"
+	echo "$last_msg" | grep -q "utxo unfreeze"
+}
+
+@test "FEAT-037 — utxo unfreeze on a non-frozen outpoint is a silent no-op" {
+	feat037_setup_wallet
+	run "$BITCOIN_BIN" utxo unfreeze alice deadbeef:5
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-037 — utxo unfreeze rejects malformed outpoint" {
+	run "$BITCOIN_BIN" utxo unfreeze any-wallet not-an-outpoint
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "must look like"
+}
+
+@test "FEAT-037 — utxo ls without a wallet usage-errors" {
+	run "$BITCOIN_BIN" utxo ls
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "utxo ls: usage:"
+}
+
+@test "FEAT-037 — utxo freeze persists across invocations" {
+	feat037_setup_wallet
+	"$BITCOIN_BIN" utxo freeze alice abc123:0 --reason "persist test" >/dev/null
+	# Second invocation in a fresh shell sees the same frozen.tsv on disk.
+	frozen="$XDG_DATA_HOME/bitcoin/wallets/alice/frozen.tsv"
+	awk -F'\t' '$1 == "abc123:0" && $2 == "persist test" { ok=1 } END { exit !ok }' "$frozen"
 }
