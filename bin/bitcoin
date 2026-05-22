@@ -685,6 +685,79 @@ command:wallet() {
 	esac
 }
 
+# FEAT-036 (1.23.0): `bitcoin tx` object verb.
+#
+# Transaction-as-noun surface. build / sign / broadcast delegate
+# to today's wallet:build / wallet:sign / wallet:broadcast (no
+# rename in this PR; deprecation of the wallet:* aliases and
+# `--utxo` coin-control follow in a separate PR per the
+# ROADMAP-1.23.0 PR-sequencing).
+#
+# decode / finalize / extract pass-through to the canonical
+# bip174 plugin (FEAT-035 Stream D) so users get the same
+# byte-for-byte BIP-174 surface without remembering which name.
+command:tx() {
+	local sub="${1:-help}"
+	shift 2>/dev/null || true
+	case "$sub" in
+		build)     wallet:build "$@" ;;
+		sign)      wallet:sign  "$@" ;;
+		broadcast) wallet:broadcast "$@" ;;
+		decode)
+			local libexec="${SELF_LIBEXEC:?command:tx: SELF_LIBEXEC must be set}"
+			exec "$libexec/${SELF:-bitcoin}/bip174" decode "$@"
+			;;
+		finalize)
+			local libexec="${SELF_LIBEXEC:?command:tx: SELF_LIBEXEC must be set}"
+			exec "$libexec/${SELF:-bitcoin}/bip174" finalize "$@"
+			;;
+		extract)
+			local libexec="${SELF_LIBEXEC:?command:tx: SELF_LIBEXEC must be set}"
+			exec "$libexec/${SELF:-bitcoin}/bip174" extract "$@"
+			;;
+		help)
+			cat <<-ENDHELP
+			Usage: $SELF tx <subcommand>
+
+			  build <wallet> <addr> <sats> [--fee-rate sat/vB]
+			        Build an unsigned PSBT paying <sats> to <addr>.
+			        Greedy largest-first UTXO selection; --fee-rate
+			        overrides the backend estimate. (--utxo coin-
+			        control flag lands in a follow-up PR.)
+			  sign <wallet>
+			        Read a PSBT (hex) from stdin, sign every input
+			        the wallet's seed can sign, re-emit the PSBT.
+			  decode
+			        Read a PSBT (hex) from stdin; emit one TSV line
+			        per key-value record. Passes through to bip174.
+			  finalize
+			        Promote PSBT_IN_PARTIAL_SIG to FINAL_SCRIPTWITNESS
+			        per BIP-174 §Finalizer. Passes through to bip174.
+			  extract
+			        Emit the broadcastable BIP-141 segwit raw tx hex
+			        from a finalised PSBT. Passes through to bip174.
+			  broadcast <wallet>
+			        Read raw tx hex from stdin; POST to the active
+			        backend; print the txid.
+			  help
+			        this message
+
+			Pipeline: tx build | tx sign | tx finalize | tx extract |
+			tx broadcast. The 'bitcoin wallet send' verb is the
+			one-shot convenience composition.
+			ENDHELP
+			;;
+		*)
+			error "unknown tx subcommand: '$sub' (expected: build, sign, decode, finalize, extract, broadcast, help)"
+			return 2
+			;;
+	esac
+}
+
+help:tx() {
+	command:tx help
+}
+
 # FEAT-038 shorthand. `bitcoin tax label <wallet> <outpoint> --as
 # <category>` is byte-identical to `bitcoin wallet label <wallet>
 # <outpoint> --tax <category>`. Same backing code; just a more

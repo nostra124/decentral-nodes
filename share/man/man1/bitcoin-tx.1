@@ -1,0 +1,195 @@
+.\" Manpage for bitcoin-tx(1) — transaction object verb (FEAT-036).
+.TH BITCOIN-TX 1 "2026-05-21" "bitcoin 1.23.0" "User Commands"
+
+.SH NAME
+bitcoin\-tx \- transaction as a first-class object verb
+
+.SH SYNOPSIS
+.B bitcoin tx build
+.I wallet
+.I address
+.I sats
+.RI [ "--fee-rate sat/vB" ]
+.br
+.B bitcoin tx sign
+.I wallet
+.br
+.B bitcoin tx decode
+.br
+.B bitcoin tx finalize
+.br
+.B bitcoin tx extract
+.br
+.B bitcoin tx broadcast
+.I wallet
+.br
+.B bitcoin tx help
+
+.SH DESCRIPTION
+.B bitcoin tx
+exposes transactions as a noun: build / sign / decode / finalize
+/ extract / broadcast. The full one-shot pipeline (build through
+broadcast) lives in
+.BR "bitcoin wallet send" ;
+the
+.B tx
+verbs let you compose the steps independently \(em
+build-now-sign-later, sign-without-broadcasting,
+decode-an-unknown-hex, broadcast-a-PSBT-someone-else-signed.
+
+In 1.23.0
+.B tx build
+/
+.B sign
+/
+.B broadcast
+delegate to the historical
+.B wallet build
+/
+.B sign
+/
+.B broadcast
+implementations; rename + deprecation of the
+.B wallet:*
+names happens in a follow-up PR. The
+.B decode
+/
+.B finalize
+/
+.B extract
+verbs pass through to
+.BR bitcoin-bip174 (1)
+(FEAT-035 Stream D).
+
+.SH OPTIONS
+.TP
+.BR "--fee-rate " sat/vB
+Override the active backend's
+.B estimate-fee 3
+recommendation. Used by
+.B tx build
+when building the unsigned PSBT. Falls back to 1 sat/vB if the
+backend estimate is unavailable.
+
+.SH SUBCOMMANDS
+.TP
+.BI "build " "wallet address sats" " [--fee-rate sat/vB]"
+Greedy largest-first UTXO selection from the wallet's derived
+addresses; builds an unsigned BIP-174 PSBT paying
+.I sats
+to
+.I address ;
+prints the PSBT as hex on stdout. P2WPKH / P2WSH outputs only
+in this release.
+
+A future PR adds a
+.B --utxo <txid:vout>
+flag (repeatable) for explicit coin control \(em the
+foundations of
+.BR bitcoin-utxo (1)
+(FEAT-037).
+.TP
+.BI "sign " wallet
+Read a PSBT (hex) from stdin, derive a private key for every
+address in
+.IR wallet 's
+ledger, pipe the PSBT through
+.B bip174 sign
+(FEAT-035 Stream D) once per key, and re-emit the PSBT on
+stdout. Inputs the keys can't sign pass through unmodified.
+.TP
+.B decode
+Read a PSBT (hex) from stdin and emit one TSV line per
+key-value record
+.RB ( "section=<n> type=<hex> key=<hex> value=<hex>" ).
+Pure pass-through to
+.BR "bitcoin bip174 decode" .
+.TP
+.B finalize
+Promote each input's first
+.B PSBT_IN_PARTIAL_SIG
+to a finalised witness via
+.B PSBT_IN_FINAL_SCRIPTWITNESS
+per BIP-174 §Finalizer. Pure pass-through to
+.BR "bitcoin bip174 finalize" .
+.TP
+.B extract
+Read a finalised PSBT from stdin and emit the broadcastable
+BIP-141 / BIP-144 segwit raw tx as hex. Pass-through to
+.BR "bitcoin bip174 extract" .
+Refuses if any input lacks
+.BR FINAL_SCRIPTWITNESS .
+.TP
+.BI "broadcast " wallet
+Read raw-tx hex from stdin; POST to the active backend (see
+.BR bitcoin-backend (1)); print the broadcast txid.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 2
+Missing required argument, or unknown subcommand.
+.TP
+.B \(>=1
+Other errors propagate from the delegation target unchanged.
+Specific errors emit a
+.B warn
+or
+.B error
+line to stderr per CLAUDE.md §10, naming the failing component.
+
+.SH FILES
+.TP
+.IB <wallet-repo>/addresses
+The address ledger
+.B build
+and
+.B sign
+walk for coin selection and key derivation.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_LIBEXEC
+Required when
+.B decode
+/
+.B finalize
+/
+.B extract
+exec into
+.BR bitcoin-bip174 (1).
+Inherited from
+.BR bitcoin (1)
+when invoked via the dispatcher.
+.TP
+.B BITCOIN_BACKEND
+Forwarded to
+.BR bitcoin-backend (1)
+during
+.B build
+fee-estimation and
+.B broadcast .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip174 (1),
+.BR bitcoin-wallet (1),
+.BR bitcoin-backend (1)
+
+.SH HISTORY
+Verb introduced in bitcoin 1.23.0 (FEAT-036). This release
+ships the additive
+.B tx
+namespace; the
+.B wallet build
+/
+.B sign
+/
+.B broadcast
+deprecation aliases and the
+.B --utxo
+coin-control flag follow in a separate PR. The full
+.B bitcoin wallet send
+verb continues to work as the one-shot composition.
