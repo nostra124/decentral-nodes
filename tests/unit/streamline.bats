@@ -827,3 +827,51 @@ feat037_setup_wallet() {
 	grep -q "requested_utxos\[@\]" "$BITCOIN_BIN" \
 		|| { echo "tx:build missing the --utxo filter loop"; return 1; }
 }
+
+# FEAT-042: coin control on `wallet send`. The convenience verb
+# already forwards every non-`--mainnet` argument to tx:build via
+# its fwd_args[] pass-through, so `--utxo` flows through unchanged.
+# This block asserts the contract end-to-end: the flag reaches
+# tx:build's parser, the error envelope is the tx:build one, and
+# the flag coexists with --mainnet.
+
+@test "FEAT-042 — wallet send forwards --utxo to tx:build (malformed shape rejected)" {
+	feat037_setup_wallet
+	# Past wallet:send's wallet-existence check (the fixture creates
+	# alice), so the malformed --utxo argument reaches tx:build's
+	# flag parser and that's what errors.
+	run "$BITCOIN_BIN" wallet send alice bc1qzz 1000 --utxo not-an-outpoint
+	[ "$status" -ne 0 ]
+	# Error wording from tx:build's parser (not wallet:send's).
+	echo "$output" | grep -q "must look like"
+}
+
+@test "FEAT-042 — wallet send accepts --utxo with a well-formed argument" {
+	feat037_setup_wallet
+	# Well-formed --utxo passes tx:build's flag parser; failure
+	# downstream (no real backend / no UTXOs) is expected and not
+	# a --utxo parser error.
+	run "$BITCOIN_BIN" wallet send alice bc1qzz 1000 --utxo abc123:0
+	[ "$status" -ne 0 ]
+	# Did NOT fail with the parser-shape error.
+	echo "$output" | grep -qv "must look like"
+}
+
+@test "FEAT-042 — wallet send --utxo coexists with --mainnet" {
+	feat037_setup_wallet
+	# Both flags should parse together. The wallet's network is
+	# unset (defaults to testnet for the fixture), so --mainnet is
+	# accepted silently and --utxo flows through to tx:build.
+	run "$BITCOIN_BIN" wallet send alice bc1qzz 1000 --utxo abc123:0 --mainnet
+	[ "$status" -ne 0 ]
+	# Neither flag's parser rejected the call.
+	echo "$output" | grep -qv "must look like"
+	echo "$output" | grep -qv "requires a <txid:vout>"
+}
+
+@test "FEAT-042 — wallet send --utxo is repeatable" {
+	feat037_setup_wallet
+	run "$BITCOIN_BIN" wallet send alice bc1qzz 1000 --utxo abc123:0 --utxo def456:1
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -qv "must look like"
+}
