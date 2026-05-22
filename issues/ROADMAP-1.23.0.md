@@ -17,9 +17,11 @@ byte-for-byte against both old and new verb names.
 |---------|--------|-----|
 | FEAT-035 streamline (psbt→bip174, descriptor→bip380, bech32→bip173/bip350, mnemonic-to-seed fold) | ✅ shipped | #34 (A), #35 (C), #36 (D), #37 (C2), #38 (B) |
 | FEAT-041 per-subcommand man-page convention | ✅ shipped | #33 |
-| FEAT-038 tax-label vocabulary | open | next in queue |
-| FEAT-036 `bitcoin tx` object verb | open | unblocked by FEAT-035 |
-| FEAT-037 `bitcoin utxo` object verb | open | independent |
+| FEAT-038 tax-label vocabulary | ✅ shipped | #40 |
+| FEAT-036 `bitcoin tx` object verb | ✅ shipped (all 6 ACs) | #41 (additive), #43 (deprecation + send refactor), #45 (`--utxo` coin-control) |
+| FEAT-037 `bitcoin utxo` object verb | ✅ shipped (5 of 7 ACs; AC #4 on hold) | #42 (additive), #44 (`tx build` refuses frozen), #46 (`utxo select` greedy + BnB) |
+
+**AC #4 of FEAT-037** (`wallet index` → `utxo ls` deprecation alias) is on hold pending spec revisit — `wallet:index` caches transactions and updates history; `utxo:ls` lists current unspent outputs. The 1:1 alias from the original spec wouldn't be semantically correct. Documented in `bitcoin-utxo(1)`'s DESCRIPTION.
 
 ## What lands
 
