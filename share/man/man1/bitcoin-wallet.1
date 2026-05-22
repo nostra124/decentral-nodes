@@ -42,7 +42,7 @@ bitcoin\-wallet \- create, derive, sign, send, and synchronise wallets
 .I name
 .I addr
 .I sats
-.RI [ "--fee-rate sat/vB" "] [" --mainnet ]
+.RI [ "--fee-rate sat/vB" "] [" "--utxo txid:vout" "...] [" --mainnet ]
 .br
 .B bitcoin wallet broadcast
 .I name
@@ -218,13 +218,24 @@ address in the wallet's ledger, pipe the PSBT through
 .B "bitcoin psbt sign"
 for each. Inputs the keys can't sign pass through unmodified.
 .TP
-.BI "send " "name addr sats" " [--fee-rate sat/vB] [--mainnet]"
+.BI "send " "name addr sats" " [--fee-rate sat/vB] [--utxo txid:vout ...] [--mainnet]"
 End-to-end: build | sign | psbt finalize | psbt extract |
 broadcast. Prints the txid the backend returned.
 .BR --mainnet
 is required when the wallet's config says
 .B network=mainnet ;
 ignored on other networks.
+.B --utxo
+(FEAT-042, 1.23.0+) is repeatable coin control — same shape as
+.BR "bitcoin tx build --utxo" :
+each
+.I txid:vout
+restricts selection to that outpoint. Pair with
+.BR bitcoin-utxo (1)
+.B select
+to preview a branch-and-bound subset, then feed the chosen
+outpoints back into
+.BR "wallet send" .
 .TP
 .BI "broadcast " name
 POST raw-tx hex from stdin to the active backend; print the
