@@ -1846,6 +1846,11 @@ wallet:_address_to_script() {
 tx:build() {
 	local name="" addr="" sats=""
 	local -i fee_rate=0 fee_rate_set=0
+	# FEAT-036 AC #3: --utxo <txid:vout> repeatable coin-control
+	# flag. When at least one is supplied, greedy selection is
+	# replaced with explicit picking from the requested set. Empty
+	# array → greedy as today.
+	local -a requested_utxos=()
 	while [ $# -gt 0 ]; do
 		case "${1:-}" in
 			--fee-rate)
@@ -1859,6 +1864,18 @@ tx:build() {
 				fi
 				fee_rate="$2"
 				fee_rate_set=1
+				shift 2
+				;;
+			--utxo)
+				if [ -z "${2:-}" ]; then
+					error "tx build: --utxo requires a <txid:vout> argument"
+					return 2
+				fi
+				if [[ ! "$2" =~ ^[[:xdigit:]]+:[0-9]+$ ]]; then
+					error "tx build: --utxo argument must look like '<txid>:<vout>' (got '$2')"
+					return 2
+				fi
+				requested_utxos+=( "$2" )
 				shift 2
 				;;
 			--) shift; break ;;
@@ -1948,6 +1965,36 @@ tx:build() {
 			utxos_addr+=( "$addr_ledger" )
 		done < <(printf '%s' "$utxo_json" | jq -r '.[] | [.txid, .vout, .value] | @tsv' 2>/dev/null)
 	done < "$ledger"
+
+	# FEAT-036 AC #3: if the user supplied --utxo flags, restrict
+	# the candidate set to only those outpoints. Errors if any
+	# requested outpoint isn't actually unspent at any of the
+	# wallet's derived addresses.
+	if (( ${#requested_utxos[@]} > 0 )); then
+		local -a filt_txid=() filt_vout=() filt_value=() filt_addr=()
+		local req i found_op
+		for req in "${requested_utxos[@]}"; do
+			found_op=0
+			for (( i=0; i<${#utxos_txid[@]}; i++ )); do
+				if [ "${utxos_txid[i]}:${utxos_vout[i]}" = "$req" ]; then
+					filt_txid+=(  "${utxos_txid[i]}"  )
+					filt_vout+=(  "${utxos_vout[i]}"  )
+					filt_value+=( "${utxos_value[i]}" )
+					filt_addr+=(  "${utxos_addr[i]}"  )
+					found_op=1
+					break
+				fi
+			done
+			if (( !found_op )); then
+				error "tx build: requested --utxo $req not found among wallet UTXOs (frozen? already spent? not derived?)"
+				return 7
+			fi
+		done
+		utxos_txid=( "${filt_txid[@]}" )
+		utxos_vout=( "${filt_vout[@]}" )
+		utxos_value=( "${filt_value[@]}" )
+		utxos_addr=( "${filt_addr[@]}" )
+	fi
 
 	if (( ${#utxos_txid[@]} == 0 )); then
 		error "tx build: no UTXOs available for wallet '$name'"

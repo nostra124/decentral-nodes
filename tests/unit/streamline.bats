@@ -782,3 +782,48 @@ feat037_setup_wallet() {
 	echo "$output" | grep -qE "(^|[[:space:]])select([[:space:]]|$)"
 	echo "$output" | grep -q "branch-and-bound"
 }
+# FEAT-036 AC #3 follow-up: tx build --utxo coin-control.
+
+@test "FEAT-036 AC#3 — tx build --utxo with no argument errors" {
+	run "$BITCOIN_BIN" tx build alice bc1qzz 1000 --utxo
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "requires a <txid:vout>"
+}
+
+@test "FEAT-036 AC#3 — tx build --utxo rejects malformed argument" {
+	run "$BITCOIN_BIN" tx build alice bc1qzz 1000 --utxo not-an-outpoint
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "must look like"
+}
+
+@test "FEAT-036 AC#3 — tx build --utxo accepts a well-formed argument" {
+	# Shape validation passes; later checks (wallet exists, has
+	# UTXOs) still fire — we just want to confirm the flag parser
+	# doesn't itself reject a valid <txid>:<vout>.
+	run "$BITCOIN_BIN" tx build no-such-wallet bc1qzz 1000 --utxo abc123:0
+	# Either errors with "no such wallet" (status 4) or proceeds
+	# further; the important thing is we DIDN'T error with the
+	# --utxo flag-parser messages.
+	echo "$output" | grep -qv "must look like"
+	echo "$output" | grep -qv "requires a <txid:vout>"
+}
+
+@test "FEAT-036 AC#3 — tx build --utxo flag is repeatable" {
+	# Passing two --utxo flags must parse cleanly — repeatability is
+	# the foundation for coin-control across multiple outpoints.
+	run "$BITCOIN_BIN" tx build no-such-wallet bc1qzz 1000 --utxo abc123:0 --utxo def456:1
+	# Exits with the wallet-missing error (status 4), not with a
+	# --utxo parser error (status 2).
+	[ "$status" -eq 4 ] \
+		|| { echo "expected wallet-missing exit (status=4); got $status"; return 1; }
+}
+
+@test "FEAT-036 AC#3 — tx:build source has --utxo branch and filter" {
+	# Belt-and-suspenders: catch accidental regressions of the
+	# coin-control logic. The filter only runs when requested_utxos
+	# is non-empty; the array is declared in the flag-parsing block.
+	grep -q "requested_utxos+=" "$BITCOIN_BIN" \
+		|| { echo "tx:build missing --utxo append"; return 1; }
+	grep -q "requested_utxos\[@\]" "$BITCOIN_BIN" \
+		|| { echo "tx:build missing the --utxo filter loop"; return 1; }
+}
