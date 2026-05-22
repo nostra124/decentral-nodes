@@ -826,6 +826,16 @@ utxo:_is_frozen() {
 	awk -F'\t' -v op="$outpoint" '$1 == op { found=1; exit } END { exit !found }' "$file"
 }
 
+# Print the recorded freeze reason for <outpoint> on stdout, or
+# nothing if the outpoint isn't frozen / has no reason set. Used
+# by tx:build's frozen-UTXO skip warn line.
+utxo:_freeze_reason() {
+	local wallet="$1" outpoint="$2"
+	local file; file="$(utxo:_frozen_file "$wallet")"
+	[ -f "$file" ] || return 0
+	awk -F'\t' -v op="$outpoint" '$1 == op { print $2; exit }' "$file"
+}
+
 utxo:ls() {
 	local include_frozen=0
 	local wallet=""
@@ -1773,6 +1783,17 @@ tx:build() {
 		fi
 		while IFS=$'\t' read -r txid vout value; do
 			[ -z "$txid" ] && continue
+			# FEAT-037 integration: skip frozen UTXOs. utxo:_is_frozen
+			# looks the outpoint up in <wallet-repo>/frozen.tsv. The
+			# warn line names the outpoint + reason so the user sees
+			# why their available balance dropped.
+			local _op="$txid:$vout"
+			if utxo:_is_frozen "$name" "$_op"; then
+				local _reason
+				_reason="$(utxo:_freeze_reason "$name" "$_op")"
+				warn "tx build: skipping frozen UTXO $_op${_reason:+ (reason: \"$_reason\")}"
+				continue
+			fi
 			utxos_txid+=( "$txid" )
 			utxos_vout+=( "$vout" )
 			utxos_value+=( "$value" )
