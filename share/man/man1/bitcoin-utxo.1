@@ -18,6 +18,12 @@ bitcoin\-utxo \- UTXO as a first-class object verb
 .I wallet
 .I txid:vout
 .br
+.B bitcoin utxo select
+.I wallet
+.B --target
+.I sats
+.RI [ "--strategy greedy|branch-and-bound" ]
+.br
 .B bitcoin utxo help
 
 .SH DESCRIPTION
@@ -38,15 +44,17 @@ once the FEAT-036 follow-up integration lands.
 This release ships the
 .BR ls ,
 .BR freeze ,
-.B unfreeze
-subcommands.
-.B utxo select
-(standalone selection emitter with
-.BR --strategy
-greedy / branch-and-bound) and the
+.BR unfreeze ,
+.B select
+subcommands. The
 .B wallet index
-deprecation alias follow in a separate PR per the
-ROADMAP-1.23.0 PR-sequencing.
+deprecation alias is on hold pending a spec revisit \(em
+.B wallet index
+caches transactions + updates history (it doesn't list UTXOs
+like
+.B utxo ls
+does), so the 1:1 alias mapping from the original FEAT-037
+spec wouldn't be semantically correct.
 
 .SH OPTIONS
 .TP
@@ -113,6 +121,39 @@ Remove
 from
 .IR <wallet-repo>/frozen.tsv .
 No-op if the outpoint isn't currently frozen.
+.TP
+.BI "select " "wallet" " --target " sats " [--strategy greedy|branch-and-bound]"
+Apply the chosen UTXO-selection strategy to
+.IR wallet 's
+candidate UTXOs (skipping any in
+.IR frozen.tsv ),
+emit the picked outpoints as TSV
+.RB ( txid ", " vout ", " value_sat ),
+and exit 0 on success. Pure computation \(em no PSBT or
+transaction is built. Pair the output with
+.BR "bitcoin tx build --utxo"
+.RI ( FEAT-036
+AC #3) to build a transaction over an explicit selection.
+
+.RB "Strategies:"
+.B greedy
+sorts candidates by value descending and accumulates until the
+sum meets or exceeds
+.IR sats .
+.B branch-and-bound
+(alias
+.BR bnb )
+enumerates subsets via bitmask and picks the smallest subset
+whose values sum
+.B exactly
+to
+.IR sats ;
+falls back to greedy (with a
+.B warn
+line) when no exact match exists or when more than 20
+candidate UTXOs are present (the bash bitmask enumeration's
+practical cap). The Bitcoin Core depth-first algorithm is more
+scalable but out of scope for this release.
 
 .SH EXIT STATUS
 .TP
