@@ -758,6 +758,224 @@ help:tx() {
 	command:tx help
 }
 
+# FEAT-037 (1.23.0): `bitcoin utxo` object verb.
+#
+# UTXO-as-noun surface for coin control. Initial PR ships ls /
+# freeze / unfreeze; `utxo select` and the `tx build`
+# refuse-frozen integration follow in a separate PR per the
+# ROADMAP-1.23.0 PR-sequencing (keeps each diff focused).
+command:utxo() {
+	local sub="${1:-help}"
+	shift 2>/dev/null || true
+	case "$sub" in
+		ls)        utxo:ls       "$@" ;;
+		freeze)    utxo:freeze   "$@" ;;
+		unfreeze)  utxo:unfreeze "$@" ;;
+		help)
+			cat <<-ENDHELP
+			Usage: $SELF utxo <subcommand>
+
+			  ls <wallet> [--include-frozen]
+			        List unspent outputs across every derived address
+			        of <wallet> as TSV:
+			          txid TAB vout TAB address TAB amount_sat TAB frozen
+			        Frozen rows are excluded by default; --include-frozen
+			        keeps them in the output marked with a 'Y' in the
+			        frozen column.
+			  freeze <wallet> <txid:vout> [--reason <text>]
+			        Record the outpoint in the wallet's frozen.tsv with
+			        an optional reason and a Unix timestamp. Once frozen,
+			        a UTXO is hidden from 'utxo ls' (default) and will
+			        be refused by 'tx build' (FEAT-036 follow-up).
+			  unfreeze <wallet> <txid:vout>
+			        Remove the outpoint from the wallet's frozen.tsv.
+			        Restores selectability.
+			  help
+			        this message
+
+			Frozen state lives in
+			  ~/.local/var/bitcoin/wallets/<wallet>/frozen.tsv
+			and pushes/pulls with the wallet repo (per FEAT-011's
+			git-as-wallet-store model).
+			ENDHELP
+			;;
+		*)
+			error "unknown utxo subcommand: '$sub' (expected: ls, freeze, unfreeze, help)"
+			return 2
+			;;
+	esac
+}
+
+help:utxo() {
+	command:utxo help
+}
+
+# Path to the wallet's frozen-UTXO ledger. One file per wallet.
+# Format: TSV with 3 columns — outpoint, reason, unix-timestamp.
+utxo:_frozen_file() {
+	local wallet="$1"
+	local path; path="$(wallet:_path "$wallet")"
+	printf '%s\n' "$path/frozen.tsv"
+}
+
+# Return 0 if <outpoint> is currently frozen in <wallet>.
+utxo:_is_frozen() {
+	local wallet="$1" outpoint="$2"
+	local file; file="$(utxo:_frozen_file "$wallet")"
+	[ -f "$file" ] || return 1
+	awk -F'\t' -v op="$outpoint" '$1 == op { found=1; exit } END { exit !found }' "$file"
+}
+
+utxo:ls() {
+	local include_frozen=0
+	local wallet=""
+	while (( $# > 0 )); do
+		case "$1" in
+			--include-frozen) include_frozen=1; shift ;;
+			--*)              error "utxo ls: unknown flag '$1'"; return 2 ;;
+			*)
+				if [ -z "$wallet" ]; then wallet="$1"
+				else error "utxo ls: unexpected positional arg '$1'"; return 2
+				fi
+				shift
+				;;
+		esac
+	done
+	if [ -z "$wallet" ]; then
+		error "utxo ls: usage: utxo ls <wallet> [--include-frozen]"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$wallet")"
+	if [ ! -d "$path" ]; then
+		error "utxo ls: no such wallet '$wallet' at $path"
+		return 3
+	fi
+	local ledger="$path/addresses"
+	if [ ! -f "$ledger" ]; then
+		error "utxo ls: no addresses ledger at $ledger"
+		return 4
+	fi
+	local frozen_file; frozen_file="$(utxo:_frozen_file "$wallet")"
+	local addr utxo_json
+	while IFS=$'\t' read -r _idx addr _label; do
+		[ -z "$addr" ] && continue
+		if ! utxo_json="$(backend:get-address-utxos "$addr")"; then
+			warn "utxo ls: backend get-utxos failed for $addr (continuing)"
+			continue
+		fi
+		# Parse the per-UTXO array. Each entry: { txid, vout, value }.
+		# jq is in .rpk/depends and on CI.
+		local jq_out
+		jq_out="$(
+			printf '%s' "$utxo_json" \
+				| jq -r --arg addr "$addr" \
+					'.[] | [.txid, (.vout|tostring), $addr, (.value|tostring)] | @tsv' \
+				2>/dev/null
+		)" || continue
+		while IFS=$'\t' read -r txid vout addr_out value; do
+			[ -z "$txid" ] && continue
+			local op="$txid:$vout"
+			local frozen=N
+			if [ -f "$frozen_file" ] && awk -F'\t' -v o="$op" '$1==o{e=1; exit} END{exit !e}' "$frozen_file"; then
+				frozen=Y
+				(( !include_frozen )) && continue
+			fi
+			printf '%s\t%s\t%s\t%s\t%s\n' "$txid" "$vout" "$addr_out" "$value" "$frozen"
+		done <<< "$jq_out"
+	done < "$ledger"
+}
+
+utxo:freeze() {
+	local wallet="" outpoint="" reason=""
+	while (( $# > 0 )); do
+		case "$1" in
+			--reason) reason="$2"; shift 2 ;;
+			--*)      error "utxo freeze: unknown flag '$1'"; return 2 ;;
+			*)
+				if   [ -z "$wallet" ];   then wallet="$1"
+				elif [ -z "$outpoint" ]; then outpoint="$1"
+				else error "utxo freeze: unexpected positional arg '$1'"; return 2
+				fi
+				shift
+				;;
+		esac
+	done
+	if [ -z "$wallet" ] || [ -z "$outpoint" ]; then
+		error "utxo freeze: usage: utxo freeze <wallet> <txid:vout> [--reason <text>]"
+		return 2
+	fi
+	if [[ ! "$outpoint" =~ ^[[:xdigit:]]+:[0-9]+$ ]]; then
+		error "utxo freeze: <outpoint> must look like '<txid>:<vout>' (got '$outpoint')"
+		return 3
+	fi
+	if [[ "$reason" == *$'\t'* ]] || [[ "$reason" == *$'\n'* ]]; then
+		error "utxo freeze: <reason> must not contain tabs or newlines (storage is TSV)"
+		return 4
+	fi
+	local path; path="$(wallet:_path "$wallet")"
+	if [ ! -d "$path" ]; then
+		error "utxo freeze: no such wallet '$wallet' at $path"
+		return 5
+	fi
+	local file; file="$(utxo:_frozen_file "$wallet")"
+	local ts; ts="$(date +%s)"
+	# Idempotent: if the outpoint is already frozen, update the reason.
+	[ -f "$file" ] || : > "$file"
+	local tmp="$file.tmp"
+	awk -F'\t' -v o="$outpoint" '$1 != o { print }' "$file" > "$tmp"
+	printf '%s\t%s\t%s\n' "$outpoint" "$reason" "$ts" >> "$tmp"
+	mv "$tmp" "$file"
+	(
+		cd "$path"
+		git add frozen.tsv
+		if ! git diff --cached --quiet 2>/dev/null; then
+			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+			    -c commit.gpgsign=false \
+				commit -q -m "utxo freeze: $wallet $outpoint${reason:+ (reason: \"$reason\")}"
+		fi
+	) || { error "utxo freeze: commit failed"; return 6; }
+	info "frozen $outpoint in $wallet"
+}
+
+utxo:unfreeze() {
+	local wallet="${1:-}" outpoint="${2:-}"
+	if [ -z "$wallet" ] || [ -z "$outpoint" ]; then
+		error "utxo unfreeze: usage: utxo unfreeze <wallet> <txid:vout>"
+		return 2
+	fi
+	if [[ ! "$outpoint" =~ ^[[:xdigit:]]+:[0-9]+$ ]]; then
+		error "utxo unfreeze: <outpoint> must look like '<txid>:<vout>' (got '$outpoint')"
+		return 3
+	fi
+	local path; path="$(wallet:_path "$wallet")"
+	if [ ! -d "$path" ]; then
+		error "utxo unfreeze: no such wallet '$wallet' at $path"
+		return 4
+	fi
+	local file; file="$(utxo:_frozen_file "$wallet")"
+	if [ ! -f "$file" ]; then
+		info "$wallet has no frozen.tsv; nothing to unfreeze"
+		return 0
+	fi
+	if ! awk -F'\t' -v o="$outpoint" '$1==o{e=1; exit} END{exit !e}' "$file"; then
+		info "$outpoint is not frozen in $wallet"
+		return 0
+	fi
+	local tmp="$file.tmp"
+	awk -F'\t' -v o="$outpoint" '$1 != o { print }' "$file" > "$tmp"
+	mv "$tmp" "$file"
+	(
+		cd "$path"
+		git add frozen.tsv
+		if ! git diff --cached --quiet 2>/dev/null; then
+			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+			    -c commit.gpgsign=false \
+				commit -q -m "utxo unfreeze: $wallet $outpoint"
+		fi
+	) || { error "utxo unfreeze: commit failed"; return 5; }
+	info "unfrozen $outpoint in $wallet"
+}
+
 # FEAT-038 shorthand. `bitcoin tax label <wallet> <outpoint> --as
 # <category>` is byte-identical to `bitcoin wallet label <wallet>
 # <outpoint> --tax <category>`. Same backing code; just a more

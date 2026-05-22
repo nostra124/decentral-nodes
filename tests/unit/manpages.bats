@@ -36,7 +36,9 @@ setup() {
 # report-de + price land in 1.25.0.
 # tx verb added in 1.23.0 (FEAT-036); additive surface delegating
 # to wallet:* in this release.
-COMMAND_VERBS="wallet tx tax backend"
+# utxo verb added in 1.23.0 (FEAT-037); ships ls / freeze / unfreeze
+# in this release.
+COMMAND_VERBS="wallet tx utxo tax backend"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
 # mnemonic-to-seed dropped to DEPRECATED_ALIASES in 1.23.0
@@ -142,6 +144,10 @@ assert_sections() {
 
 @test "bitcoin-tx.1 has all required sections" {
 	assert_sections "$MAN_DIR/bitcoin-tx.1"
+}
+
+@test "bitcoin-utxo.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-utxo.1"
 }
 
 @test "bitcoin-descriptor.1 is a .so-include alias to bitcoin-bip380.1" {

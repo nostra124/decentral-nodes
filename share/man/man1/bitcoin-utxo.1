@@ -1,0 +1,194 @@
+.\" Manpage for bitcoin-utxo(1) — UTXO object verb (FEAT-037).
+.TH BITCOIN-UTXO 1 "2026-05-21" "bitcoin 1.23.0" "User Commands"
+
+.SH NAME
+bitcoin\-utxo \- UTXO as a first-class object verb
+
+.SH SYNOPSIS
+.B bitcoin utxo ls
+.I wallet
+.RI [ --include-frozen ]
+.br
+.B bitcoin utxo freeze
+.I wallet
+.I txid:vout
+.RI [ "--reason text" ]
+.br
+.B bitcoin utxo unfreeze
+.I wallet
+.I txid:vout
+.br
+.B bitcoin utxo help
+
+.SH DESCRIPTION
+.B bitcoin utxo
+exposes per-wallet unspent transaction outputs as a noun. Lets
+the operator list, freeze, and unfreeze UTXOs by hand — the
+coin-control surface Sparrow Wallet renders as a checkbox list,
+applied to the `bitcoin` wallet's git-backed model.
+
+Frozen UTXOs are excluded from
+.B bitcoin utxo ls
+by default
+.RI ( --include-frozen
+keeps them in the output) and will be refused by
+.B bitcoin tx build
+once the FEAT-036 follow-up integration lands.
+
+This release ships the
+.BR ls ,
+.BR freeze ,
+.B unfreeze
+subcommands.
+.B utxo select
+(standalone selection emitter with
+.BR --strategy
+greedy / branch-and-bound) and the
+.B wallet index
+deprecation alias follow in a separate PR per the
+ROADMAP-1.23.0 PR-sequencing.
+
+.SH OPTIONS
+.TP
+.B --include-frozen
+On
+.BR ls ,
+keep frozen rows in the output (marked with
+.B Y
+in the
+.B frozen
+column). Default excludes them entirely.
+.TP
+.BI "--reason " text
+On
+.BR freeze ,
+record a human-readable reason alongside the outpoint
+(e.g.
+.IR "KYC concern" ,
+.IR "CoinJoin segregation" ).
+Stored in the
+.B reason
+column of
+.IR frozen.tsv .
+Tabs and newlines in
+.I text
+are rejected (storage is TSV).
+
+.SH SUBCOMMANDS
+.TP
+.BI "ls " "wallet" " [--include-frozen]"
+Walk
+.IR wallet 's
+addresses ledger, query the active backend (see
+.BR bitcoin-backend (1))
+for unspent outputs at each address, and emit one TSV line per
+UTXO with columns
+.BR txid ", " vout ", " address ", " amount_sat ", " frozen .
+The
+.B frozen
+column is
+.B Y
+when the row is in
+.IR <wallet-repo>/frozen.tsv ;
+.B N
+otherwise. Without
+.BR --include-frozen ,
+.B Y
+rows are filtered out.
+.TP
+.BI "freeze " "wallet outpoint" " [--reason " text "]"
+Record
+.I outpoint
+(format:
+.IR <txid>:<vout> )
+in
+.IR <wallet-repo>/frozen.tsv .
+Three-column TSV: outpoint, reason, Unix timestamp.
+Idempotent on the same outpoint \(em the row is overwritten,
+not duplicated.
+.TP
+.BI "unfreeze " "wallet outpoint"
+Remove
+.I outpoint
+from
+.IR <wallet-repo>/frozen.tsv .
+No-op if the outpoint isn't currently frozen.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 2
+Missing required argument, or unknown subcommand / flag.
+.TP
+.B 3
+Outpoint shape rejected (not
+.IR <txid>:<vout> ).
+.TP
+.B 4
+.B freeze :
+reason contained tabs / newlines.
+.B ls :
+missing addresses ledger.
+.TP
+.B 5
+.B freeze " / " unfreeze :
+no such wallet.
+.B ls :
+no addresses ledger.
+.TP
+.B 6
+.B freeze " / " unfreeze :
+git commit failed.
+
+.SH FILES
+.TP
+.IB <wallet-repo>/frozen.tsv
+Per-wallet frozen-UTXO ledger. Three-column TSV:
+.BR outpoint ", " reason ", " unix-timestamp .
+Tracked in the wallet's git repository (per FEAT-011) so
+.B bitcoin wallet push
+and
+.B pull
+carry the frozen state across machines.
+.TP
+.IB <wallet-repo>/addresses
+Read by
+.B utxo ls
+to enumerate addresses for backend queries.
+
+.SH ENVIRONMENT
+.TP
+.B XDG_DATA_HOME
+Inherited from
+.BR bitcoin-wallet (1).
+The wallet's repo (including
+.IR frozen.tsv )
+lives under
+.IB $XDG_DATA_HOME /bitcoin/wallets/ <name> /.
+.TP
+.B BITCOIN_BACKEND
+Forwarded to
+.BR bitcoin-backend (1)
+during
+.B utxo ls
+to resolve unspent outputs per address.
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-wallet (1),
+.BR bitcoin-tx (1),
+.BR bitcoin-backend (1)
+
+.SH HISTORY
+Verb introduced in bitcoin 1.23.0 (FEAT-037). This release
+ships the
+.BR ls / freeze / unfreeze
+surface; the
+.B utxo select
+verb (with greedy and branch-and-bound strategies), the
+.B tx build
+refuse-frozen integration, and the
+.B wallet index
+deprecation alias follow in a separate PR.
