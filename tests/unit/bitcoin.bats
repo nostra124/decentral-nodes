@@ -843,20 +843,20 @@ setup_wallet_remote_env() {
 	# Stub backend broadcast: any POST to /api/tx returns this txid.
 	curl_fixture "https://mempool.space/api/tx" \
 		"4242424242424242424242424242424242424242424242424242424242424242"
-	run bash -c "echo '0200000001abcd' | '$BITCOIN_BIN' wallet broadcast alice"
+	run bash -c "echo '0200000001abcd' | '$BITCOIN_BIN' tx broadcast alice"
 	[ "$status" -eq 0 ]
 	[ "$output" = "4242424242424242424242424242424242424242424242424242424242424242" ]
 }
 
 @test "FEAT-014 — wallet broadcast rejects empty stdin" {
 	setup_wallet_derive_env
-	run bash -c "echo '' | '$BITCOIN_BIN' wallet broadcast alice"
+	run bash -c "echo '' | '$BITCOIN_BIN' tx broadcast alice"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-014 — wallet broadcast rejects non-hex input" {
 	setup_wallet_derive_env
-	run bash -c "echo 'this is not hex' | '$BITCOIN_BIN' wallet broadcast alice"
+	run bash -c "echo 'this is not hex' | '$BITCOIN_BIN' tx broadcast alice"
 	[ "$status" -ne 0 ]
 }
 
@@ -891,7 +891,7 @@ build_utxo_fixture() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	[[ "$output" =~ ^70736274ff ]]
 	# Round-trips through `psbt decode` (BIP-174 magic + section layout
@@ -911,7 +911,7 @@ build_utxo_fixture() {
 	# --fee-rate 1 pins the rate to keep the fee-arithmetic comment honest;
 	# the default-path (estimate-fee) is exercised separately below.
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	# Decode the global unsigned-tx record and pull out the value (hex).
 	psbt="$output"
@@ -936,7 +936,7 @@ build_utxo_fixture() {
 	# sats, below the 546-sat dust floor, so the builder folds it into the fee
 	# and emits a single output. --fee-rate 1 pins the rate.
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 50500 02)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	# Same offset arithmetic as the previous test: output count at hex 92.
@@ -949,7 +949,7 @@ build_utxo_fixture() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100 01)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"insufficient"* ]] || [[ "$stderr" == *"insufficient"* ]] || true
 }
@@ -959,13 +959,13 @@ build_utxo_fixture() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	run "$BITCOIN_BIN" wallet build alice not-a-valid-bech32-address 10000
+	run "$BITCOIN_BIN" tx build alice not-a-valid-bech32-address 10000
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-014 — wallet build rejects a missing wallet" {
 	setup_wallet_derive_env
-	run "$BITCOIN_BIN" wallet build no-such-wallet bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 10000
+	run "$BITCOIN_BIN" tx build no-such-wallet bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 10000
 	[ "$status" -ne 0 ]
 }
 
@@ -977,7 +977,7 @@ build_utxo_fixture() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	run "$BITCOIN_BIN" wallet build alice bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9 1000
+	run "$BITCOIN_BIN" tx build alice bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9 1000
 	[ "$status" -ne 0 ]
 }
 
@@ -1003,7 +1003,7 @@ build_utxo_fixture() {
 	# 10 sat/vB recommended for the half-hour bucket.
 	curl_fixture "https://mempool.space/api/v1/fees/recommended" \
 		'{"fastestFee":50,"halfHourFee":10,"hourFee":5,"economyFee":2,"minimumFee":1}'
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
 	[ "$status" -eq 0 ]
 	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	# Change-output LE-encoded value sits right after the recipient
@@ -1022,7 +1022,7 @@ build_utxo_fixture() {
 	# Backend would say 10 sat/vB; explicit --fee-rate 1 wins.
 	curl_fixture "https://mempool.space/api/v1/fees/recommended" \
 		'{"fastestFee":50,"halfHourFee":10,"hourFee":5,"economyFee":2,"minimumFee":1}'
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
 	change_le="${tx_hex:156:16}"
@@ -1037,7 +1037,7 @@ build_utxo_fixture() {
 	# Deliberately do NOT register the /api/v1/fees/recommended fixture —
 	# the curl stub will exit 22 and the builder must fall back to 1.
 	# --separate-stderr keeps the fallback warn off the PSBT we're parsing.
-	run --separate-stderr "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
+	run --separate-stderr "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
 	[ "$status" -eq 0 ]
 	[[ "$stderr" == *"falling back to 1 sat/vB"* ]]
 	tx_hex="$(echo "$output" | "$BITCOIN_BIN" bip174 decode | sed -n '1s/.*value=//p')"
@@ -1147,7 +1147,7 @@ psbt_vec1() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	run "$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -eq 0 ]
 	# Decode and look for a section=1 type=01 record carrying the
 	# UTXO's value (a086010000000000 = 100000 sats LE) followed by
@@ -1179,7 +1179,7 @@ ALICE_PUB="0330d54fd0dd420a6e5f8d3624f5f3482cae350f79d5f0753bf5beef9c2d91af3c"
 # a single 100000-sat UTXO. Returns the hex on stdout. Caller must
 # have already set up the wallet env + UTXO + fee fixtures.
 build_alice_psbt() {
-	"$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
+	"$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 }
 
 @test "FEAT-008 — psbt sign adds a PSBT_IN_PARTIAL_SIG record for the matching input" {
@@ -1316,7 +1316,7 @@ signed_alice_psbt() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
+	psbt="$("$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
 	echo "$psbt" | "$BITCOIN_BIN" bip174 sign "$ALICE_PRIV"
 }
 
@@ -1373,7 +1373,7 @@ signed_alice_psbt() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
+	psbt="$("$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
 	run bash -c "echo '$psbt' | '$BITCOIN_BIN' bip174 finalize"
 	[ "$status" -eq 0 ]
 	# Same input record blob (no FINAL_SCRIPTWITNESS added).
@@ -1394,8 +1394,8 @@ signed_alice_psbt() {
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
 	addr="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
-	psbt="$("$BITCOIN_BIN" wallet build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
-	run bash -c "echo '$psbt' | '$BITCOIN_BIN' wallet sign alice"
+	psbt="$("$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1)"
+	run bash -c "echo '$psbt' | '$BITCOIN_BIN' tx sign alice"
 	[ "$status" -eq 0 ]
 	# The signed PSBT carries a PARTIAL_SIG keyed by alice's compressed
 	# pubkey — same shape as the FEAT-008 psbt-sign test, but reached
@@ -1408,14 +1408,14 @@ signed_alice_psbt() {
 
 @test "FEAT-014 — wallet sign rejects a missing wallet" {
 	setup_wallet_derive_env
-	run bash -c "echo '70736274ff00' | '$BITCOIN_BIN' wallet sign no-such-wallet"
+	run bash -c "echo '70736274ff00' | '$BITCOIN_BIN' tx sign no-such-wallet"
 	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-014 — wallet sign rejects empty stdin" {
 	setup_wallet_derive_env
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
-	run bash -c "echo '' | '$BITCOIN_BIN' wallet sign alice"
+	run bash -c "echo '' | '$BITCOIN_BIN' tx sign alice"
 	[ "$status" -ne 0 ]
 }
 
