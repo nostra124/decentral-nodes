@@ -9,7 +9,7 @@ bitcoin\-tx \- transaction as a first-class object verb
 .I wallet
 .I address
 .I sats
-.RI [ "--fee-rate sat/vB" ]
+.RI [ "--fee-rate sat/vB" "] [" "--utxo txid:vout" "...]"
 .br
 .B bitcoin tx sign
 .I wallet
@@ -70,24 +70,42 @@ recommendation. Used by
 .B tx build
 when building the unsigned PSBT. Falls back to 1 sat/vB if the
 backend estimate is unavailable.
+.TP
+.BR "--utxo " txid:vout
+Coin control: restrict
+.B tx build
+to use only the specified outpoint(s). Repeatable; pass the
+flag once per UTXO to include. When at least one
+.B --utxo
+is supplied, greedy selection is bypassed entirely \(em
+only the listed outpoints are eligible. Each outpoint must
+be unspent at one of the wallet's derived addresses; an
+unknown outpoint errors with status 7. Pair with
+.BR bitcoin-utxo (1)
+.B ls
+to enumerate available outpoints.
 
 .SH SUBCOMMANDS
 .TP
-.BI "build " "wallet address sats" " [--fee-rate sat/vB]"
+.BI "build " "wallet address sats" " [--fee-rate sat/vB] [--utxo txid:vout ...]"
 Greedy largest-first UTXO selection from the wallet's derived
-addresses; builds an unsigned BIP-174 PSBT paying
+addresses (default); builds an unsigned BIP-174 PSBT paying
 .I sats
 to
 .I address ;
 prints the PSBT as hex on stdout. P2WPKH / P2WSH outputs only
 in this release.
 
-A future PR adds a
-.B --utxo <txid:vout>
-flag (repeatable) for explicit coin control \(em the
-foundations of
+With one or more
+.B --utxo
+flags, greedy selection is bypassed and only the listed
+outpoints are used (FEAT-037 coin-control integration).
+Frozen UTXOs (see
 .BR bitcoin-utxo (1)
-(FEAT-037).
+.BR freeze )
+are skipped in both modes; in greedy mode each skip emits one
+.B warn
+line.
 .TP
 .BI "sign " wallet
 Read a PSBT (hex) from stdin, derive a private key for every
