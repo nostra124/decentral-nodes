@@ -68,20 +68,14 @@ feat037_setup_wallet() {
 	[ "$got" = "$EXPECTED_SEED_HEX" ]
 }
 
-@test "FEAT-035 A — bitcoin mnemonic-to-seed alias produces identical bytes" {
-	canonical=$("$BITCOIN_BIN" bip39 mnemonic-to-seed $ABANDON_MNEMONIC 2>/dev/null)
-	# The alias path emits a warn on stderr; capture stdout only.
-	alias_out=$("$BITCOIN_BIN" mnemonic-to-seed $ABANDON_MNEMONIC 2>/dev/null)
-	[ "$canonical" = "$alias_out" ]
-}
-
-@test "FEAT-035 A — bitcoin mnemonic-to-seed alias emits one warn line" {
+@test "FEAT-035 A — bitcoin mnemonic-to-seed alias was removed in 1.24.0" {
+	# The deprecated standalone shim is gone; the dispatcher's
+	# command:mnemonic-to-seed stub errors with a clear removal
+	# message pointing at the canonical bip39 subcommand.
 	run --separate-stderr "$BITCOIN_BIN" mnemonic-to-seed $ABANDON_MNEMONIC
-	[ "$status" -eq 0 ]
-	# One warn line on stderr, naming the canonical and the removal release.
-	echo "$stderr" | grep -qE "warn .*mnemonic-to-seed.* deprecated.* 1\.23\.0"
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -qE "'mnemonic-to-seed' was removed in 1\.24\.0"
 	echo "$stderr" | grep -qF "bitcoin bip39 mnemonic-to-seed"
-	echo "$stderr" | grep -qF "1.24.0"
 }
 
 @test "FEAT-035 A — bitcoin bip39 mnemonic-to-seed does NOT emit a warn line" {
