@@ -1237,3 +1237,124 @@ feat034_env() {
 	echo "$output" | grep -qE "(^|[[:space:]])enable([[:space:]]|$)"
 	echo "$output" | grep -qE "(^|[[:space:]])disable([[:space:]]|$)"
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-033: install Bitcoin Core itself (daemon install).
+#
+# Each package manager and `account` are stubbed on PATH; sudo execs
+# its args transparently; a stub bitcoind reports a version so the
+# confirmation message can be asserted. $ACCT_PLATFORM drives the
+# auto-detect default.
+# ---------------------------------------------------------------------------
+
+feat033_env() {
+	export FEAT033_CALLS="$HOME/install-calls.log"
+	: > "$FEAT033_CALLS"
+	local stub="$HOME/install-stub" c
+	mkdir -p "$stub"
+	for c in brew port apt-get apk add-apt-repository; do
+		cat > "$stub/$c" <<-STUB
+			#!/usr/bin/env bash
+			printf '%s %s\n' "$c" "\$*" >> "$FEAT033_CALLS"
+			exit 0
+		STUB
+		chmod +x "$stub/$c"
+	done
+	cat > "$stub/sudo" <<-'STUB'
+		#!/usr/bin/env bash
+		exec "$@"
+	STUB
+	chmod +x "$stub/sudo"
+	cat > "$stub/account" <<-'STUB'
+		#!/usr/bin/env bash
+		[ "$1" = platform ] && printf '%s\n' "${ACCT_PLATFORM:-}"
+		exit 0
+	STUB
+	chmod +x "$stub/account"
+	cat > "$stub/bitcoind" <<-'STUB'
+		#!/usr/bin/env bash
+		[ "$1" = --version ] && echo "Bitcoin Core version v27.0.0"
+		exit 0
+	STUB
+	chmod +x "$stub/bitcoind"
+	export PATH="$stub:$PATH"
+}
+
+@test "FEAT-033 — install --from brew runs 'brew install bitcoin'" {
+	feat033_env
+	run "$BITCOIN_BIN" daemon install --from brew
+	[ "$status" -eq 0 ]
+	grep -q 'brew install bitcoin' "$FEAT033_CALLS"
+}
+
+@test "FEAT-033 — install --from apt installs bitcoind via apt-get" {
+	feat033_env
+	run "$BITCOIN_BIN" daemon install --from apt
+	[ "$status" -eq 0 ]
+	grep -q 'apt-get install -y bitcoind' "$FEAT033_CALLS"
+}
+
+@test "FEAT-033 — install --from apk adds the bitcoin package" {
+	feat033_env
+	run "$BITCOIN_BIN" daemon install --from apk
+	[ "$status" -eq 0 ]
+	grep -q 'apk add bitcoin' "$FEAT033_CALLS"
+}
+
+@test "FEAT-033 — install auto-detects apt on ubuntu" {
+	feat033_env
+	ACCT_PLATFORM=ubuntu run "$BITCOIN_BIN" daemon install
+	[ "$status" -eq 0 ]
+	grep -q 'apt-get install -y bitcoind' "$FEAT033_CALLS"
+}
+
+@test "FEAT-033 — install auto-detects apk on alpine" {
+	feat033_env
+	ACCT_PLATFORM=alpine run "$BITCOIN_BIN" daemon install
+	[ "$status" -eq 0 ]
+	grep -q 'apk add bitcoin' "$FEAT033_CALLS"
+}
+
+@test "FEAT-033 — install auto-detects brew on macos" {
+	feat033_env
+	ACCT_PLATFORM=macos run "$BITCOIN_BIN" daemon install
+	[ "$status" -eq 0 ]
+	grep -q 'brew install bitcoin' "$FEAT033_CALLS"
+}
+
+@test "FEAT-033 — install errors when the package manager is absent" {
+	feat033_env
+	rm -f "$HOME/install-stub/brew"
+	run --separate-stderr "$BITCOIN_BIN" daemon install --from brew
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q "required tool 'brew' not found"
+}
+
+@test "FEAT-033 — install --from rpk errors with a pointer to the rpk doc" {
+	feat033_env
+	run --separate-stderr "$BITCOIN_BIN" daemon install --from rpk
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q 'not yet available'
+	echo "$stderr" | grep -q 'docs/rpk-bitcoind.md'
+}
+
+@test "FEAT-033 — install rejects an unknown source" {
+	feat033_env
+	run --separate-stderr "$BITCOIN_BIN" daemon install --from frobnicate
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q "unknown source 'frobnicate'"
+	echo "$stderr" | grep -q 'brew, macports, apt, apk, source, rpk'
+}
+
+@test "FEAT-033 — install prints the installed bitcoind --version" {
+	feat033_env
+	run "$BITCOIN_BIN" daemon install --from apt
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q 'Bitcoin Core version v27.0.0'
+}
+
+@test "FEAT-033 — daemon help lists install" {
+	run bash -c "'$BITCOIN_BIN' daemon help 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qE "(^|[[:space:]])install([[:space:]]|$)"
+}
