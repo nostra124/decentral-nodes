@@ -26,7 +26,8 @@ setup() {
 # Verbs implemented inside bin/bitcoin as command:<name> functions.
 # Help / version / modules are documented in the parent bitcoin(1)
 # and intentionally do not get their own page.
-# psbt dropped to DEPRECATED_ALIASES in 1.23.0 (FEAT-035 Stream D).
+# psbt shim removed in 1.24.0 (FEAT-035 alias-removal sweep);
+# canonical is bip174.
 # bech32 dropped to DEPRECATED_ALIASES in 1.23.0 (FEAT-035 Stream C2)
 # — canonical homes are bip173 (bech32) and bip350 (bech32m).
 # descriptor partially deprecated in 1.23.0 (FEAT-035 Stream B):
@@ -50,7 +51,7 @@ LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 bip380 daemon wif"
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
 # Each entry is "<alias>=<canonical>".
-DEPRECATED_ALIASES="psbt=bip174 bech32=bip173 descriptor=bip380"
+DEPRECATED_ALIASES="bech32=bip173 descriptor=bip380"
 
 @test "every command: verb has a bitcoin-<verb>.1 source file" {
 	for v in $COMMAND_VERBS; do
@@ -156,9 +157,11 @@ assert_sections() {
 	grep -qE '^\.so man1/bitcoin-bip380\.1$' "$MAN_DIR/bitcoin-descriptor.1"
 }
 
-@test "bitcoin-psbt.1 is a .so-include alias to bitcoin-bip174.1" {
-	# FEAT-041 alias convention (Stream D made psbt a deprecated alias).
-	grep -qE '^\.so man1/bitcoin-bip174\.1$' "$MAN_DIR/bitcoin-psbt.1"
+@test "bitcoin-psbt.1 was removed in 1.24.0" {
+	# FEAT-035 alias-removal sweep: the .so-include is gone alongside
+	# its underlying command:psbt shim. Users land on bitcoin-bip174(1)
+	# directly.
+	[ ! -e "$MAN_DIR/bitcoin-psbt.1" ]
 }
 
 @test "bitcoin-bech32.1 is a .so-include alias to bitcoin-bip173.1" {
