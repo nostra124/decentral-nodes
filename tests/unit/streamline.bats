@@ -447,43 +447,35 @@ feat037_setup_wallet() {
 # deprecated aliases that warn + forward. wallet:send was
 # migrated to call tx:* directly so it stays warn-free.
 
-@test "FEAT-036 followup — wallet build emits one warn line citing tx build" {
+@test "FEAT-036 followup — wallet build was removed in 1.24.0" {
 	run --separate-stderr "$BITCOIN_BIN" wallet build
 	[ "$status" -ne 0 ]
-	echo "$stderr" | grep -qE "warn .*wallet build.* deprecated.* 1\.23\.0"
+	echo "$stderr" | grep -qE "'wallet build' was removed in 1\.24\.0"
 	echo "$stderr" | grep -qF "bitcoin tx build"
-	echo "$stderr" | grep -qF "1.24.0"
 }
 
-@test "FEAT-036 followup — wallet sign emits one warn line citing tx sign" {
+@test "FEAT-036 followup — wallet sign was removed in 1.24.0" {
 	run --separate-stderr "$BITCOIN_BIN" wallet sign
 	[ "$status" -ne 0 ]
-	echo "$stderr" | grep -qE "warn .*wallet sign.* deprecated.* 1\.23\.0"
+	echo "$stderr" | grep -qE "'wallet sign' was removed in 1\.24\.0"
 	echo "$stderr" | grep -qF "bitcoin tx sign"
 }
 
-@test "FEAT-036 followup — wallet broadcast emits one warn line citing tx broadcast" {
+@test "FEAT-036 followup — wallet broadcast was removed in 1.24.0" {
 	run --separate-stderr "$BITCOIN_BIN" wallet broadcast
 	[ "$status" -ne 0 ]
-	echo "$stderr" | grep -qE "warn .*wallet broadcast.* deprecated.* 1\.23\.0"
+	echo "$stderr" | grep -qE "'wallet broadcast' was removed in 1\.24\.0"
 	echo "$stderr" | grep -qF "bitcoin tx broadcast"
 }
 
-@test "FEAT-036 followup — bitcoin tx build emits NO deprecation warn" {
-	# Canonical path stays silent. Usage error from missing args is
-	# fine; the warn line specifically citing the 1.23.0 deprecation
-	# must be absent.
+@test "FEAT-036 followup — bitcoin tx build emits NO deprecation/removal warn" {
+	# Canonical path stays clean. Usage error from missing args is
+	# fine; no deprecation/removal message should appear.
 	run --separate-stderr "$BITCOIN_BIN" tx build
-	if echo "$stderr" | grep -qE "deprecated.* 1\.23\.0"; then
-		echo "unexpected deprecation warn on canonical path: $stderr"
+	if echo "$stderr" | grep -qE "deprecated|was removed in"; then
+		echo "unexpected deprecation/removal message on canonical path: $stderr"
 		return 1
 	fi
-}
-
-@test "FEAT-036 followup — wallet build alias error-message uses tx canonical name" {
-	run "$BITCOIN_BIN" wallet build
-	[ "$status" -ne 0 ]
-	echo "$output" | grep -q "tx build:"
 }
 
 # ---------------------------------------------------------------------------

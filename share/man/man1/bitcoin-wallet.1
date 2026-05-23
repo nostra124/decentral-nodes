@@ -29,23 +29,11 @@ bitcoin\-wallet \- create, derive, sign, send, and synchronise wallets
 .B bitcoin wallet balance
 .I name
 .br
-.B bitcoin wallet build
-.I name
-.I addr
-.I sats
-.RI [ "--fee-rate sat/vB" ]
-.br
-.B bitcoin wallet sign
-.I name
-.br
 .B bitcoin wallet send
 .I name
 .I addr
 .I sats
 .RI [ "--fee-rate sat/vB" "] [" "--utxo txid:vout" "...] [" --mainnet ]
-.br
-.B bitcoin wallet broadcast
-.I name
 .br
 .B bitcoin wallet index
 .I name
@@ -200,23 +188,19 @@ any are found. Useful as a release-time gate before running
 .BI "balance " name
 Sum UTXO values for all derived addresses via the active backend.
 .TP
-.BI "build " "name addr sats" " [--fee-rate sat/vB]"
-Greedy-select wallet UTXOs, build an unsigned tx that pays
-.I sats
-to
-.IR addr ,
-wrap as a PSBT, print as hex. Without
-.BR --fee-rate ,
-reads
-.B "bitcoin backend estimate-fee 3"
-and falls back to 1 sat/vB on backend failure. P2WPKH / P2WSH
-outputs only.
-.TP
-.BI "sign " name
-Read a PSBT (hex) from stdin, derive a private key for every
-address in the wallet's ledger, pipe the PSBT through
-.B "bitcoin psbt sign"
-for each. Inputs the keys can't sign pass through unmodified.
+.BR "build " / " sign " / " broadcast"
+Removed in 1.24.0. These transaction operations moved to the
+.B tx
+object verb \(em see
+.BR bitcoin-tx (1):
+.BR "bitcoin tx build" ,
+.BR "bitcoin tx sign" ,
+.BR "bitcoin tx broadcast" .
+Calling them under
+.B wallet
+errors with a pointer to the canonical form. The
+.B send
+verb below remains the one-shot convenience composition.
 .TP
 .BI "send " "name addr sats" " [--fee-rate sat/vB] [--utxo txid:vout ...] [--mainnet]"
 End-to-end: build | sign | psbt finalize | psbt extract |
@@ -236,10 +220,6 @@ restricts selection to that outpoint. Pair with
 to preview a branch-and-bound subset, then feed the chosen
 outpoints back into
 .BR "wallet send" .
-.TP
-.BI "broadcast " name
-POST raw-tx hex from stdin to the active backend; print the
-returned txid.
 .TP
 .BI "index " name
 For every address in the wallet's ledger, fetch every tx via
