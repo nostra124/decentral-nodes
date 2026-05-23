@@ -127,10 +127,6 @@ Output script descriptors (partially deprecated;
 forward to
 .BR bitcoin-bip380 (1)
 since 1.23.0).
-.TP
-.BR bitcoin-psbt (1)
-Partially-signed Bitcoin transactions (deprecated alias for
-.BR bitcoin-bip174 (1)).
 
 .SS Object verbs
 .TP
@@ -240,9 +236,9 @@ The same flow split across two machines (hot-build, cold-sign):
 .PP
 .RS
 .EX
-hot$  bitcoin wallet build alice bc1qrecipient 50000 > tx.psbt
-cold$ bitcoin wallet sign  alice < tx.psbt | bitcoin psbt finalize > signed.psbt
-hot$  bitcoin psbt extract < signed.psbt | bitcoin wallet broadcast alice
+hot$  bitcoin tx build alice bc1qrecipient 50000 > tx.psbt
+cold$ bitcoin tx sign  alice < tx.psbt | bitcoin bip174 finalize > signed.psbt
+hot$  bitcoin bip174 extract < signed.psbt | bitcoin tx broadcast alice
 .EE
 .RE
 
@@ -277,13 +273,13 @@ The vendored specifications live under
 \(em consumed by
 .B wallet build
 +
-.BR "psbt extract" .
+.BR "bip174 extract" .
 .TP
 .B BIP-143 (segwit sighash)
 .UR https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki
 .UE
 \(em consumed by
-.BR "psbt sign" .
+.BR "bip174 sign" .
 .TP
 .B BIP-173 (bech32 segwit addresses)
 .UR https://github.com/bitcoin/bips/blob/master/bip-0173.mediawiki
@@ -334,7 +330,6 @@ Per-subcommand pages:
 .BR bitcoin-bip380 (1),
 .BR bitcoin-daemon (1),
 .BR bitcoin-descriptor (1),
-.BR bitcoin-psbt (1),
 .BR bitcoin-tax (1),
 .BR bitcoin-tx (1),
 .BR bitcoin-utxo (1),

@@ -667,9 +667,8 @@ _emit_varint() {
 }
 
 command:psbt() {
-	warn "'psbt' is deprecated since 1.23.0; use 'bitcoin bip174' (will be removed in 1.24.0)"
-	local libexec="${SELF_LIBEXEC:?command:psbt: SELF_LIBEXEC must be set}"
-	exec "$libexec/${SELF:-bitcoin}/bip174" "$@"
+	error "'psbt' was removed in 1.24.0; use 'bitcoin bip174'"
+	return 1
 }
 
 command:wallet() {

@@ -235,20 +235,14 @@ feat037_setup_wallet() {
 	[ "$roundtrip" = "$original" ]
 }
 
-@test "FEAT-035 D — bitcoin bip174 decode == bitcoin psbt decode (same bytes)" {
-	original="70736274ff0100010000"
-	canonical=$(printf '%s\n' "$original" | "$BITCOIN_BIN" bip174 decode 2>/dev/null)
-	# Alias path emits warn on stderr; strip with 2>/dev/null.
-	alias_out=$(printf '%s\n' "$original" | "$BITCOIN_BIN" psbt decode 2>/dev/null)
-	[ "$canonical" = "$alias_out" ]
-}
-
-@test "FEAT-035 D — bitcoin psbt alias emits one warn line" {
+@test "FEAT-035 D — bitcoin psbt alias was removed in 1.24.0" {
+	# FEAT-035 alias-removal sweep: the warn-and-forward command:psbt
+	# now errors out with a clear removal message pointing at the
+	# canonical bip174 plugin.
 	run --separate-stderr bash -c "echo '70736274ff00' | '$BITCOIN_BIN' psbt decode"
-	[ "$status" -eq 0 ]
-	echo "$stderr" | grep -qE "warn .*psbt.* deprecated.* 1\.23\.0"
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -qE "'psbt' was removed in 1\.24\.0"
 	echo "$stderr" | grep -qF "bitcoin bip174"
-	echo "$stderr" | grep -qF "1.24.0"
 }
 
 @test "FEAT-035 D — bitcoin bip174 decode does NOT emit a warn line" {
