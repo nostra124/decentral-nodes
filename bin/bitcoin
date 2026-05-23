@@ -1740,16 +1740,16 @@ tx:broadcast() {
 # wallet:send was migrated to call tx:* directly so the
 # convenience verb stays warn-free.
 wallet:build() {
-	warn "'wallet build' is deprecated since 1.23.0; use 'bitcoin tx build' (will be removed in 1.24.0)"
-	tx:build "$@"
+	error "'wallet build' was removed in 1.24.0; use 'bitcoin tx build'"
+	return 1
 }
 wallet:sign() {
-	warn "'wallet sign' is deprecated since 1.23.0; use 'bitcoin tx sign' (will be removed in 1.24.0)"
-	tx:sign "$@"
+	error "'wallet sign' was removed in 1.24.0; use 'bitcoin tx sign'"
+	return 1
 }
 wallet:broadcast() {
-	warn "'wallet broadcast' is deprecated since 1.23.0; use 'bitcoin tx broadcast' (will be removed in 1.24.0)"
-	tx:broadcast "$@"
+	error "'wallet broadcast' was removed in 1.24.0; use 'bitcoin tx broadcast'"
+	return 1
 }
 
 # ---------------------------------------------------------------------------
