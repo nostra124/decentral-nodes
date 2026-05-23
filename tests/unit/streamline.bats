@@ -1358,3 +1358,95 @@ feat033_env() {
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -qE "(^|[[:space:]])install([[:space:]]|$)"
 }
+
+# ---------------------------------------------------------------------------
+# BUG-015: legacy daemon verbs folded onto the new abstraction.
+#
+# start / stop / monitor / space now drive the same systemd / launchd
+# service `enable` installs, with --user (default) / --system modes.
+# systemctl / launchctl / journalctl are stubbed; space runs real
+# `du` against the data dir.
+# ---------------------------------------------------------------------------
+
+bug015_env() {
+	export BUG015_CALLS="$HOME/lifecycle-calls.log"
+	: > "$BUG015_CALLS"
+	local stub="$HOME/lifecycle-stub" c
+	mkdir -p "$stub"
+	for c in systemctl launchctl journalctl; do
+		cat > "$stub/$c" <<-STUB
+			#!/usr/bin/env bash
+			printf '%s %s\n' "$c" "\$*" >> "$BUG015_CALLS"
+			exit 0
+		STUB
+		chmod +x "$stub/$c"
+	done
+	cat > "$stub/sudo" <<-'STUB'
+		#!/usr/bin/env bash
+		exec "$@"
+	STUB
+	chmod +x "$stub/sudo"
+	export PATH="$stub:$PATH"
+}
+
+@test "BUG-015 — start --user drives systemctl --user (linux)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon start
+	[ "$status" -eq 0 ]
+	grep -q 'systemctl --user start bitcoind' "$BUG015_CALLS"
+}
+
+@test "BUG-015 — start --system drives system systemctl (linux)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon start --system
+	[ "$status" -eq 0 ]
+	grep -q 'systemctl start bitcoind' "$BUG015_CALLS"
+	! grep -q 'systemctl --user' "$BUG015_CALLS"
+}
+
+@test "BUG-015 — stop --user drives systemctl --user (linux)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon stop
+	[ "$status" -eq 0 ]
+	grep -q 'systemctl --user stop bitcoind' "$BUG015_CALLS"
+}
+
+@test "BUG-015 — start --user kickstarts the LaunchAgent (macos)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon start
+	[ "$status" -eq 0 ]
+	grep -q 'launchctl kickstart -k gui/.*/org.bitcoin.bitcoind' "$BUG015_CALLS"
+}
+
+@test "BUG-015 — stop --user signals the LaunchAgent (macos)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon stop
+	[ "$status" -eq 0 ]
+	grep -q 'launchctl kill SIGTERM gui/.*/org.bitcoin.bitcoind' "$BUG015_CALLS"
+}
+
+@test "BUG-015 — monitor follows the journal (linux)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon monitor
+	[ "$status" -eq 0 ]
+	grep -q 'journalctl --user -u bitcoind -f' "$BUG015_CALLS"
+}
+
+@test "BUG-015 — space errors when the data dir is absent" {
+	bug015_env
+	# setup() pre-creates $XDG_DATA_HOME/bitcoin/wallets; point at a
+	# fresh data home with no bitcoin/ dir so the absent path is hit.
+	export XDG_DATA_HOME="$(mktemp -d "$BATS_TMPDIR/empty.XXXXXX")"
+	run --separate-stderr "$BITCOIN_BIN" daemon space
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q "data dir '.*' does not exist"
+}
+
+@test "BUG-015 — space reports the data dir's disk usage" {
+	bug015_env
+	mkdir -p "$XDG_DATA_HOME/bitcoin"
+	head -c 4096 /dev/zero > "$XDG_DATA_HOME/bitcoin/blk"
+	run "$BITCOIN_BIN" daemon space
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qE '^[0-9.]+[KMG]?'
+}
