@@ -2,7 +2,7 @@
 id: BUG-015
 type: bug
 priority: low
-status: open
+status: closed
 ---
 
 # `daemon` libexec plugin is undocumented, untested, and has no feature origin
