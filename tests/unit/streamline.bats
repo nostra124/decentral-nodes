@@ -940,3 +940,157 @@ JSON
 	echo "$output" | grep -q "rbf"
 	echo "$output" | grep -q "cpfp"
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-040: BTC/EUR price oracle.
+#
+# csv:// source + cache reads need no network. The coingecko path
+# uses a local curl stub (the real API is hit only in the SIT tier).
+# ---------------------------------------------------------------------------
+
+# Per-test isolated price environment. HOME is already a temp dir
+# (from setup); pin the cache + source config under it.
+feat040_env() {
+	export XDG_CONFIG_HOME="$HOME/.config"
+	export BITCOIN_PRICE_CACHE="$HOME/.bitcoin/cache/price/btc-eur.tsv"
+	unset BITCOIN_PRICE_SOURCE
+	mkdir -p "$HOME/.config/bitcoin"
+}
+
+# Install a curl stub that maps the coingecko history URL for a
+# given date to a canned market_data.current_price.eur body.
+feat040_coingecko_stub() {
+	local stub_dir="$BATS_TMPDIR/cg-stub.$BATS_TEST_NUMBER"
+	rm -rf "$stub_dir"; mkdir -p "$stub_dir"
+	cat > "$stub_dir/curl" <<'STUB'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do case "$a" in http*://*) url="$a";; esac; done
+# Any coingecko history URL → a fixed EUR price keyed by the date arg.
+case "$url" in
+	*coins/bitcoin/history*)
+		d="$(printf '%s' "$url" | sed -n 's/.*date=\([0-9-]*\).*/\1/p')"
+		# DD-MM-YYYY → deterministic price (just echo a fixed value).
+		echo '{"market_data":{"current_price":{"eur":42000.5}}}'
+		exit 0 ;;
+esac
+echo "cg-stub: no fixture for $url" >&2
+exit 22
+STUB
+	chmod +x "$stub_dir/curl"
+	export PATH="$stub_dir:$PATH"
+}
+
+@test "FEAT-040 — price help lists every subcommand" {
+	run bash -c "'$BITCOIN_BIN' price help 2>&1"
+	[ "$status" -eq 0 ]
+	for sub in get fetch source status; do
+		echo "$output" | grep -qE "(^|[[:space:]])$sub([[:space:]]|$)" \
+			|| { echo "help missing: $sub"; return 1; }
+	done
+}
+
+@test "FEAT-040 — price (no subcommand) prints help" {
+	run "$BITCOIN_BIN" price
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "Usage:"
+}
+
+@test "FEAT-040 — price <unknown> errors" {
+	run "$BITCOIN_BIN" price wat
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "unknown price subcommand"
+}
+
+@test "FEAT-040 — price get with no arg usage-errors" {
+	run "$BITCOIN_BIN" price get
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "usage: price get"
+}
+
+@test "FEAT-040 — price get rejects a malformed date" {
+	run "$BITCOIN_BIN" price get 2024/01/01
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "not a valid ISO-8601 date"
+}
+
+@test "FEAT-040 — price get on an empty cache warns to fetch" {
+	feat040_env
+	run "$BITCOIN_BIN" price get 2024-01-01
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "price fetch"
+}
+
+@test "FEAT-040 — price source defaults to coingecko" {
+	feat040_env
+	run "$BITCOIN_BIN" price source
+	[ "$status" -eq 0 ]
+	[ "$output" = "coingecko" ]
+}
+
+@test "FEAT-040 — price source --set kraken persists" {
+	feat040_env
+	"$BITCOIN_BIN" price source --set kraken >/dev/null
+	run "$BITCOIN_BIN" price source
+	[ "$output" = "kraken" ]
+}
+
+@test "FEAT-040 — price source --set rejects an unknown source" {
+	feat040_env
+	run "$BITCOIN_BIN" price source --set ftp://nope
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "unknown source"
+}
+
+@test "FEAT-040 — csv source fetch + get round-trips with no network" {
+	feat040_env
+	printf '2024-01-01,42000,x\n2024-01-02,43000,x\n2024-01-09,50000,x\n' > "$HOME/prices.csv"
+	"$BITCOIN_BIN" price source --set "csv://$HOME/prices.csv" >/dev/null
+	"$BITCOIN_BIN" price fetch --from 2024-01-01 --to 2024-01-07 >/dev/null
+	[ "$("$BITCOIN_BIN" price get 2024-01-01)" = "42000" ]
+	[ "$("$BITCOIN_BIN" price get 2024-01-02)" = "43000" ]
+	# 2024-01-09 is outside the fetched range → not cached.
+	run "$BITCOIN_BIN" price get 2024-01-09
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-040 — price fetch is idempotent (re-fetch adds zero rows)" {
+	feat040_env
+	printf '2024-01-01,42000,x\n' > "$HOME/prices.csv"
+	"$BITCOIN_BIN" price source --set "csv://$HOME/prices.csv" >/dev/null
+	"$BITCOIN_BIN" price fetch --from 2024-01-01 --to 2024-01-01 >/dev/null
+	rows1="$(grep -c . "$BITCOIN_PRICE_CACHE")"
+	"$BITCOIN_BIN" price fetch --from 2024-01-01 --to 2024-01-01 >/dev/null
+	rows2="$(grep -c . "$BITCOIN_PRICE_CACHE")"
+	[ "$rows1" = "$rows2" ]
+}
+
+@test "FEAT-040 — price fetch rejects --from after --to" {
+	feat040_env
+	run "$BITCOIN_BIN" price fetch --from 2024-02-01 --to 2024-01-01
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "is after"
+}
+
+@test "FEAT-040 — coingecko fetch via curl stub populates the cache" {
+	feat040_env
+	feat040_coingecko_stub
+	# default source is coingecko
+	run "$BITCOIN_BIN" price fetch --from 2024-03-01 --to 2024-03-03
+	[ "$status" -eq 0 ]
+	# Three days fetched, each at the stub's fixed price.
+	[ "$("$BITCOIN_BIN" price get 2024-03-02)" = "42000.5" ]
+	rows="$(grep -c . "$BITCOIN_PRICE_CACHE")"
+	[ "$rows" = "3" ]
+}
+
+@test "FEAT-040 — price status reports coverage" {
+	feat040_env
+	mkdir -p "$(dirname "$BITCOIN_PRICE_CACHE")"
+	# Cache is TSV (tab-separated): date, eur_per_btc, source.
+	printf '2024-01-01\t42000\tcsv\n2024-01-05\t46000\tcsv\n' > "$BITCOIN_PRICE_CACHE"
+	run "$BITCOIN_BIN" price status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "rows: 2"
+	echo "$output" | grep -q "2024-01-01 .. 2024-01-05"
+}

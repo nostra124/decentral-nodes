@@ -43,7 +43,8 @@ setup() {
 # to wallet:* in this release.
 # utxo verb added in 1.23.0 (FEAT-037); ships ls / freeze / unfreeze
 # in this release.
-COMMAND_VERBS="wallet tx utxo tax backend descriptor"
+# price verb added in 1.25.0 (FEAT-040); BTC/EUR oracle.
+COMMAND_VERBS="wallet tx utxo tax price backend descriptor"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
 # bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).
@@ -147,6 +148,10 @@ assert_sections() {
 
 @test "bitcoin-tax.1 has all required sections" {
 	assert_sections "$MAN_DIR/bitcoin-tax.1"
+}
+
+@test "bitcoin-price.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-price.1"
 }
 
 @test "bitcoin-tx.1 has all required sections" {

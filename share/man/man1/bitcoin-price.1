@@ -1,0 +1,169 @@
+.\" Manpage for bitcoin-price(1) — BTC/EUR price oracle (FEAT-040).
+.TH BITCOIN-PRICE 1 "2026-05-23" "bitcoin 1.25.0" "User Commands"
+
+.SH NAME
+bitcoin\-price \- BTC/EUR historical price oracle (local cache)
+
+.SH SYNOPSIS
+.B bitcoin price get
+.I YYYY-MM-DD
+.br
+.B bitcoin price fetch
+.RI [ "--from YYYY-MM-DD" "] [" "--to YYYY-MM-DD" ]
+.br
+.B bitcoin price source
+.RI [ "--set coingecko|kraken|csv://<path>" ]
+.br
+.B bitcoin price status
+.br
+.B bitcoin price help
+
+.SH DESCRIPTION
+.B bitcoin price
+maintains a deterministic, offline-after-warm cache of daily
+BTC/EUR prices for the German tax report
+.RB ( "bitcoin tax report-de" ,
+FEAT-039, 1.25.0).
+
+.B fetch
+is the only verb that touches the network;
+.BR get ", " status
+read the cache only. This keeps a report run reproducible and
+auditable: the cache is the canonical input, populated by an
+explicit
+.B fetch
+step the user runs beforehand. Given the same wallet history
+and the same cache, the report is byte-identical every run.
+
+The
+.B "price of the day"
+is the
+.B "00:00 UTC snapshot"
+the source reports for the requested date. CoinGecko's
+historical endpoint returns that snapshot directly; kraken and
+csv rows snap to the same 00:00 UTC daily mark.
+
+.SH OPTIONS
+.TP
+.BI "--from " YYYY-MM-DD
+First date to fetch (inclusive). Defaults to today.
+.TP
+.BI "--to " YYYY-MM-DD
+Last date to fetch (inclusive). Defaults to
+.BR --from .
+.TP
+.BI "--set " "coingecko|kraken|csv://<path>"
+On
+.BR source ,
+set the active price source.
+
+.SH SUBCOMMANDS
+.TP
+.BI "get " YYYY-MM-DD
+Print EUR per BTC for the date, read from the local cache.
+Errors (with a
+.B warn
+pointing at
+.BR fetch )
+if the date isn't cached \(em there are no silent network
+fetches here, so reports stay reproducible.
+.TP
+.BR "fetch " [ "--from D" "] [" "--to D" ]
+Populate the cache from the active source for the date range
+(default: today). Idempotent \(em only missing dates are
+fetched. The
+.B only
+networked verb.
+.TP
+.BR "source " [ "--set <source>" ]
+View or set the price source. Default
+.BR coingecko .
+.B csv://<path>
+reads a local CSV (columns: date, eur_per_btc, ignored) with no
+network call;
+.B kraken
+is scaffolded but not implemented in this release.
+.TP
+.B status
+Print the cache location, row count, date coverage, and active
+source.
+.TP
+.B help
+This message.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 2
+Missing / unexpected argument, or unknown subcommand / flag.
+.TP
+.B 3
+Invalid date, or
+.B --from
+after
+.BR --to .
+.TP
+.B \(>=4
+Cache empty / date not cached
+.RB ( get ),
+or fetch-source error
+.RB ( fetch ).
+Specific errors emit a
+.B warn
+or
+.B error
+line per CLAUDE.md §10.
+
+.SH FILES
+.TP
+.I ~/.bitcoin/cache/price/btc-eur.tsv
+The price cache. Three TAB-separated columns:
+.BR date " (ISO 8601, UTC, the 00:00 UTC snapshot), " eur_per_btc ", " source .
+Append-only; the most recent row per date wins (later revisions
+are appended with a fresh source tag). Global per machine \(em
+shared across wallets, not in any wallet's git repo.
+.TP
+.I $XDG_CONFIG_HOME/bitcoin/price-source
+Persists the active source name.
+
+.SH ENVIRONMENT
+.TP
+.B BITCOIN_PRICE_CACHE
+Override the cache path (default
+.IR ~/.bitcoin/cache/price/btc-eur.tsv ).
+.TP
+.B BITCOIN_PRICE_SOURCE
+Override the active source (highest priority, above the config
+file).
+.TP
+.B BITCOIN_COINGECKO_URL
+Override the CoinGecko API base (default
+.IR https://api.coingecko.com ).
+
+.SH STANDARDS
+.IP \(bu 2
+CoinGecko historical price API:
+.UR https://docs.coingecko.com/reference/coins-id-history
+.UE
+\(em
+.IR /api/v3/coins/bitcoin/history?date=DD-MM-YYYY .
+.IP \(bu 2
+Kraken OHLC API (scaffolded):
+.UR https://docs.kraken.com/api/docs/rest-api/get-ohlc-data
+.UE .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-tax (1),
+.BR bitcoin-wallet (1)
+
+.SH HISTORY
+Verb introduced in bitcoin 1.25.0 (FEAT-040) as the
+deterministic price input for the German tax report
+.RB ( "bitcoin tax report-de" ,
+FEAT-039). BTC/EUR only \(em other fiat pairs land with their
+own
+.B tax report-XX
+verbs.
