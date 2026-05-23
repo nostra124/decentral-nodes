@@ -30,16 +30,17 @@ setup() {
 # canonical is bip174.
 # bech32 dropped to DEPRECATED_ALIASES in 1.23.0 (FEAT-035 Stream C2)
 # — canonical homes are bip173 (bech32) and bip350 (bech32m).
-# descriptor partially deprecated in 1.23.0 (FEAT-035 Stream B):
-# checksum/verify/derive are aliases to bip380; descriptor wallet
-# stays in bin/bitcoin. The page is a .so include to bip380.
+# descriptor: checksum/verify/derive moved to bip380 in 1.23.0
+# (FEAT-035 Stream B) and the deprecated aliases were removed in
+# 1.24.0. The surviving `descriptor wallet` subcommand keeps a
+# real bitcoin-descriptor(1) page (not a .so alias).
 # tax verb added in 1.23.0 (FEAT-038); label subcommand today,
 # report-de + price land in 1.25.0.
 # tx verb added in 1.23.0 (FEAT-036); additive surface delegating
 # to wallet:* in this release.
 # utxo verb added in 1.23.0 (FEAT-037); ships ls / freeze / unfreeze
 # in this release.
-COMMAND_VERBS="wallet tx utxo tax backend"
+COMMAND_VERBS="wallet tx utxo tax backend descriptor"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
 # bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).
@@ -51,7 +52,7 @@ LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 bip380 daemon wif"
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
 # Each entry is "<alias>=<canonical>".
-DEPRECATED_ALIASES="bech32=bip173 descriptor=bip380"
+DEPRECATED_ALIASES="bech32=bip173"
 
 @test "every command: verb has a bitcoin-<verb>.1 source file" {
 	for v in $COMMAND_VERBS; do
@@ -151,10 +152,13 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-utxo.1"
 }
 
-@test "bitcoin-descriptor.1 is a .so-include alias to bitcoin-bip380.1" {
-	# FEAT-041 alias convention (Stream B made descriptor partially
-	# deprecated — checksum/verify/derive forward to bip380).
-	grep -qE '^\.so man1/bitcoin-bip380\.1$' "$MAN_DIR/bitcoin-descriptor.1"
+@test "bitcoin-descriptor.1 is a real page (checksum/verify/derive removed in 1.24.0)" {
+	# After the 1.24.0 alias-removal sweep, descriptor keeps only its
+	# wallet-touching `wallet` subcommand, so the page is a real
+	# 10-section page rather than a .so-include of bitcoin-bip380.1.
+	assert_sections "$MAN_DIR/bitcoin-descriptor.1"
+	# And it must NOT be a .so include any more.
+	! grep -qE '^\.so ' "$MAN_DIR/bitcoin-descriptor.1"
 }
 
 @test "bitcoin-psbt.1 was removed in 1.24.0" {
