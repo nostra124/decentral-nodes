@@ -810,3 +810,104 @@ feat037_setup_wallet() {
 	[ "$status" -ne 0 ]
 	echo "$output" | grep -qv "must look like"
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-043: tx bump (RBF + CPFP).
+#
+# The parse / validation / cached-tx-inspection paths are tested
+# here against a JSON fixture (no seed / no xxd needed). The full
+# build|sign|broadcast pipeline is exercised in CI / regtest — the
+# same constraint the FEAT-008 sign tests carry.
+# ---------------------------------------------------------------------------
+
+# Write a cached transactions/<txid>.json for <wallet>. Args:
+#   $1 wallet  $2 txid  $3 sequence (input)  $4 pay_addr  $5 pay_value
+# Change always goes to the fixture wallet's address (bc1qexample).
+feat043_cache_tx() {
+	local wallet="$1" txid="$2" seq="$3" pay_addr="$4" pay_value="$5"
+	local path="$XDG_DATA_HOME/bitcoin/wallets/$wallet"
+	mkdir -p "$path/transactions"
+	cat > "$path/transactions/$txid.json" <<JSON
+{"txid":"$txid","status":{"block_height":"mempool"},
+ "vin":[{"txid":"aa00bb11cc22dd33ee44ff5500112233445566778899aabbccddeeff00112233","vout":0,"sequence":$seq,"prevout":{"scriptpubkey_address":"bc1qsource","value":100000}}],
+ "vout":[{"scriptpubkey_address":"$pay_addr","value":$pay_value},{"scriptpubkey_address":"bc1qexample","value":40000}]}
+JSON
+}
+
+@test "FEAT-043 — tx bump with no args usage-errors" {
+	run "$BITCOIN_BIN" tx bump
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "usage: tx bump"
+}
+
+@test "FEAT-043 — tx bump requires a mode flag" {
+	run "$BITCOIN_BIN" tx bump alice deadbeef
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "one of --rbf or --cpfp"
+}
+
+@test "FEAT-043 — tx bump rejects a non-integer --fee-rate" {
+	run "$BITCOIN_BIN" tx bump alice deadbeef --rbf --fee-rate xyz
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "fee-rate must be a positive integer"
+}
+
+@test "FEAT-043 — tx bump errors when the tx is not cached" {
+	feat037_setup_wallet
+	run "$BITCOIN_BIN" tx bump alice deadbeefcafe --rbf
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "not cached"
+}
+
+@test "FEAT-043 — tx bump --rbf refuses a non-signalling tx" {
+	feat037_setup_wallet
+	# sequence 0xffffffff (4294967295) → final, not BIP-125 replaceable.
+	feat043_cache_tx alice f00d 4294967295 bc1qpayee 50000
+	run "$BITCOIN_BIN" tx bump alice f00d --rbf
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "does not signal BIP-125"
+}
+
+@test "FEAT-043 — tx bump --rbf accepts a signalling tx (past BIP-125 + output checks)" {
+	feat037_setup_wallet
+	# sequence 0xfffffffd (< 0xfffffffe) → BIP-125 replaceable.
+	# One external output (bc1qpayee) + change to bc1qexample (wallet).
+	feat043_cache_tx alice cafe 4294967293 bc1qpayee 50000
+	run "$BITCOIN_BIN" tx bump alice cafe --rbf --fee-rate 10
+	# Build/sign will fail in this seedless env, but the BIP-125 +
+	# single-output validation must have PASSED (no parse-stage error).
+	echo "$output" | grep -qv "does not signal BIP-125"
+	echo "$output" | grep -qv "expected exactly one external output"
+}
+
+@test "FEAT-043 — tx bump --rbf refuses a multi-recipient tx" {
+	feat037_setup_wallet
+	local path="$XDG_DATA_HOME/bitcoin/wallets/alice"
+	mkdir -p "$path/transactions"
+	# Two external (non-wallet) outputs → ambiguous payment.
+	cat > "$path/transactions/multi.json" <<'JSON'
+{"txid":"multi","status":{"block_height":"mempool"},
+ "vin":[{"txid":"aa","vout":0,"sequence":4294967293,"prevout":{"scriptpubkey_address":"bc1qsrc","value":100000}}],
+ "vout":[{"scriptpubkey_address":"bc1qpayee1","value":30000},{"scriptpubkey_address":"bc1qpayee2","value":30000}]}
+JSON
+	run "$BITCOIN_BIN" tx bump alice multi --rbf
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "expected exactly one external output"
+}
+
+@test "FEAT-043 — tx bump --cpfp errors when no wallet output of the tx is spendable" {
+	feat037_setup_wallet
+	feat043_cache_tx alice beef 4294967293 bc1qpayee 50000
+	# No backend fixtures → utxo:ls finds nothing for this txid.
+	run "$BITCOIN_BIN" tx bump alice beef --cpfp
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "no spendable wallet output"
+}
+
+@test "FEAT-043 — tx help lists the bump subcommand" {
+	run bash -c "'$BITCOIN_BIN' tx help 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qE "(^|[[:space:]])bump([[:space:]]|$)"
+	echo "$output" | grep -q "rbf"
+	echo "$output" | grep -q "cpfp"
+}
