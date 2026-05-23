@@ -699,6 +699,7 @@ command:tx() {
 		build)     tx:build "$@" ;;
 		sign)      tx:sign  "$@" ;;
 		broadcast) tx:broadcast "$@" ;;
+		bump)      tx:bump "$@" ;;
 		decode)
 			local libexec="${SELF_LIBEXEC:?command:tx: SELF_LIBEXEC must be set}"
 			exec "$libexec/${SELF:-bitcoin}/bip174" decode "$@"
@@ -735,6 +736,14 @@ command:tx() {
 			  broadcast <wallet>
 			        Read raw tx hex from stdin; POST to the active
 			        backend; print the txid.
+			  bump <wallet> <txid> --rbf|--cpfp [--fee-rate sat/vB]
+			        Fee-bump a wallet transaction. --rbf rebuilds the
+			        cached tx spending the same inputs at a higher fee
+			        (BIP-125). --cpfp spends a wallet-owned output of
+			        <txid> into a high-fee child, pinning the parent.
+			        Both compose tx build --utxo | tx sign | tx
+			        broadcast. Requires the tx to be cached (run
+			        'wallet index' first).
 			  help
 			        this message
 
@@ -752,6 +761,183 @@ command:tx() {
 
 help:tx() {
 	command:tx help
+}
+
+# FEAT-043: fee-bumping. Both modes compose the existing
+# tx build --utxo | tx sign | bip174 finalize | bip174 extract |
+# tx broadcast pipeline, so there's no bespoke PSBT surgery here.
+#
+#   --rbf   rebuild the cached tx spending the SAME inputs (pinned
+#           via --utxo) and paying the SAME external output, but at
+#           a higher fee-rate — the change output shrinks to absorb
+#           the larger fee (BIP-125 Replace-By-Fee).
+#   --cpfp  spend a wallet-owned output of the target tx into a
+#           high-fee child paid back to a wallet address, lifting
+#           the parent's effective package fee-rate.
+tx:bump() {
+	local wallet="" txid="" mode="" fee_rate=""
+	while (( $# > 0 )); do
+		case "$1" in
+			--rbf)  mode=rbf;  shift ;;
+			--cpfp) mode=cpfp; shift ;;
+			--fee-rate)
+				if [[ ! "${2:-}" =~ ^[1-9][0-9]*$ ]]; then
+					error "tx bump: --fee-rate must be a positive integer (sat/vB), got '${2:-}'"
+					return 2
+				fi
+				fee_rate="$2"; shift 2 ;;
+			--*) error "tx bump: unknown flag '$1'"; return 2 ;;
+			*)
+				if   [ -z "$wallet" ]; then wallet="$1"
+				elif [ -z "$txid" ];   then txid="$1"
+				else error "tx bump: unexpected positional arg '$1'"; return 2
+				fi
+				shift ;;
+		esac
+	done
+	if [ -z "$wallet" ] || [ -z "$txid" ]; then
+		error "tx bump: usage: tx bump <wallet> <txid> --rbf|--cpfp [--fee-rate sat/vB]"
+		return 2
+	fi
+	if [ -z "$mode" ]; then
+		error "tx bump: one of --rbf or --cpfp is required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$wallet")"
+	if [ ! -d "$path" ]; then
+		error "tx bump: no such wallet '$wallet' at $path"
+		return 3
+	fi
+	local json="$path/transactions/$txid.json"
+	if [ ! -s "$json" ]; then
+		error "tx bump: '$txid' not cached (run 'wallet index $wallet' first)"
+		return 4
+	fi
+	if ! command -v jq >/dev/null 2>&1; then
+		error "tx bump: jq is required to parse the cached transaction"
+		return 5
+	fi
+	case "$mode" in
+		rbf)  tx:_bump_rbf  "$wallet" "$path" "$json" "$txid" "$fee_rate" ;;
+		cpfp) tx:_bump_cpfp "$wallet" "$path" "$txid" "$fee_rate" ;;
+	esac
+}
+
+# Pick the fee-rate for a bump: explicit --fee-rate wins; otherwise
+# the active backend's 1-block (fastest) estimate; otherwise a
+# sane floor. Echoed on stdout.
+tx:_bump_fee_rate() {
+	local explicit="$1"
+	if [ -n "$explicit" ]; then
+		printf '%s\n' "$explicit"
+		return 0
+	fi
+	local est
+	if est="$(backend:estimate-fee 1 2>/dev/null)" && [[ "$est" =~ ^[1-9][0-9]*$ ]]; then
+		printf '%s\n' "$est"
+	else
+		warn "tx bump: backend estimate-fee unavailable; defaulting to 5 sat/vB"
+		printf '5\n'
+	fi
+}
+
+# RBF: rebuild paying the same external output from the same inputs
+# at a higher fee-rate.
+tx:_bump_rbf() {
+	local wallet="$1" path="$2" json="$3" txid="$4" explicit_rate="$5"
+	# BIP-125 opt-in: at least one input must signal (sequence <
+	# 0xfffffffe == 4294967294). A cached tx without sequence data
+	# can't be proven replaceable, so we refuse rather than guess.
+	local signalled
+	signalled="$(jq -r '[.vin[].sequence // 4294967295] | map(select(. < 4294967294)) | length' "$json" 2>/dev/null)"
+	if [[ ! "$signalled" =~ ^[0-9]+$ ]] || (( signalled == 0 )); then
+		error "tx bump --rbf: '$txid' does not signal BIP-125 replaceability (no input sequence < 0xfffffffe)"
+		return 6
+	fi
+	# Identify the external payment output: the vout whose address is
+	# NOT one of the wallet's derived addresses. Exactly one is
+	# expected (a standard pay + change tx).
+	local ledger="$path/addresses"
+	local -a wallet_addrs=()
+	if [ -f "$ledger" ]; then
+		mapfile -t wallet_addrs < <(awk -F'\t' '{print $2}' "$ledger")
+	fi
+	# Build a jq filter selecting vouts whose address is not in the set.
+	local addr_json
+	addr_json="$(printf '%s\n' "${wallet_addrs[@]}" | jq -R . | jq -s .)"
+	local payments
+	payments="$(jq -c --argjson mine "$addr_json" \
+		'[.vout[] | select(.scriptpubkey_address as $a | ($mine | index($a)) | not) | {addr: .scriptpubkey_address, value: .value}]' \
+		"$json" 2>/dev/null)"
+	local n_pay; n_pay="$(printf '%s' "$payments" | jq -r 'length' 2>/dev/null)"
+	if [[ ! "$n_pay" =~ ^[0-9]+$ ]] || (( n_pay != 1 )); then
+		error "tx bump --rbf: expected exactly one external output, found ${n_pay:-0} (multi-recipient / consolidation bumps not supported)"
+		return 7
+	fi
+	local pay_addr pay_value
+	pay_addr="$(printf '%s' "$payments" | jq -r '.[0].addr')"
+	pay_value="$(printf '%s' "$payments" | jq -r '.[0].value')"
+	# Inputs: each vin's txid:vout, pinned via --utxo.
+	local -a utxo_args=()
+	local op
+	while IFS= read -r op; do
+		[ -n "$op" ] && utxo_args+=( --utxo "$op" )
+	done < <(jq -r '.vin[] | "\(.txid):\(.vout)"' "$json" 2>/dev/null)
+	if (( ${#utxo_args[@]} == 0 )); then
+		error "tx bump --rbf: cached tx has no decodable inputs (vin txid/vout missing)"
+		return 8
+	fi
+	local rate; rate="$(tx:_bump_fee_rate "$explicit_rate")"
+	info "tx bump --rbf: rebuilding $txid -> pay $pay_value sat to $pay_addr at $rate sat/vB"
+	tx:_bump_pipeline "$wallet" "$pay_addr" "$pay_value" "$rate" "${utxo_args[@]}"
+}
+
+# CPFP: spend a wallet-owned output of the target into a high-fee
+# child, paid back to one of the wallet's own addresses.
+tx:_bump_cpfp() {
+	local wallet="$1" path="$2" txid="$3" explicit_rate="$4"
+	# Find an unspent wallet output of <txid> via the utxo verb.
+	local child_op child_val
+	read -r child_op child_val < <(
+		utxo:ls "$wallet" 2>/dev/null \
+			| awk -F'\t' -v t="$txid" '$1 == t { print $1":"$2, $4; exit }'
+	)
+	if [ -z "$child_op" ]; then
+		error "tx bump --cpfp: no spendable wallet output of '$txid' found (already spent, or the tx paid out entirely — use --rbf)"
+		return 9
+	fi
+	# Self-send target: the wallet's first derived address.
+	local self_addr
+	self_addr="$(awk -F'\t' 'NR==1{print $2}' "$path/addresses" 2>/dev/null)"
+	if [ -z "$self_addr" ]; then
+		error "tx bump --cpfp: wallet '$wallet' has no derived address to receive the child output"
+		return 10
+	fi
+	local rate; rate="$(tx:_bump_fee_rate "$explicit_rate")"
+	# Pay a dust-ish amount back to ourselves; the high fee-rate over
+	# the single pinned input is what does the work. tx build sizes
+	# change + fee from the rate.
+	local pay=546
+	info "tx bump --cpfp: spending $child_op ($child_val sat) into a $rate sat/vB child to $self_addr"
+	tx:_bump_pipeline "$wallet" "$self_addr" "$pay" "$rate" --utxo "$child_op"
+}
+
+# Shared build|sign|finalize|extract|broadcast pipeline for both
+# bump modes. Prints the broadcast txid.
+tx:_bump_pipeline() {
+	local wallet="$1" addr="$2" sats="$3" rate="$4"; shift 4
+	local -a utxo_args=( "$@" )
+	local libexec="${SELF_LIBEXEC:?tx bump: SELF_LIBEXEC must be set}"
+	local psbt signed final raw
+	psbt="$(tx:build "$wallet" "$addr" "$sats" --fee-rate "$rate" "${utxo_args[@]}")" \
+		|| { error "tx bump: build failed"; return 11; }
+	signed="$(printf '%s\n' "$psbt" | tx:sign "$wallet")" \
+		|| { error "tx bump: sign failed"; return 12; }
+	final="$(printf '%s\n' "$signed" | "$libexec/${SELF:-bitcoin}/bip174" finalize)" \
+		|| { error "tx bump: finalize failed"; return 13; }
+	raw="$(printf '%s\n' "$final" | "$libexec/${SELF:-bitcoin}/bip174" extract)" \
+		|| { error "tx bump: extract failed"; return 14; }
+	printf '%s\n' "$raw" | tx:broadcast "$wallet"
 }
 
 # FEAT-037 (1.23.0): `bitcoin utxo` object verb.

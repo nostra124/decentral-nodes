@@ -23,6 +23,12 @@ bitcoin\-tx \- transaction as a first-class object verb
 .B bitcoin tx broadcast
 .I wallet
 .br
+.B bitcoin tx bump
+.I wallet
+.I txid
+.BR --rbf | --cpfp
+.RI [ "--fee-rate sat/vB" ]
+.br
 .B bitcoin tx help
 
 .SH DESCRIPTION
@@ -141,6 +147,46 @@ Refuses if any input lacks
 .BI "broadcast " wallet
 Read raw-tx hex from stdin; POST to the active backend (see
 .BR bitcoin-backend (1)); print the broadcast txid.
+.TP
+.BI "bump " "wallet txid" " " { --rbf | --cpfp } " [--fee-rate sat/vB]"
+Fee-bump a cached wallet transaction (run
+.B "wallet index"
+first so the tx is in
+.IB <wallet-repo>/transactions/ ).
+Both modes compose
+.B "tx build --utxo | tx sign | tx broadcast"
+\(em there is no bespoke PSBT surgery.
+.RS
+.TP
+.B --rbf
+Replace-By-Fee (BIP-125). Rebuilds the tx spending the
+.B same
+inputs (pinned via
+.BR --utxo )
+and paying the
+.B same
+external output, at a higher fee-rate; the change output shrinks
+to absorb the larger fee. Refuses if no input signals
+replaceability
+.RB ( sequence " < 0xfffffffe)"
+or if the tx has more than one external output.
+.TP
+.B --cpfp
+Child-Pays-For-Parent. Spends a wallet-owned output of
+.I txid
+into a high-fee child paid back to a wallet address, lifting the
+parent's effective package fee-rate. Errors if no spendable
+wallet output of
+.I txid
+remains (use
+.B --rbf
+instead).
+.TP
+.BR "--fee-rate " sat/vB
+The bump fee-rate. Defaults to the backend's 1-block (fastest)
+.B estimate-fee
+recommendation; falls back to 5 sat/vB if unavailable.
+.RE
 
 .SH EXIT STATUS
 .TP
