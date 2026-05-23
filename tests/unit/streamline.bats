@@ -359,18 +359,13 @@ feat037_setup_wallet() {
 	[ "$output" = "$expected" ]
 }
 
-@test "FEAT-035 B — bitcoin descriptor checksum alias produces identical bytes" {
-	canonical=$("$BITCOIN_BIN" bip380 checksum 'raw(deadbeef)' 2>/dev/null)
-	alias_out=$("$BITCOIN_BIN" descriptor checksum 'raw(deadbeef)' 2>/dev/null)
-	[ "$canonical" = "$alias_out" ]
-}
-
-@test "FEAT-035 B — bitcoin descriptor checksum alias emits one warn line" {
+@test "FEAT-035 B — bitcoin descriptor checksum alias was removed in 1.24.0" {
+	# FEAT-035 alias-removal sweep: the deprecated checksum alias now
+	# errors out pointing at the canonical bip380 verb.
 	run --separate-stderr "$BITCOIN_BIN" descriptor checksum 'raw(deadbeef)'
-	[ "$status" -eq 0 ]
-	echo "$stderr" | grep -qE "warn .*descriptor checksum.* deprecated.* 1\.23\.0"
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -qE "'descriptor checksum' was removed in 1\.24\.0"
 	echo "$stderr" | grep -qF "bitcoin bip380 checksum"
-	echo "$stderr" | grep -qF "1.24.0"
 }
 
 @test "FEAT-035 B — bitcoin bip380 verify accepts a known-good checksum" {
@@ -383,10 +378,11 @@ feat037_setup_wallet() {
 	[ "$status" -ne 0 ]
 }
 
-@test "FEAT-035 B — bitcoin descriptor verify alias forwards exit code" {
-	canonical_status=$("$BITCOIN_BIN" bip380 verify 'raw(deadbeef)#89f8spxm' 2>/dev/null; echo $?)
-	alias_status=$("$BITCOIN_BIN" descriptor verify 'raw(deadbeef)#89f8spxm' 2>/dev/null; echo $?)
-	[ "$canonical_status" = "$alias_status" ]
+@test "FEAT-035 B — bitcoin descriptor verify alias was removed in 1.24.0" {
+	run --separate-stderr "$BITCOIN_BIN" descriptor verify 'raw(deadbeef)#89f8spxm'
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -qE "'descriptor verify' was removed in 1\.24\.0"
+	echo "$stderr" | grep -qF "bitcoin bip380 verify"
 }
 
 @test "FEAT-035 B — bitcoin descriptor wallet (no warn — not deprecated)" {

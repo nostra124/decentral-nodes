@@ -1,13 +1,120 @@
-.\" bitcoin-descriptor(1) — partially deprecated.
-.\"
-.\" The checksum / verify / derive subcommands moved to
-.\" bitcoin-bip380(1) in 1.23.0 (FEAT-035 Stream B); the standalone
-.\" 'descriptor' verb continues to work as a deprecated alias for
-.\" those three (removal target: 1.24.0).
-.\"
-.\" 'bitcoin descriptor wallet <name>' is NOT deprecated — it stays
-.\" in bitcoin(1) as a wallet-touching helper. See bitcoin-wallet(1).
-.\"
-.\" This man page resolves to bitcoin-bip380(1) via .so per the
-.\" FEAT-041 alias convention for the deprecated paths.
-.so man1/bitcoin-bip380.1
+.\" Manpage for bitcoin-descriptor(1) — wallet descriptor emitter.
+.TH BITCOIN-DESCRIPTOR 1 "2026-05-23" "bitcoin 1.24.0" "User Commands"
+
+.SH NAME
+bitcoin\-descriptor \- emit a wallet's output script descriptor
+
+.SH SYNOPSIS
+.B bitcoin descriptor wallet
+.I name
+.br
+.B bitcoin descriptor help
+
+.SH DESCRIPTION
+.B bitcoin descriptor
+is reduced to a single surviving subcommand,
+.BR wallet ,
+as of 1.24.0. The BIP-380 primitives \(em
+.BR checksum ,
+.BR verify ,
+.B derive
+\(em moved to
+.BR bitcoin-bip380 (1)
+in 1.23.0 (FEAT-035 Stream B) and their deprecated
+.B descriptor
+aliases were removed in 1.24.0.
+
+The
+.B wallet
+subcommand stays here (rather than in
+.BR bitcoin-bip380 (1))
+because it reads
+.BR secret (1)-managed
+wallet state, which the BIP plugins deliberately don't touch.
+
+.SH OPTIONS
+.B bitcoin descriptor
+takes no top-level flags.
+
+.SH SUBCOMMANDS
+.TP
+.BI "wallet " name
+Emit a checksummed
+.BI wpkh( xpub /0/* )
+descriptor for the existing wallet
+.IR name .
+Reads the seed via
+.B secret get
+.IB name /seed
+and derives the
+.B m/84h/0h/0h
+account xpub via the same pipeline
+.B bitcoin wallet derive
+uses. The checksum is computed by shelling out to
+.BR "bitcoin bip380 checksum" .
+.TP
+.B help
+Print usage. Notes that the
+.BR checksum / verify / derive
+verbs were removed in 1.24.0.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+A removed subcommand
+.RB ( checksum / verify / derive )
+was invoked; the error names the canonical
+.B bitcoin bip380
+form.
+.TP
+.B \(>=2
+Missing argument, no such wallet, or
+.B secret
+not on PATH. Specific errors emit an
+.B error
+line to stderr per CLAUDE.md §10.
+
+.SH FILES
+.TP
+.I ~/.local/var/bitcoin/wallets/<name>/
+The wallet repository the
+.B wallet
+subcommand reads from.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_LIBEXEC
+Required: the
+.B wallet
+subcommand shells out to sibling
+.BR bip39 ", " bip32 ", " bip13 ", and " bip380
+plugins. Inherited from
+.BR bitcoin (1)
+when invoked via the dispatcher.
+
+.SH STANDARDS
+.IP \(bu 2
+BIP-380 (Output Script Descriptors, General Operation) \(em the
+descriptor format the emitted string conforms to. The checksum
+itself is computed by
+.BR bitcoin-bip380 (1).
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip380 (1),
+.BR bitcoin-wallet (1),
+.BR secret (1)
+
+.SH HISTORY
+Verb introduced in bitcoin 1.0.0 (FEAT-009). The BIP-380
+primitives moved to
+.BR bitcoin-bip380 (1)
+in 1.23.0 (FEAT-035 Stream B); the deprecated
+.BR descriptor " " checksum / verify / derive
+aliases were removed in 1.24.0, leaving only the
+wallet-touching
+.B wallet
+subcommand.
