@@ -1305,7 +1305,28 @@ wallet:_derive_address() {
 }
 
 wallet:derive() {
-	local name="${1:-}"
+	# FEAT-044: --walk [--gap N] turns the single-index derive into a
+	# BIP-44 gap-limit scan. Without --walk the behaviour is unchanged
+	# (derive the next index, commit, print the address).
+	local name="" walk=0
+	local -i gap=20
+	while (( $# > 0 )); do
+		case "$1" in
+			--walk) walk=1; shift ;;
+			--gap)
+				if [[ ! "${2:-}" =~ ^[0-9]+$ ]]; then
+					error "wallet derive: --gap requires a non-negative integer (got '${2:-}')"
+					return 2
+				fi
+				gap="$2"; shift 2 ;;
+			--*) error "wallet derive: unknown flag '$1'"; return 2 ;;
+			*)
+				if [ -z "$name" ]; then name="$1"
+				else error "wallet derive: unexpected positional arg '$1'"; return 2
+				fi
+				shift ;;
+		esac
+	done
 	if [ -z "$name" ]; then
 		error "wallet derive: name required"
 		return 2
@@ -1317,6 +1338,13 @@ wallet:derive() {
 	fi
 	local ledger="$path/addresses"
 	[ -f "$ledger" ] || : > "$ledger"
+
+	# --gap 0 disables the walk (acts like a plain derive).
+	if (( walk && gap > 0 )); then
+		wallet:_derive_walk "$name" "$path" "$ledger" "$gap"
+		return $?
+	fi
+
 	local idx; idx="$(wallet:_next_index "$ledger")"
 	local addr; addr="$(wallet:_derive_address "$name" "$idx")" || return $?
 	# Append as: <index><tab><address><tab><label>  (label initially empty)
@@ -1332,6 +1360,52 @@ wallet:derive() {
 			commit -q -m "wallet derive: $name/$idx -> $addr"
 	) || { error "wallet derive: commit failed"; return 7; }
 	printf '%s\n' "$addr"
+}
+
+# FEAT-044 gap-limit scan. Derives forward from the ledger top,
+# probes each address's on-chain history via the active backend,
+# and appends addresses that have history. Stops after <gap>
+# consecutive empties. One git commit for all discovered rows;
+# no-op (no commit) if nothing is discovered. Prints a summary
+# line on stdout.
+#
+# mempool.space rate-limits ~1 req/sec, so the walk is
+# intentionally sequential (no parallel probing).
+wallet:_derive_walk() {
+	local name="$1" path="$2" ledger="$3"
+	local -i gap="$4"
+	local -i idx empties=0 found=0
+	idx="$(wallet:_next_index "$ledger")"
+	local addr txs
+	while (( empties < gap )); do
+		if ! addr="$(wallet:_derive_address "$name" "$idx")"; then
+			error "wallet derive --walk: derivation failed at index $idx"
+			return 4
+		fi
+		# Probe the backend for any history at this address. A
+		# non-empty JSON array (mempool/blockstream shape) means the
+		# address has been used.
+		if txs="$(backend:get-address-txs "$addr" 2>/dev/null)" \
+			&& [ -n "$txs" ] \
+			&& [ "$(printf '%s' "$txs" | jq -r 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null; then
+			printf '%d\t%s\t\n' "$idx" "$addr" >> "$ledger"
+			(( found++, empties = 0 ))
+		else
+			(( empties++ ))
+		fi
+		(( idx++ ))
+	done
+	if (( found > 0 )); then
+		(
+			cd "$path"
+			git add addresses
+			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+			    -c commit.gpgsign=false \
+				commit -q -m "wallet derive --walk: $name discovered $found new address(es)"
+		) || { error "wallet derive --walk: commit failed"; return 7; }
+	fi
+	# Summary: how many discovered, and where the gap limit stopped us.
+	printf 'derived: %d; gap-limit reached at index %d\n' "$found" "$idx"
 }
 
 wallet:addresses() {

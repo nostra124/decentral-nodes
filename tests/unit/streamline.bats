@@ -717,6 +717,35 @@ feat037_setup_wallet() {
 	echo "$output" | grep -qE "(^|[[:space:]])select([[:space:]]|$)"
 	echo "$output" | grep -q "branch-and-bound"
 }
+
+# FEAT-044 gap-limit walking — arg-validation cases (no backend /
+# crypto needed; the discovery path is exercised in bitcoin.bats
+# against the abandon-mnemonic fixture).
+
+@test "FEAT-044 — wallet derive --gap rejects a non-integer" {
+	run "$BITCOIN_BIN" wallet derive alice --gap notanint
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "non-negative integer"
+}
+
+@test "FEAT-044 — wallet derive rejects an unknown flag" {
+	run "$BITCOIN_BIN" wallet derive alice --bogus
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "unknown flag"
+}
+
+@test "FEAT-044 — wallet derive --walk requires a wallet name" {
+	run "$BITCOIN_BIN" wallet derive --walk
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "name required"
+}
+
+@test "FEAT-044 — wallet:_derive_walk is defined (source-safe load)" {
+	run bash -c "source '$BITCOIN_BIN'; type -t wallet:_derive_walk"
+	[ "$status" -eq 0 ]
+	[ "$output" = "function" ]
+}
+
 # FEAT-036 AC #3 follow-up: tx build --utxo coin-control.
 
 @test "FEAT-036 AC#3 — tx build --utxo with no argument errors" {
