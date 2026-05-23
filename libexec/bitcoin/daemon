@@ -116,6 +116,8 @@ generic commands:
    version                 print the version of $SELF
 
 $SELF commands:
+   enable [--user|--system]  install a service unit and bring bitcoind up
+   disable [--user|--system] tear the service down (data dir preserved)
    start                   starts the bitcoind daemon
    stop                    stops the bitcoind daemon
    monitor                 monitors the bitcoind daemon
@@ -179,6 +181,246 @@ command:space() {
 			du -sh $HOME/Library/Application\ Support/Bitcoin/ | cut -f1
 			;;
 	esac
+}
+
+#------------------------------------------------------------------------------
+# FEAT-034: service-managed bitcoind (daemon enable / disable).
+#
+# Render a platform-appropriate service unit from the templates in
+# share/bitcoin/units/, install it, and (de)activate it through the
+# init system: systemd on Linux, launchd on macOS, in --user (no
+# root) or --system (dedicated `bitcoin` account) mode. Every
+# privileged step routes through $SUDO and every absolute system
+# path through $BITCOIN_DAEMON_ROOT, so the bats matrix can mock the
+# init system and redirect writes into a temp dir.
+
+# OS family: "linux" | "macos". $BITCOIN_DAEMON_OS overrides uname so
+# the test matrix can exercise both branches on a single runner.
+daemon:_os() {
+	local os="${BITCOIN_DAEMON_OS:-}"
+	if [ -z "$os" ]; then
+		case "$(uname -s)" in
+			Linux)  os=linux ;;
+			Darwin) os=macos ;;
+			*)      os=unknown ;;
+		esac
+	fi
+	printf '%s\n' "$os"
+}
+
+# Absolute path to the bitcoind binary. $BITCOIN_BITCOIND overrides
+# the PATH lookup; empty (non-zero return) when nothing is found.
+daemon:_bitcoind() {
+	if [ -n "${BITCOIN_BITCOIND:-}" ]; then
+		printf '%s\n' "$BITCOIN_BITCOIND"
+		return 0
+	fi
+	command -v bitcoind 2>/dev/null
+}
+
+# DESTDIR-style prefix for system-level absolute paths (default none).
+daemon:_root() { printf '%s' "${BITCOIN_DAEMON_ROOT:-}"; }
+
+# Directory holding the unit-file templates.
+daemon:_units_dir() {
+	if [ -n "${SELF_UNITS:-}" ]; then
+		printf '%s\n' "$SELF_UNITS"
+		return 0
+	fi
+	(cd "$(dirname "$0")/../../share/bitcoin/units" 2>/dev/null && pwd)
+}
+
+# Data directory for the given mode.
+daemon:_datadir() {
+	local mode=$1
+	if [ "$mode" = system ]; then
+		printf '%s/var/lib/bitcoin\n' "$(daemon:_root)"
+	else
+		printf '%s/bitcoin\n' "${XDG_DATA_HOME:-$HOME/.local/share}"
+	fi
+}
+
+# Service account the daemon runs as.
+daemon:_user() {
+	local mode=$1
+	if [ "$mode" = system ]; then
+		printf 'bitcoin\n'
+	else
+		printf '%s\n' "${USER:-$(id -un)}"
+	fi
+}
+
+# Installed unit-file path for os × mode.
+daemon:_unit_path() {
+	local os=$1 mode=$2
+	case "$os:$mode" in
+		linux:user)
+			printf '%s/systemd/user/bitcoind.service\n' \
+				"${XDG_CONFIG_HOME:-$HOME/.config}" ;;
+		linux:system)
+			printf '%s/etc/systemd/system/bitcoind.service\n' "$(daemon:_root)" ;;
+		macos:user)
+			printf '%s/Library/LaunchAgents/org.bitcoin.bitcoind.plist\n' "$HOME" ;;
+		macos:system)
+			printf '%s/Library/LaunchDaemons/org.bitcoin.bitcoind.plist\n' "$(daemon:_root)" ;;
+		*) return 1 ;;
+	esac
+}
+
+# Render a unit from its template, substituting @BITCOIND@ / @DATADIR@
+# / @USER@. For --user mode the privilege-drop directive is stripped:
+# a `systemctl --user` unit may not carry User=, and a LaunchAgent
+# has no UserName.
+daemon:_render() {
+	local os=$1 mode=$2 datadir=$3 user=$4 bitcoind=$5 tmpl rendered
+	if [ "$os" = macos ]; then tmpl="$(daemon:_units_dir)/bitcoind.plist"
+	else tmpl="$(daemon:_units_dir)/bitcoind.service"; fi
+	[ -r "$tmpl" ] || { error "template not found: $tmpl"; return 1; }
+	rendered="$(sed \
+		-e "s|@BITCOIND@|$bitcoind|g" \
+		-e "s|@DATADIR@|$datadir|g" \
+		-e "s|@USER@|$user|g" "$tmpl")"
+	if [ "$mode" = user ]; then
+		if [ "$os" = macos ]; then
+			rendered="$(printf '%s\n' "$rendered" | sed '/<key>UserName<\/key>/{N;d;}')"
+		else
+			rendered="$(printf '%s\n' "$rendered" | sed '/^User=/d')"
+		fi
+	fi
+	printf '%s\n' "$rendered"
+}
+
+help:enable() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF enable [--user | --system]
+
+	  Install a bitcoind service unit and bring the daemon up so it
+	  survives reboots. --user (default) installs a per-user service
+	  with no root; --system installs a system-wide service running
+	  as a dedicated 'bitcoin' account. Idempotent.
+	ENDHELP
+}
+
+help:disable() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF disable [--user | --system]
+
+	  Bring the bitcoind service down and remove its unit file. The
+	  data directory is preserved.
+	ENDHELP
+}
+
+command:enable() {
+	local mode=user
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user)         mode=user ;;
+			--system)       mode=system ;;
+			-h|--help|help) help:enable; return 0 ;;
+			*) warn "enable: unknown argument '$1'"; return 1 ;;
+		esac
+		shift
+	done
+
+	local os; os="$(daemon:_os)"
+	case "$os" in linux|macos) ;; *)
+		error "enable: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+
+	local bitcoind; bitcoind="$(daemon:_bitcoind)"
+	if [ -z "$bitcoind" ]; then
+		error "enable: no 'bitcoind' on PATH; run 'bitcoin daemon install' first"
+		return 1
+	fi
+
+	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
+	local datadir user unit
+	datadir="$(daemon:_datadir "$mode")"
+	user="$(daemon:_user "$mode")"
+	unit="$(daemon:_unit_path "$os" "$mode")" \
+		|| { error "enable: no unit path for $os/$mode"; return 1; }
+
+	# --system: ensure the dedicated service account exists.
+	if [ "$mode" = system ] && ! id "$user" >/dev/null 2>&1; then
+		info "creating system user '$user'"
+		if [ "$os" = macos ]; then
+			$SUDO sysadminctl -addUser "$user" -roleAccount >/dev/null 2>&1 \
+				|| { error "enable: failed to create user '$user'"; return 1; }
+		else
+			$SUDO useradd --system --no-create-home \
+				--shell /usr/sbin/nologin "$user" \
+				|| { error "enable: failed to create user '$user'"; return 1; }
+		fi
+	fi
+
+	$SUDO mkdir -p "$datadir" \
+		|| { error "enable: cannot create data dir '$datadir'"; return 1; }
+	[ "$mode" = system ] && $SUDO chown "$user" "$datadir" 2>/dev/null
+
+	# Render + install the unit (idempotent: overwrites in place).
+	local tmp; tmp="$(mktemp)"
+	daemon:_render "$os" "$mode" "$datadir" "$user" "$bitcoind" > "$tmp" \
+		|| { rm -f "$tmp"; return 1; }
+	$SUDO mkdir -p "$(dirname "$unit")" \
+		|| { rm -f "$tmp"; error "enable: cannot create unit dir"; return 1; }
+	$SUDO install -m 0644 "$tmp" "$unit" \
+		|| { rm -f "$tmp"; error "enable: cannot install unit '$unit'"; return 1; }
+	rm -f "$tmp"
+	info "installed $unit"
+
+	# Activate through the init system.
+	if [ "$os" = macos ]; then
+		local domain
+		if [ "$mode" = system ]; then domain="system"; else domain="gui/$(id -u)"; fi
+		$SUDO launchctl bootstrap "$domain" "$unit" 2>/dev/null
+		$SUDO launchctl enable "$domain/org.bitcoin.bitcoind" 2>/dev/null
+	elif [ "$mode" = system ]; then
+		$SUDO systemctl daemon-reload
+		$SUDO systemctl enable --now bitcoind
+	else
+		systemctl --user daemon-reload
+		systemctl --user enable --now bitcoind
+	fi
+	info "bitcoind service enabled ($mode/$os)"
+}
+
+command:disable() {
+	local mode=user
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user)         mode=user ;;
+			--system)       mode=system ;;
+			-h|--help|help) help:disable; return 0 ;;
+			*) warn "disable: unknown argument '$1'"; return 1 ;;
+		esac
+		shift
+	done
+
+	local os; os="$(daemon:_os)"
+	case "$os" in linux|macos) ;; *)
+		error "disable: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+
+	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
+	local unit; unit="$(daemon:_unit_path "$os" "$mode")" \
+		|| { error "disable: no unit path for $os/$mode"; return 1; }
+
+	if [ "$os" = macos ]; then
+		local domain
+		if [ "$mode" = system ]; then domain="system"; else domain="gui/$(id -u)"; fi
+		$SUDO launchctl bootout "$domain/org.bitcoin.bitcoind" 2>/dev/null
+	elif [ "$mode" = system ]; then
+		$SUDO systemctl disable --now bitcoind 2>/dev/null
+		$SUDO systemctl daemon-reload
+	else
+		systemctl --user disable --now bitcoind 2>/dev/null
+		systemctl --user daemon-reload
+	fi
+
+	if [ -e "$unit" ]; then
+		$SUDO rm -f "$unit" && info "removed $unit"
+	fi
+	info "bitcoind service disabled ($mode/$os); data dir preserved"
 }
 
 #------------------------------------------------------------------------------
