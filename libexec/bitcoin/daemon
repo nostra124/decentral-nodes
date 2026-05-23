@@ -119,10 +119,10 @@ $SELF commands:
    install [--from <src>]  install the bitcoind binary (brew|apt|apk|source|rpk)
    enable [--user|--system]  install a service unit and bring bitcoind up
    disable [--user|--system] tear the service down (data dir preserved)
-   start                   starts the bitcoind daemon
-   stop                    stops the bitcoind daemon
-   monitor                 monitors the bitcoind daemon
-   space                   shows the disk space currently occupied
+   start [--user|--system]   start the bitcoind service
+   stop [--user|--system]    stop the bitcoind service
+   monitor [--user|--system] follow the bitcoind log
+   space [--user|--system]   show data-dir disk usage
 ENDHELP
 	fi
 }
@@ -134,54 +134,81 @@ command:version() {
 # This file requires extended globs to be parsed
 shopt -s extglob
 
+# BUG-015 (branch c): the legacy start / stop / monitor / space
+# verbs are folded onto the same systemd / launchd service that
+# `enable` installs, sharing daemon:_os / daemon:_datadir and the
+# --user (default) / --system mode split. They are thin shims over
+# the init system: systemctl [--user] on Linux, launchctl on macOS.
+
+# Resolve [--user|--system] from a bare argument list (default user).
+daemon:_mode() {
+	local mode=user a
+	for a in "$@"; do
+		case "$a" in
+			--system) mode=system ;;
+			--user)   mode=user ;;
+		esac
+	done
+	printf '%s\n' "$mode"
+}
+
+# macOS launchctl domain for a mode.
+daemon:_domain() {
+	if [ "$1" = system ]; then printf 'system\n'; else printf 'gui/%s\n' "$(id -u)"; fi
+}
+
 command:start() {
-	case $(account platform) in
-		alpine)
-			sudo rc-service bitcoind start
-			;;
-		pureos|ubuntu)
-			sudo service bitcoind start
-			;;
+	local mode os SUDO=""
+	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	[ "$mode" = system ] && SUDO=sudo
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then $SUDO systemctl start bitcoind
+			else systemctl --user start bitcoind; fi ;;
 		macos)
-			sudo launchctl load -w /Library/LaunchDaemons/org.macports.bitcoin.plist 2> /dev/null
-			;;
+			$SUDO launchctl kickstart -k "$(daemon:_domain "$mode")/org.bitcoin.bitcoind" ;;
+		*) error "start: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
 }
 
 command:stop() {
-	case $(account platform) in
-		alpine)
-			sudo rc-service bitcoind stop
-			;;
-		pureos|ubuntu)
-			sudo service bitcoind stop
-			;;
+	local mode os SUDO=""
+	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	[ "$mode" = system ] && SUDO=sudo
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then $SUDO systemctl stop bitcoind
+			else systemctl --user stop bitcoind; fi ;;
 		macos)
-			sudo launchctl unload -w /Library/LaunchDaemons/org.macports.bitcoin.plist 2> /dev/null
-			;;
+			$SUDO launchctl kill SIGTERM "$(daemon:_domain "$mode")/org.bitcoin.bitcoind" ;;
+		*) error "stop: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
 }
 
 command:monitor() {
-	case $(account platform) in
-		pureos|ubuntu|alpine)
-			sudo less +F /var/lib/bitcoin/debug.log
-			;;
+	local mode os SUDO=""
+	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	[ "$mode" = system ] && SUDO=sudo
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then $SUDO journalctl -u bitcoind -f
+			else journalctl --user -u bitcoind -f; fi ;;
 		macos)
-			less +F $HOME/Library/Application\ Support/Bitcoin/debug.log
-			;;
+			tail -f "$(daemon:_datadir "$mode")/bitcoind.log" ;;
+		*) error "monitor: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
 }
 
 command:space() {
-	case $(account platform) in
-		pureos|ubuntu|alpine)
-			sudo du -sh /var/lib/bitcoin | cut -f1
-			;;
-		macos)
-			du -sh $HOME/Library/Application\ Support/Bitcoin/ | cut -f1
-			;;
-	esac
+	local mode datadir SUDO=""
+	mode="$(daemon:_mode "$@")"
+	datadir="$(daemon:_datadir "$mode")"
+	[ "$mode" = system ] && SUDO=sudo
+	if [ ! -d "$datadir" ]; then
+		error "space: data dir '$datadir' does not exist (run 'bitcoin daemon enable' first)"
+		return 1
+	fi
+	$SUDO du -sh "$datadir" | cut -f1
 }
 
 #------------------------------------------------------------------------------

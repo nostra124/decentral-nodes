@@ -23,18 +23,22 @@ bitcoin\-daemon \- install, enable, disable, start, stop, monitor, and inspect t
 .B bitcoin daemon
 .RI [ options ]
 .B start
+.RI [ --user " | " --system ]
 .br
 .B bitcoin daemon
 .RI [ options ]
 .B stop
+.RI [ --user " | " --system ]
 .br
 .B bitcoin daemon
 .RI [ options ]
 .B monitor
+.RI [ --user " | " --system ]
 .br
 .B bitcoin daemon
 .RI [ options ]
 .B space
+.RI [ --user " | " --system ]
 .br
 .B bitcoin daemon help
 .RI [ command ]
@@ -143,29 +147,51 @@ Tear the service down and remove its unit file. The data
 directory is preserved (an explicit purge verb is left for a
 future release).
 .TP
-.B start
-Start the local
-.BR bitcoind ,
-respecting the user's
-.I ~/.bitcoin/bitcoin.conf
-configuration. Idempotent: if a daemon is already running, prints
-its pid and exits 0.
+.BR start " [" --user " | " --system ]
+Start the
+.B bitcoind
+service installed by
+.BR enable :
+.B systemctl
+.RI [ --user ]
+.B start bitcoind
+on Linux,
+.B launchctl kickstart
+on macOS.
 .TP
-.B stop
-Send the configured shutdown RPC to
-.BR bitcoind ;
-wait for the process to exit. Idempotent.
+.BR stop " [" --user " | " --system ]
+Stop the service:
+.B systemctl
+.RI [ --user ]
+.B stop bitcoind
+on Linux,
+.B launchctl kill SIGTERM
+on macOS.
 .TP
-.B monitor
-Tail
-.BR bitcoind 's
-log and emit one progress line per new block (height, time,
-sync %).
+.BR monitor " [" --user " | " --system ]
+Follow the daemon's log:
+.B journalctl
+.RI [ --user ]
+.B -u bitcoind -f
+on Linux,
+.B tail -f
+of the data dir's
+.I bitcoind.log
+on macOS.
 .TP
-.B space
-Print disk usage of the chainstate, blocks, indexes, and mempool
-directories under
-.IR ~/.bitcoin/ .
+.BR space " [" --user " | " --system ]
+Print the data directory's disk usage
+.RB ( du\ -sh ).
+Errors when the data dir does not yet exist. The data dir is
+.I $XDG_DATA_HOME/bitcoin
+for
+.BR --user
+and
+.I /var/lib/bitcoin
+for
+.BR --system ,
+matching
+.BR enable .
 
 .SH EXIT STATUS
 .TP
@@ -205,20 +231,24 @@ and
 .B --system
 respectively).
 .TP
-.I ~/.bitcoin/bitcoin.conf
-Bitcoin Core configuration the daemon reads at startup.
-.TP
-.I ~/.bitcoin/blocks/
+.I $XDG_DATA_HOME/bitcoin
 .TQ
-.I ~/.bitcoin/chainstate/
-Block and chainstate directories
+.I /var/lib/bitcoin
+Per-mode data directory (\c
+.B --user
+and
+.B --system
+respectively) that
+.B enable
+points the unit at and that
 .B space
 reports on.
 .TP
-.I ~/.bitcoin/debug.log
+.IB $XDG_DATA_HOME /bitcoin/bitcoind.log
 The log
 .B monitor
-tails.
+tails on macOS (Linux reads the journal via
+.BR journalctl ).
 
 .SH ENVIRONMENT
 .TP
@@ -259,4 +289,11 @@ added in 1.22.0 (FEAT-033);
 .B enable
 and
 .B disable
-added in 1.22.0 (FEAT-034).
+added in 1.22.0 (FEAT-034). In 1.22.0 the legacy
+.BR start ", " stop ", " monitor ", and " space
+verbs were folded onto the same systemd / launchd service and
+gained
+.B --user
+/
+.B --system
+modes and test coverage (BUG-015).
