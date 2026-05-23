@@ -1094,3 +1094,146 @@ STUB
 	echo "$output" | grep -q "rows: 2"
 	echo "$output" | grep -q "2024-01-01 .. 2024-01-05"
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-034: service-managed bitcoind (daemon enable / disable).
+#
+# The init system is mocked so the suite runs in CI without loading
+# real services: stub systemctl / launchctl / useradd / sysadminctl /
+# chown record their invocations, a stub sudo transparently execs its
+# args, and a stub bitcoind is resolved via $BITCOIN_BITCOIND. All
+# --system absolute paths are redirected under $BITCOIN_DAEMON_ROOT,
+# and $BITCOIN_DAEMON_OS forces the systemd-vs-launchd branch so both
+# OS families are exercised on one runner.
+# ---------------------------------------------------------------------------
+
+feat034_env() {
+	local os="${1:-linux}"
+	export BITCOIN_DAEMON_OS="$os"
+	export XDG_CONFIG_HOME="$HOME/.config"
+	export BITCOIN_DAEMON_ROOT="$HOME/root"
+	export SELF_UNITS="$REPO_ROOT/share/bitcoin/units"
+	export FEAT034_CALLS="$HOME/daemon-calls.log"
+	: > "$FEAT034_CALLS"
+
+	local stub="$HOME/daemon-stub" c
+	mkdir -p "$stub"
+	for c in systemctl launchctl useradd sysadminctl chown; do
+		cat > "$stub/$c" <<-STUB
+			#!/usr/bin/env bash
+			printf '%s %s\n' "$c" "\$*" >> "$FEAT034_CALLS"
+			exit 0
+		STUB
+		chmod +x "$stub/$c"
+	done
+	cat > "$stub/sudo" <<-'STUB'
+		#!/usr/bin/env bash
+		exec "$@"
+	STUB
+	chmod +x "$stub/sudo"
+	export PATH="$stub:$PATH"
+
+	# enable() resolves bitcoind through this override.
+	export BITCOIN_BITCOIND="$HOME/bitcoind-stub"
+	printf '#!/usr/bin/env bash\n:\n' > "$BITCOIN_BITCOIND"
+	chmod +x "$BITCOIN_BITCOIND"
+}
+
+@test "FEAT-034 — enable --user (linux) installs a rootless systemd unit" {
+	feat034_env linux
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	local unit="$XDG_CONFIG_HOME/systemd/user/bitcoind.service"
+	[ -f "$unit" ]
+	grep -q "ExecStart=$BITCOIN_BITCOIND " "$unit"
+	# A --user systemd unit may not carry User=.
+	! grep -q '^User=' "$unit"
+	grep -q 'systemctl --user enable --now bitcoind' "$FEAT034_CALLS"
+}
+
+@test "FEAT-034 — enable --user (macos) installs a LaunchAgent without UserName" {
+	feat034_env macos
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	local unit="$HOME/Library/LaunchAgents/org.bitcoin.bitcoind.plist"
+	[ -f "$unit" ]
+	! grep -q 'UserName' "$unit"
+	grep -q 'launchctl bootstrap gui/' "$FEAT034_CALLS"
+}
+
+@test "FEAT-034 — enable --system (linux) creates the bitcoin user and a privileged unit" {
+	feat034_env linux
+	run "$BITCOIN_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	local unit="$BITCOIN_DAEMON_ROOT/etc/systemd/system/bitcoind.service"
+	[ -f "$unit" ]
+	grep -q '^User=bitcoin' "$unit"
+	grep -q "datadir=$BITCOIN_DAEMON_ROOT/var/lib/bitcoin" "$unit"
+	grep -q 'useradd .* bitcoin' "$FEAT034_CALLS"
+	grep -q 'systemctl enable --now bitcoind' "$FEAT034_CALLS"
+	# --system must NOT use the per-user bus.
+	! grep -q 'systemctl --user' "$FEAT034_CALLS"
+}
+
+@test "FEAT-034 — enable --system (macos) installs a LaunchDaemon running as bitcoin" {
+	feat034_env macos
+	run "$BITCOIN_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	local unit="$BITCOIN_DAEMON_ROOT/Library/LaunchDaemons/org.bitcoin.bitcoind.plist"
+	[ -f "$unit" ]
+	grep -A1 'UserName' "$unit" | grep -q 'bitcoin'
+	grep -q 'launchctl bootstrap system' "$FEAT034_CALLS"
+}
+
+@test "FEAT-034 — enable defaults to --user when no mode is given" {
+	feat034_env linux
+	run "$BITCOIN_BIN" daemon enable
+	[ "$status" -eq 0 ]
+	[ -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
+	grep -q 'systemctl --user' "$FEAT034_CALLS"
+}
+
+@test "FEAT-034 — enable is idempotent (second call succeeds, unit refreshed)" {
+	feat034_env linux
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	[ -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
+}
+
+@test "FEAT-034 — enable errors clearly when bitcoind is absent" {
+	feat034_env linux
+	unset BITCOIN_BITCOIND
+	run --separate-stderr "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q "no 'bitcoind' on PATH"
+	echo "$stderr" | grep -q 'bitcoin daemon install'
+}
+
+@test "FEAT-034 — disable --user removes the unit and tears the service down" {
+	feat034_env linux
+	"$BITCOIN_BIN" daemon enable --user
+	local unit="$XDG_CONFIG_HOME/systemd/user/bitcoind.service"
+	[ -f "$unit" ]
+	run "$BITCOIN_BIN" daemon disable --user
+	[ "$status" -eq 0 ]
+	[ ! -e "$unit" ]
+	grep -q 'systemctl --user disable --now bitcoind' "$FEAT034_CALLS"
+}
+
+@test "FEAT-034 — disable preserves the data directory" {
+	feat034_env linux
+	"$BITCOIN_BIN" daemon enable --user
+	local datadir="$XDG_DATA_HOME/bitcoin"
+	[ -d "$datadir" ]
+	"$BITCOIN_BIN" daemon disable --user
+	[ -d "$datadir" ]
+}
+
+@test "FEAT-034 — daemon help lists enable and disable" {
+	run bash -c "'$BITCOIN_BIN' daemon help 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qE "(^|[[:space:]])enable([[:space:]]|$)"
+	echo "$output" | grep -qE "(^|[[:space:]])disable([[:space:]]|$)"
+}
