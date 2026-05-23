@@ -1,10 +1,20 @@
 .\" Manpage for bitcoin-daemon(1) — bitcoind lifecycle.
-.TH BITCOIN-DAEMON 1 "2026-05-21" "bitcoin 1.22.0" "User Commands"
+.TH BITCOIN-DAEMON 1 "2026-05-23" "bitcoin 1.22.0" "User Commands"
 
 .SH NAME
-bitcoin\-daemon \- start, stop, monitor, and inspect the local bitcoind
+bitcoin\-daemon \- enable, disable, start, stop, monitor, and inspect the local bitcoind
 
 .SH SYNOPSIS
+.B bitcoin daemon
+.RI [ options ]
+.B enable
+.RI [ --user " | " --system ]
+.br
+.B bitcoin daemon
+.RI [ options ]
+.B disable
+.RI [ --user " | " --system ]
+.br
 .B bitcoin daemon
 .RI [ options ]
 .B start
@@ -31,8 +41,9 @@ provides a thin lifecycle wrapper over the Bitcoin Core
 process: start it, stop it, watch its progress, and report how
 much disk the chainstate is consuming. The plugin manages
 .BR bitcoind
-as a local long-running process; it does not configure systemd
-units, nor does it run multiple instances side-by-side.
+as a local long-running process and, since 1.22.0 (FEAT-034), can
+install a service unit so the daemon survives reboots. It does not
+run multiple instances side-by-side.
 
 .SH OPTIONS
 .TP
@@ -43,6 +54,45 @@ Enable debug output (shell trace).
 Quiet mode (suppress info logging).
 
 .SH SUBCOMMANDS
+.TP
+.BR enable " [" --user " | " --system ]
+Render a service unit from the templates under
+.I share/bitcoin/units/
+.RB ( bitcoind.service
+for systemd,
+.B bitcoind.plist
+for launchd), install it, and bring
+.B bitcoind
+up so it survives reboots.
+.B --user
+(default) installs a per-user service with no root
+.RB ( "systemctl --user"
+on Linux,
+.B launchctl bootstrap gui/$UID
+on macOS).
+.B --system
+installs a system-wide service running as a dedicated
+.B bitcoin
+account (created on first enable if missing) with its data dir
+under
+.IR /var/lib/bitcoin .
+The
+.BR @BITCOIND@ ", " @DATADIR@ ", and " @USER@
+template markers are substituted at enable time;
+.B @BITCOIND@
+resolves via
+.B command -v bitcoind
+so a missing binary surfaces here, not later in the journal.
+Idempotent. Errors with a pointer to
+.B bitcoin daemon install
+when no
+.B bitcoind
+is on PATH.
+.TP
+.BR disable " [" --user " | " --system ]
+Tear the service down and remove its unit file. The data
+directory is preserved (an explicit purge verb is left for a
+future release).
 .TP
 .B start
 Start the local
@@ -82,6 +132,30 @@ line to stderr per CLAUDE.md §10.
 
 .SH FILES
 .TP
+.I share/bitcoin/units/bitcoind.service
+.TQ
+.I share/bitcoin/units/bitcoind.plist
+systemd and launchd unit templates rendered by
+.BR enable .
+.TP
+.I ~/.config/systemd/user/bitcoind.service
+.TQ
+.I /etc/systemd/system/bitcoind.service
+Installed systemd unit (\c
+.B --user
+and
+.B --system
+respectively).
+.TP
+.I ~/Library/LaunchAgents/org.bitcoin.bitcoind.plist
+.TQ
+.I /Library/LaunchDaemons/org.bitcoin.bitcoind.plist
+Installed launchd unit (\c
+.B --user
+and
+.B --system
+respectively).
+.TP
 .I ~/.bitcoin/bitcoin.conf
 Bitcoin Core configuration the daemon reads at startup.
 .TP
@@ -106,6 +180,15 @@ Equivalent to
 .B SELF_QUIET
 Equivalent to
 .BR -q .
+.TP
+.B BITCOIN_BITCOIND
+Override the
+.B bitcoind
+binary path used by
+.BR enable ,
+bypassing the
+.B command -v bitcoind
+PATH lookup.
 
 .SH SEE ALSO
 .BR bitcoin (1),
@@ -116,3 +199,7 @@ Equivalent to
 .SH HISTORY
 Plugin introduced in bitcoin 1.0.0. Man page added in 1.23.0
 (FEAT-041).
+.B enable
+and
+.B disable
+added in 1.22.0 (FEAT-034).

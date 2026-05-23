@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.bitcoin.bitcoind</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@BITCOIND@</string>
+		<string>-datadir=@DATADIR@</string>
+		<string>-conf=@DATADIR@/bitcoin.conf</string>
+	</array>
+	<key>UserName</key>
+	<string>@USER@</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>@DATADIR@/bitcoind.log</string>
+	<key>StandardErrorPath</key>
+	<string>@DATADIR@/bitcoind.log</string>
+</dict>
+</plist>

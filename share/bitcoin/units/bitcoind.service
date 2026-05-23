@@ -1,0 +1,16 @@
+[Unit]
+Description=Bitcoin Core daemon (managed by bitcoin daemon enable)
+Documentation=man:bitcoin-daemon(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=@BITCOIND@ -datadir=@DATADIR@ -conf=@DATADIR@/bitcoin.conf -pid=@DATADIR@/bitcoind.pid
+Type=simple
+User=@USER@
+PIDFile=@DATADIR@/bitcoind.pid
+Restart=on-failure
+TimeoutStopSec=600
+
+[Install]
+WantedBy=default.target
