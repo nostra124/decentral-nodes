@@ -732,6 +732,52 @@ setup_wallet_derive_env() {
 	(( $(wc -l < "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses") == 2 ))
 }
 
+# FEAT-044: gap-limit walking on `wallet derive --walk`.
+
+@test "FEAT-044 — wallet derive --walk discovers a funded address" {
+	setup_wallet_derive_env
+	# Index-0 BIP-84 address has on-chain history; index 1+ have no
+	# fixture, so the curl stub fails → the walk treats them as empty.
+	addr0="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr0/txs" "$(alice_tx_fixture)"
+	run "$BITCOIN_BIN" wallet derive alice --walk --gap 1
+	[ "$status" -eq 0 ]
+	# Discovered exactly the funded index-0 address.
+	echo "$output" | grep -qE "derived: 1;"
+	grep -q "	$addr0	" "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses"
+}
+
+@test "FEAT-044 — wallet derive --walk is a no-op when nothing is funded" {
+	setup_wallet_derive_env
+	# No fixtures at all → every probe fails → treated as empty.
+	run "$BITCOIN_BIN" wallet derive alice --walk --gap 1
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qE "derived: 0;"
+	# Ledger stays empty (no commit, no rows appended).
+	[ ! -s "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses" ]
+}
+
+@test "FEAT-044 — wallet derive --walk stops after --gap consecutive empties" {
+	setup_wallet_derive_env
+	addr0="bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+	curl_fixture "https://mempool.space/api/address/$addr0/txs" "$(alice_tx_fixture)"
+	# gap=2: after the funded index 0, the next two probes (idx 1, 2)
+	# are unfixtured → empty → empties hits 2 → stop at index 3.
+	run "$BITCOIN_BIN" wallet derive alice --walk --gap 2
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qE "gap-limit reached at index 3"
+}
+
+@test "FEAT-044 — wallet derive --gap 0 acts like a plain single derive" {
+	setup_wallet_derive_env
+	run "$BITCOIN_BIN" wallet derive alice --gap 0
+	[ "$status" -eq 0 ]
+	# Plain derive prints the index-0 address, not the walk summary.
+	[[ "$output" == *"bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"* ]]
+	[[ "$output" != *"derived:"* ]]
+	(( $(wc -l < "$XDG_DATA_HOME/bitcoin/wallets/alice/addresses") == 1 ))
+}
+
 @test "FEAT-013 — wallet addresses lists the derived ledger" {
 	setup_wallet_derive_env
 	"$BITCOIN_BIN" wallet derive alice >/dev/null
