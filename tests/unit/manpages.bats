@@ -28,8 +28,11 @@ setup() {
 # and intentionally do not get their own page.
 # psbt shim removed in 1.24.0 (FEAT-035 alias-removal sweep);
 # canonical is bip174.
-# bech32 dropped to DEPRECATED_ALIASES in 1.23.0 (FEAT-035 Stream C2)
-# — canonical homes are bip173 (bech32) and bip350 (bech32m).
+# bech32 / bech32-verify / bech32-encode / bech32-decode shims
+# removed in 1.24.0 (FEAT-035 alias-removal sweep); canonical
+# homes are bip173 (bech32) and bip350 (bech32m). `help:bech32`
+# survives in bin/bitcoin so `bitcoin help bech32` still cites
+# the BIPs (FEAT-017), but the verbs themselves error out.
 # descriptor: checksum/verify/derive moved to bip380 in 1.23.0
 # (FEAT-035 Stream B) and the deprecated aliases were removed in
 # 1.24.0. The surviving `descriptor wallet` subcommand keeps a
@@ -52,7 +55,9 @@ LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 bip380 daemon wif"
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
 # Each entry is "<alias>=<canonical>".
-DEPRECATED_ALIASES="bech32=bip173"
+# All FEAT-035 deprecated aliases were removed in 1.24.0; no
+# .so-include alias pages remain.
+DEPRECATED_ALIASES=""
 
 @test "every command: verb has a bitcoin-<verb>.1 source file" {
 	for v in $COMMAND_VERBS; do
@@ -168,9 +173,11 @@ assert_sections() {
 	[ ! -e "$MAN_DIR/bitcoin-psbt.1" ]
 }
 
-@test "bitcoin-bech32.1 is a .so-include alias to bitcoin-bip173.1" {
-	# FEAT-041 alias convention (Stream C2 made bech32 a deprecated alias).
-	grep -qE '^\.so man1/bitcoin-bip173\.1$' "$MAN_DIR/bitcoin-bech32.1"
+@test "bitcoin-bech32.1 was removed in 1.24.0" {
+	# FEAT-035 alias-removal sweep: the .so-include is gone alongside
+	# the bech32 verb shims. Users land on bitcoin-bip173(1) /
+	# bitcoin-bip350(1) directly.
+	[ ! -e "$MAN_DIR/bitcoin-bech32.1" ]
 }
 
 # ---------------------------------------------------------------------------
