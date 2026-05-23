@@ -41,17 +41,16 @@ setup() {
 COMMAND_VERBS="wallet tx utxo tax backend"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
-# mnemonic-to-seed dropped to DEPRECATED_ALIASES in 1.23.0
-# (FEAT-035): the standalone shim still exists but the canonical
-# subcommand is now `bitcoin bip39 mnemonic-to-seed`.
 # bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).
 # bip174 added in 1.23.0 (FEAT-035 Stream D).
+# mnemonic-to-seed shim removed in 1.24.0 (FEAT-035 alias-removal
+# sweep) — canonical is `bitcoin bip39 mnemonic-to-seed`.
 LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 bip380 daemon wif"
 
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
 # Each entry is "<alias>=<canonical>".
-DEPRECATED_ALIASES="mnemonic-to-seed=bip39 psbt=bip174 bech32=bip173 descriptor=bip380"
+DEPRECATED_ALIASES="psbt=bip174 bech32=bip173 descriptor=bip380"
 
 @test "every command: verb has a bitcoin-<verb>.1 source file" {
 	for v in $COMMAND_VERBS; do
@@ -124,10 +123,11 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-daemon.1"
 }
 
-@test "bitcoin-mnemonic-to-seed.1 is a .so-include alias to bitcoin-bip39.1" {
-	# FEAT-041 alias convention: a deprecated-alias page is a tiny
-	# file that resolves to its canonical via groff's .so directive.
-	grep -qE '^\.so man1/bitcoin-bip39\.1$' "$MAN_DIR/bitcoin-mnemonic-to-seed.1"
+@test "bitcoin-mnemonic-to-seed.1 was removed in 1.24.0" {
+	# FEAT-035 alias-removal sweep: the .so-include page is gone
+	# alongside its underlying shim. Users land on bitcoin-bip39(1)
+	# directly.
+	[ ! -e "$MAN_DIR/bitcoin-mnemonic-to-seed.1" ]
 }
 
 @test "bitcoin-wallet.1 has all required sections" {

@@ -112,11 +112,6 @@ Bech32m string encoding \(em BIP-350.
 .BR bitcoin-bip380 (1)
 Output script descriptors \(em BIP-380.
 .TP
-.BR bitcoin-mnemonic-to-seed (1)
-PBKDF2 seed derivation from a BIP-39 mnemonic
-(deprecated alias for
-.BR "bitcoin bip39 mnemonic-to-seed" ).
-.TP
 .BR bitcoin-wif (1)
 Wallet Import Format encode / decode.
 .TP
@@ -186,7 +181,7 @@ Base URL for the mempool.space backend (default
 .TP
 .B BIP39_PASSPHRASE
 Optional BIP-39 passphrase consumed by
-.BR mnemonic-to-seed .
+.BR "bitcoin bip39 mnemonic-to-seed" .
 .TP
 .B XDG_DATA_HOME
 Wallet repositories live under
@@ -339,7 +334,6 @@ Per-subcommand pages:
 .BR bitcoin-bip380 (1),
 .BR bitcoin-daemon (1),
 .BR bitcoin-descriptor (1),
-.BR bitcoin-mnemonic-to-seed (1),
 .BR bitcoin-psbt (1),
 .BR bitcoin-tax (1),
 .BR bitcoin-tx (1),

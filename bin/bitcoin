@@ -1185,6 +1185,17 @@ help:tax() {
 	command:tax help
 }
 
+# FEAT-035 alias removal (1.24.0): the deprecated standalone
+# `bitcoin mnemonic-to-seed` was promised removal in 1.24.0
+# (the warn-and-forward shim under libexec/bitcoin/ has been
+# deleted). This command:* shim takes priority over the
+# dispatcher's libexec-fallback so users see a clear "removed"
+# error rather than `bitcoin help` falling through.
+command:mnemonic-to-seed() {
+	error "'mnemonic-to-seed' was removed in 1.24.0; use 'bitcoin bip39 mnemonic-to-seed'"
+	return 1
+}
+
 help:wallet() {
 	wallet:help
 	cite 39 "Mnemonic seed phrases"

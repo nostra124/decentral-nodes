@@ -617,21 +617,24 @@ mempool_fees_fixture() {
 }
 
 # ---------------------------------------------------------------------------
-# FEAT-025 follow-up — libexec/bitcoin/mnemonic-to-seed (a piece of
-# the option-1 vendoring that this milestone landed to unblock the
-# wallet's HD-derivation pipeline).
+# FEAT-025 follow-up — the seed-derivation primitive, originally
+# at libexec/bitcoin/mnemonic-to-seed (FEAT-025 vendoring), then
+# folded into bip39 as a subcommand (FEAT-035 Stream A, 1.23.0),
+# and now reached exclusively through the canonical
+# 'bitcoin bip39 mnemonic-to-seed' verb after the FEAT-035 alias
+# removal in 1.24.0.
 # ---------------------------------------------------------------------------
 
-@test "mnemonic-to-seed matches the BIP-39 test vector (TREZOR passphrase)" {
+@test "bip39 mnemonic-to-seed matches the BIP-39 test vector (TREZOR passphrase)" {
 	expected="c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"
-	got="$(BIP39_PASSPHRASE=TREZOR "$BATS_TEST_DIRNAME/../../libexec/bitcoin/mnemonic-to-seed" \
+	got="$(BIP39_PASSPHRASE=TREZOR "$BITCOIN_BIN" bip39 mnemonic-to-seed \
 		abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about \
 		| basenc --base16 -w0 | tr A-F a-f)"
 	[ "$got" = "$expected" ]
 }
 
-@test "mnemonic-to-seed rejects an out-of-range word count" {
-	run "$BATS_TEST_DIRNAME/../../libexec/bitcoin/mnemonic-to-seed" only three words
+@test "bip39 mnemonic-to-seed rejects an out-of-range word count" {
+	run "$BITCOIN_BIN" bip39 mnemonic-to-seed only three words
 	[ "$status" -ne 0 ]
 }
 
