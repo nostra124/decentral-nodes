@@ -2777,47 +2777,31 @@ wallet:rm() {
 # ---------------------------------------------------------------------------
 
 # Helper: pick the canonical plugin target based on a leading -m.
-_bech32_target() {
-	if [ "$1" = "-m" ]; then
-		echo bip350
-	else
-		echo bip173
-	fi
-}
-
 command:bech32() {
-	warn "'bech32' is deprecated since 1.23.0; use 'bitcoin bip173 encode' or 'bitcoin bip350 encode' (will be removed in 1.24.0)"
-	local target; target="$(_bech32_target "$@")"
-	[ "$1" = "-m" ] && shift
-	local libexec="${SELF_LIBEXEC:?command:bech32: SELF_LIBEXEC must be set}"
-	exec "$libexec/${SELF:-bitcoin}/$target" encode "$@"
+	error "'bech32' was removed in 1.24.0; use 'bitcoin bip173 encode' or 'bitcoin bip350 encode'"
+	return 1
 }
 
 command:bech32-verify() {
-	warn "'bech32-verify' is deprecated since 1.23.0; use 'bitcoin bip173 verify' or 'bitcoin bip350 verify' (will be removed in 1.24.0)"
-	local target; target="$(_bech32_target "$@")"
-	[ "$1" = "-m" ] && shift
-	local libexec="${SELF_LIBEXEC:?command:bech32-verify: SELF_LIBEXEC must be set}"
-	exec "$libexec/${SELF:-bitcoin}/$target" verify "$@"
+	error "'bech32-verify' was removed in 1.24.0; use 'bitcoin bip173 verify' or 'bitcoin bip350 verify'"
+	return 1
 }
 
 command:bech32-encode() {
-	warn "'bech32-encode' is deprecated since 1.23.0; use 'bitcoin bip173 encode-values' or 'bitcoin bip350 encode-values' (will be removed in 1.24.0)"
-	local target; target="$(_bech32_target "$@")"
-	[ "$1" = "-m" ] && shift
-	local libexec="${SELF_LIBEXEC:?command:bech32-encode: SELF_LIBEXEC must be set}"
-	exec "$libexec/${SELF:-bitcoin}/$target" encode-values "$@"
+	error "'bech32-encode' was removed in 1.24.0; use 'bitcoin bip173 encode-values' or 'bitcoin bip350 encode-values'"
+	return 1
 }
 
 command:bech32-decode() {
-	warn "'bech32-decode' is deprecated since 1.23.0; use 'bitcoin bip173 decode' or 'bitcoin bip350 decode' (will be removed in 1.24.0)"
-	local target; target="$(_bech32_target "$@")"
-	[ "$1" = "-m" ] && shift
-	local libexec="${SELF_LIBEXEC:?command:bech32-decode: SELF_LIBEXEC must be set}"
-	exec "$libexec/${SELF:-bitcoin}/$target" decode "$@"
+	error "'bech32-decode' was removed in 1.24.0; use 'bitcoin bip173 decode' or 'bitcoin bip350 decode'"
+	return 1
 }
 
+# 'bitcoin help bech32' survives as documentation even though the
+# bech32 verbs themselves were removed in 1.24.0 — the educational
+# BIP citations (FEAT-017) point users at the canonical plugins.
 help:bech32() {
+	echo "'bech32' was removed in 1.24.0; use 'bitcoin bip173' / 'bitcoin bip350'." >&2
 	cite 173 "Bech32 segwit address format"
 	cite 350 "Bech32m for v1+ witness addresses"
 }

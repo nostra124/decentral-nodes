@@ -120,12 +120,6 @@ feat037_setup_wallet() {
 	[ "$output" = "$expected" ]
 }
 
-@test "FEAT-035 C — bip173 encode == bitcoin bech32 (same bytes)" {
-	canonical=$("$BITCOIN_BIN" bip173 encode this-part-is-readable-by-a-human qpzry)
-	legacy=$("$BITCOIN_BIN" bech32 this-part-is-readable-by-a-human qpzry)
-	[ "$canonical" = "$legacy" ]
-}
-
 @test "FEAT-035 C — bip173 verify accepts a known-good bech32 vector" {
 	run "$BITCOIN_BIN" bip173 verify this-part-is-readable-by-a-human1qpzrylhvwcq
 	[ "$status" -eq 0 ]
@@ -155,12 +149,6 @@ feat037_setup_wallet() {
 	run "$BITCOIN_BIN" bip350 encode this-part-is-readable-by-a-human qpzry
 	[ "$status" -eq 0 ]
 	[ "$output" = "$expected" ]
-}
-
-@test "FEAT-035 C — bip350 encode == bitcoin bech32 -m (same bytes)" {
-	canonical=$("$BITCOIN_BIN" bip350 encode this-part-is-readable-by-a-human qpzry)
-	legacy=$("$BITCOIN_BIN" bech32 -m this-part-is-readable-by-a-human qpzry)
-	[ "$canonical" = "$legacy" ]
 }
 
 @test "FEAT-035 C — bip350 verify accepts a known-good bech32m vector" {
@@ -272,57 +260,28 @@ feat037_setup_wallet() {
 # `bech32-encode` / `bech32-decode` verbs.
 # ---------------------------------------------------------------------------
 
-@test "FEAT-035 C2 — bitcoin bech32 alias produces identical bytes to bip173 encode" {
-	canonical=$("$BITCOIN_BIN" bip173 encode this-part-is-readable-by-a-human qpzry 2>/dev/null)
-	alias_out=$("$BITCOIN_BIN" bech32 this-part-is-readable-by-a-human qpzry 2>/dev/null)
-	[ "$canonical" = "$alias_out" ]
-}
-
-@test "FEAT-035 C2 — bitcoin bech32 -m alias produces identical bytes to bip350 encode" {
-	canonical=$("$BITCOIN_BIN" bip350 encode this-part-is-readable-by-a-human qpzry 2>/dev/null)
-	alias_out=$("$BITCOIN_BIN" bech32 -m this-part-is-readable-by-a-human qpzry 2>/dev/null)
-	[ "$canonical" = "$alias_out" ]
-}
-
-@test "FEAT-035 C2 — bitcoin bech32 alias emits one warn line" {
-	run --separate-stderr "$BITCOIN_BIN" bech32 this-part-is-readable-by-a-human qpzry
-	[ "$status" -eq 0 ]
-	echo "$stderr" | grep -qE "warn .*bech32.* deprecated.* 1\.23\.0"
-	echo "$stderr" | grep -qF "bitcoin bip173 encode"
-	echo "$stderr" | grep -qF "1.24.0"
-}
-
-@test "FEAT-035 C2 — bitcoin bech32 -m alias warn line mentions both bip173 and bip350" {
-	run --separate-stderr "$BITCOIN_BIN" bech32 -m this-part-is-readable-by-a-human qpzry
-	[ "$status" -eq 0 ]
-	echo "$stderr" | grep -qF "bitcoin bip350 encode"
-}
-
-@test "FEAT-035 C2 — bitcoin bech32-verify alias forwards" {
-	canonical_status=$("$BITCOIN_BIN" bip173 verify this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null; echo $?)
-	alias_status=$("$BITCOIN_BIN" bech32-verify this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null; echo $?)
-	[ "$canonical_status" = "$alias_status" ]
-}
-
-@test "FEAT-035 C2 — bitcoin bech32-encode alias produces identical bytes to bip173 encode-values" {
-	canonical=$("$BITCOIN_BIN" bip173 encode-values bc 0 14 20 15 7 13 26 0 25 18 6 11 13 8 21 4 20 3 17 2 29 3 0 0 25 0 25 4 7 27 28 16 0 0 2>/dev/null)
-	alias_out=$("$BITCOIN_BIN" bech32-encode bc 0 14 20 15 7 13 26 0 25 18 6 11 13 8 21 4 20 3 17 2 29 3 0 0 25 0 25 4 7 27 28 16 0 0 2>/dev/null)
-	[ "$canonical" = "$alias_out" ]
-}
-
-@test "FEAT-035 C2 — bitcoin bech32-decode alias produces identical lines to bip173 decode" {
-	canonical=$("$BITCOIN_BIN" bip173 decode this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null)
-	alias_out=$("$BITCOIN_BIN" bech32-decode this-part-is-readable-by-a-human1qpzrylhvwcq 2>/dev/null)
-	[ "$canonical" = "$alias_out" ]
-}
-
-@test "FEAT-035 C2 — every bech32* alias emits exactly one warn line" {
-	for verb in "bech32 hrp qpzry" "bech32-verify hrp1qpzry" "bech32-encode hrp 0 1 2 3 4" "bech32-decode hrp1qpzry"; do
-		run --separate-stderr bash -c "'$BITCOIN_BIN' $verb 2>&1 >/dev/null"
-		warn_count=$(echo "$output" | grep -c "warn" || true)
-		[ "$warn_count" -le 1 ] \
-			|| { echo "verb='$verb' emitted $warn_count warn lines"; return 1; }
+@test "FEAT-035 C2 — every bech32* verb was removed in 1.24.0" {
+	# FEAT-035 alias-removal sweep: bech32 / bech32-verify /
+	# bech32-encode / bech32-decode all error out pointing at the
+	# canonical bip173 / bip350 plugins.
+	for verb in bech32 bech32-verify bech32-encode bech32-decode; do
+		run --separate-stderr "$BITCOIN_BIN" "$verb" hrp qpzry
+		[ "$status" -ne 0 ] \
+			|| { echo "'$verb' did not error after removal"; return 1; }
+		echo "$stderr" | grep -qE "'$verb' was removed in 1\.24\.0" \
+			|| { echo "'$verb' missing removal message"; return 1; }
+		echo "$stderr" | grep -qE "bip173|bip350" \
+			|| { echo "'$verb' removal message missing canonical pointer"; return 1; }
 	done
+}
+
+@test "FEAT-035 C2 — bitcoin help bech32 still cites the BIPs (FEAT-017)" {
+	# help:bech32 survives the verb removal so the educational BIP
+	# citations remain reachable.
+	run bash -c "'$BITCOIN_BIN' help bech32 2>&1"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qE "BIP-173|bip-0173"
+	echo "$output" | grep -qE "BIP-350|bip-0350"
 }
 
 @test "FEAT-035 C2 — bitcoin bip173 / bip350 emit NO warn lines" {
