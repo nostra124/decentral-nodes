@@ -16,10 +16,10 @@ This is **product polish** on top of the 1.23.0 platform.
 
 | Feature | Status | PRs |
 |---------|--------|-----|
-| FEAT-042 coin control on `wallet send` | open | depends on FEAT-036 `tx build --utxo` (✅ shipped in 1.23.0) |
+| FEAT-042 coin control on `wallet send` | ✅ shipped | #49 |
+| FEAT-035 alias removal (psbt / descriptor / bech32 / mnemonic-to-seed / wallet build·sign·broadcast → hard error) | ✅ shipped | #50 (mnemonic-to-seed), #51 (psbt), #52 (descriptor), #53 (bech32*), #54 (wallet build/sign/broadcast) |
 | FEAT-043 `bitcoin tx bump` (RBF + CPFP) | open | depends on FEAT-036 `tx` verb (✅) and FEAT-037 `utxo ls` (✅) |
 | FEAT-044 gap-limit walking on derive | open | independent |
-| FEAT-035 alias removal (psbt / descriptor / bech32 / mnemonic-to-seed → hard error) | open | 1.23.0 promised removal in 1.24.0 |
 | FEAT-037 AC #4 — `wallet index` → `utxo ls` deprecation | on hold | spec mismatch (see ROADMAP-1.23.0 Status note) |
 
 ## What lands
