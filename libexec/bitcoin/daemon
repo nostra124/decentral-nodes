@@ -116,6 +116,7 @@ generic commands:
    version                 print the version of $SELF
 
 $SELF commands:
+   install [--from <src>]  install the bitcoind binary (brew|apt|apk|source|rpk)
    enable [--user|--system]  install a service unit and bring bitcoind up
    disable [--user|--system] tear the service down (data dir preserved)
    start                   starts the bitcoind daemon
@@ -421,6 +422,136 @@ command:disable() {
 		$SUDO rm -f "$unit" && info "removed $unit"
 	fi
 	info "bitcoind service disabled ($mode/$os); data dir preserved"
+}
+
+#------------------------------------------------------------------------------
+# FEAT-033: install Bitcoin Core itself (daemon install).
+#
+# `bitcoind` is not in this repo; this verb wraps each platform's
+# preferred install path so a clean host can reach a node without
+# learning brew / macports / apt / apk / source idioms. The default
+# source is chosen from `account platform`; --from overrides it. The
+# package-manager binaries and `account` are all on PATH, so the
+# suite mocks them.
+
+# Default install source for the host platform.
+daemon:_default_source() {
+	case "$(account platform 2>/dev/null)" in
+		macos)
+			if command -v brew >/dev/null 2>&1; then echo brew; else echo macports; fi ;;
+		pureos|ubuntu|debian) echo apt ;;
+		alpine)               echo apk ;;
+		*)                    echo source ;;
+	esac
+}
+
+# Require a command on PATH or emit an error and fail.
+daemon:_need() {
+	command -v "$1" >/dev/null 2>&1 && return 0
+	error "install: required tool '$1' not found"
+	return 1
+}
+
+# --from source: clone, build, and install Bitcoin Core. $BITCOIN_CORE_REPO
+# overrides the upstream URL (used by the test harness).
+daemon:_install_from_source() {
+	local tag="$1" prefix="$2" tool repo workdir
+	for tool in git make pkg-config; do
+		daemon:_need "$tool" || return 1
+	done
+	repo="${BITCOIN_CORE_REPO:-https://github.com/bitcoin/bitcoin}"
+	workdir="$(mktemp -d)"
+	# shellcheck disable=SC2086
+	git clone --depth 1 ${tag:+--branch} ${tag:+"$tag"} "$repo" "$workdir/bitcoin" \
+		|| { error "install: git clone of '$repo' failed"; rm -rf "$workdir"; return 1; }
+	(
+		cd "$workdir/bitcoin" || exit 1
+		[ -n "$tag" ] || tag="$(git describe --tags --abbrev=0 2>/dev/null)"
+		info "building Bitcoin Core ${tag:-HEAD} (this takes a while)"
+		./autogen.sh \
+			&& ./configure --prefix "$prefix" --disable-wallet --disable-tests \
+			&& make \
+			&& sudo make install
+	) || { error "install: source build failed"; rm -rf "$workdir"; return 1; }
+	rm -rf "$workdir"
+}
+
+help:install() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF install [--from <source>] [--tag <v>] [--prefix <path>]
+
+	  Install the bitcoind binary. --from selects the source; the
+	  default is chosen from the host platform:
+	    brew      macOS (default; falls back to macports)
+	    macports  macOS (alt)
+	    apt       Debian / Ubuntu / PureOS
+	    apk       Alpine
+	    source    clone + build from github.com/bitcoin/bitcoin
+	    rpk       nostra124/bitcoind rpk package (not yet shipped)
+
+	  --tag and --prefix apply only to --from source.
+	ENDHELP
+}
+
+command:install() {
+	local source="" tag="" prefix="/usr/local"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--from)     source="$2"; shift 2 ;;
+			--from=*)   source="${1#--from=}"; shift ;;
+			--tag)      tag="$2"; shift 2 ;;
+			--tag=*)    tag="${1#--tag=}"; shift ;;
+			--prefix)   prefix="$2"; shift 2 ;;
+			--prefix=*) prefix="${1#--prefix=}"; shift ;;
+			-h|--help|help) help:install; return 0 ;;
+			*) warn "install: unknown argument '$1'"; return 1 ;;
+		esac
+	done
+	[ -n "$source" ] || source="$(daemon:_default_source)"
+
+	case "$source" in
+		brew)
+			daemon:_need brew || return 1
+			brew install bitcoin || { error "install: 'brew install bitcoin' failed"; return 1; }
+			;;
+		macports)
+			daemon:_need port || return 1
+			sudo port install bitcoin || { error "install: 'port install bitcoin' failed"; return 1; }
+			;;
+		apt)
+			daemon:_need apt-get || return 1
+			if command -v add-apt-repository >/dev/null 2>&1; then
+				sudo add-apt-repository -y ppa:luke-jr/bitcoincore
+			fi
+			sudo apt-get update
+			sudo apt-get install -y bitcoind \
+				|| { error "install: 'apt-get install bitcoind' failed"; return 1; }
+			;;
+		apk)
+			daemon:_need apk || return 1
+			sudo apk add bitcoin || { error "install: 'apk add bitcoin' failed"; return 1; }
+			;;
+		source)
+			daemon:_install_from_source "$tag" "$prefix" || return 1
+			;;
+		rpk)
+			error "install: --from rpk is not yet available; see docs/rpk-bitcoind.md"
+			return 1
+			;;
+		*)
+			error "install: unknown source '$source' (accepted: brew, macports, apt, apk, source, rpk)"
+			return 1
+			;;
+	esac
+
+	if command -v bitcoind >/dev/null 2>&1; then
+		local v; v="$(bitcoind --version 2>/dev/null | head -1)"
+		info "installed: $v"
+		printf '%s\n' "$v"
+	else
+		warn "install: completed but no 'bitcoind' found on PATH"
+		return 1
+	fi
 }
 
 #------------------------------------------------------------------------------

@@ -2,9 +2,14 @@
 .TH BITCOIN-DAEMON 1 "2026-05-23" "bitcoin 1.22.0" "User Commands"
 
 .SH NAME
-bitcoin\-daemon \- enable, disable, start, stop, monitor, and inspect the local bitcoind
+bitcoin\-daemon \- install, enable, disable, start, stop, monitor, and inspect the local bitcoind
 
 .SH SYNOPSIS
+.B bitcoin daemon
+.RI [ options ]
+.B install
+.RI [ "--from " source "] [" "--tag " v "] [" "--prefix " path ]
+.br
 .B bitcoin daemon
 .RI [ options ]
 .B enable
@@ -54,6 +59,50 @@ Enable debug output (shell trace).
 Quiet mode (suppress info logging).
 
 .SH SUBCOMMANDS
+.TP
+.BR install " [" "--from " source "] [" "--tag " v "] [" "--prefix " path ]
+Install the
+.B bitcoind
+binary. The default
+.I source
+is chosen from
+.B account platform :
+.B brew
+on macOS (falling back to
+.BR macports ),
+.B apt
+on Debian / Ubuntu / PureOS,
+.B apk
+on Alpine, and
+.B source
+elsewhere.
+.B --from
+overrides it; accepted values are
+.BR brew ,
+.BR macports ,
+.BR apt ,
+.BR apk ,
+.BR source ,
+and
+.BR rpk .
+.B --tag
+and
+.B --prefix
+apply only to
+.BR "--from source" ,
+which clones and builds Bitcoin Core from
+.I github.com/bitcoin/bitcoin
+with
+.B --disable-wallet
+(this tool is the wallet).
+.B --from rpk
+errors until the
+.I nostra124/bitcoind
+rpk package ships (see
+.IR docs/rpk-bitcoind.md ).
+On success the installed
+.B bitcoind --version
+is printed.
 .TP
 .BR enable " [" --user " | " --system ]
 Render a service unit from the templates under
@@ -189,6 +238,12 @@ binary path used by
 bypassing the
 .B command -v bitcoind
 PATH lookup.
+.TP
+.B BITCOIN_CORE_REPO
+Override the Bitcoin Core git URL cloned by
+.B "install --from source"
+(default
+.IR https://github.com/bitcoin/bitcoin ).
 
 .SH SEE ALSO
 .BR bitcoin (1),
@@ -199,6 +254,8 @@ PATH lookup.
 .SH HISTORY
 Plugin introduced in bitcoin 1.0.0. Man page added in 1.23.0
 (FEAT-041).
+.B install
+added in 1.22.0 (FEAT-033);
 .B enable
 and
 .B disable
