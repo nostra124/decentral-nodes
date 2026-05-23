@@ -2,7 +2,7 @@
 id: FEAT-033
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `bitcoin daemon install` — install Bitcoin Core itself

@@ -2,7 +2,7 @@
 id: FEAT-034
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `bitcoin daemon enable` / `disable` — service-managed bitcoind
