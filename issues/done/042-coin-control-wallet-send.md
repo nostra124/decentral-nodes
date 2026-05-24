@@ -2,7 +2,7 @@
 id: FEAT-042
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # Coin control on `wallet send`
