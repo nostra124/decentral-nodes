@@ -2,7 +2,7 @@
 id: FEAT-044
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # Gap-limit walking on `wallet derive`

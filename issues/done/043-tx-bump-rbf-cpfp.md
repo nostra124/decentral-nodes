@@ -2,7 +2,7 @@
 id: FEAT-043
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # `bitcoin tx bump` — fee-bumping (RBF + CPFP)
