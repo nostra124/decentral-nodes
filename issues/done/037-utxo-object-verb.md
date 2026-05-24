@@ -2,7 +2,7 @@
 id: FEAT-037
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # `bitcoin utxo` — UTXO as a first-class object verb

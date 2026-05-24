@@ -2,7 +2,7 @@
 id: FEAT-035
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # Command-surface streamline — `bipXXX` plugins + object verbs

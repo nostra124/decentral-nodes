@@ -2,7 +2,7 @@
 id: FEAT-038
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # Tax-label vocabulary — closed taxonomy on outpoints
