@@ -2,7 +2,7 @@
 id: FEAT-041
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # Per-subcommand man pages — `bitcoin-<verb>(1)` for every shipping command

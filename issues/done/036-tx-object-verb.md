@@ -2,7 +2,7 @@
 id: FEAT-036
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # `bitcoin tx` — transaction as a first-class object verb
