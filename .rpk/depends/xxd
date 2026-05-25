@@ -1,0 +1,16 @@
+#!/bin/bash
+BIN="xxd"
+if command -v "$BIN" > /dev/null 2>&1; then
+	exit 0
+fi
+case "$(rpk platform)" in
+	alpine)                                        rpk action sudo apk add vim ;;
+	debian|ubuntu|pureos|linuxmint)                rpk action sudo apt-get --yes install xxd ;;
+	fedora|rhel|centos|rocky|almalinux)            rpk action sudo dnf install -y vim-common ;;
+	arch|manjaro|endeavouros)                      rpk action sudo pacman -S --noconfirm vim ;;
+	opensuse|opensuse-leap|opensuse-tumbleweed|sles) rpk action sudo zypper install -y vim ;;
+	freebsd)                                       rpk action sudo pkg install -y xxd ;;
+	macos-ports)                                   rpk action sudo port install xxd ;;
+	macos-brew)                                    rpk action brew install xxd ;;
+	*)                                             echo "no packager for platform '$(rpk platform)' — install $BIN manually" >&2; exit 1 ;;
+esac
