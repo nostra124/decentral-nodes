@@ -415,14 +415,22 @@ backend:set() {
 	info "backend set to: $name"
 }
 
+backend:_bitcoind_datadir() {
+	local f="${XDG_CONFIG_HOME:-$HOME/.config}/bitcoin/bitcoind-datadir"
+	[ -s "$f" ] && cat "$f"
+}
+
 backend:auto() {
-	if command -v bitcoin-cli >/dev/null 2>&1 \
-	   && bitcoin-cli getblockcount >/dev/null 2>&1; then
-		backend:set bitcoind
-	else
-		warn "bitcoin-cli not reachable; falling back to mempool.space (chain state is trusted to a third party)"
-		backend:set mempool
+	if command -v bitcoin-cli >/dev/null 2>&1; then
+		local datadir
+		datadir="$(backend:_bitcoind_datadir)"
+		if bitcoin-cli ${datadir:+-datadir="$datadir"} getblockcount >/dev/null 2>&1; then
+			backend:set bitcoind
+			return 0
+		fi
 	fi
+	warn "bitcoin-cli not reachable; falling back to mempool.space (chain state is trusted to a third party)"
+	backend:set mempool
 }
 
 # --- verbs --------------------------------------------------------------------
