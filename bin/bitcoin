@@ -125,9 +125,9 @@ while getopts "c:dqpt" flag; do
 done
 
 # Read configuration and set defaults if anything's not set
-: ${XDG_CONFIG_HOME:="~/.config"}
-: ${XDG_CACHE_HOME:="~/.cache"}
-: ${XDG_DATA_HOME:="~/.local/var"}
+: ${XDG_CONFIG_HOME:="$HOME/.config"}
+: ${XDG_CACHE_HOME:="$HOME/.cache"}
+: ${XDG_DATA_HOME:="$HOME/.local/var"}
 : ${XDG_SHARE_HOME:="$HOME/.local/share"}
 
 [ -n "$SELF_VERBOSE" ] && set -vx
@@ -3339,14 +3339,14 @@ help:daemon() {
 	echo "" >&2
 	echo "Usage: $SELF daemon <command>" >&2
 	echo "" >&2
-	echo "  install [--from <src>]  install bitcoind (brew|apt|apk|source)" >&2
-	echo "  enable [--user|--system]  install + start systemd/launchd unit" >&2
-	echo "  disable [--user|--system] tear down the service unit" >&2
+	echo "  install [--from <src>]    install bitcoind (brew|apt|apk|source)" >&2
+	echo "  enable [--user|--system]  install + start launchd/systemd unit" >&2
+	echo "  disable [--user|--system] stop service and remove unit" >&2
 	echo "  start [--user|--system]   start bitcoind" >&2
 	echo "  stop [--user|--system]    stop bitcoind" >&2
 	echo "  monitor [--user|--system] tail the bitcoind log" >&2
 	echo "  space [--user|--system]   show data-dir disk usage" >&2
-	echo "  help <command>            show detailed help" >&2
+	echo "  help <command>            show detailed help for a command" >&2
 }
 
 help:bip173() {

@@ -76,9 +76,9 @@ while getopts "c:dqpt" flag; do
 done
 
 # Read configuration and set defaults if anything's not set
-: ${XDG_CONFIG_HOME:="~/.config"}
-: ${XDG_CACHE_HOME:="~/.cache"}
-: ${XDG_DATA_HOME:="~/.local/var"}
+: ${XDG_CONFIG_HOME:="$HOME/.config"}
+: ${XDG_CACHE_HOME:="$HOME/.cache"}
+: ${XDG_DATA_HOME:="$HOME/.local/var"}
 : ${XDG_SHARE_HOME:="$HOME/.local/share"}
 
 [ -n "$SELF_VERBOSE" ] && set -vx
@@ -113,13 +113,14 @@ usage: $SELF <options> <command>
    see '$SELF help <command>' for detailed usage.
 
 commands:
-   install [--from <src>]  install the bitcoind binary (brew|apt|apk|source|rpk)
-   enable [--user|--system]  install a service unit and bring bitcoind up
-   disable [--user|--system] tear the service down (data dir preserved)
-   start [--user|--system]   start the bitcoind service
-   stop [--user|--system]    stop the bitcoind service
-   monitor [--user|--system] follow the bitcoind log
+   install [--from <src>]    install bitcoind (brew|apt|apk|source)
+   enable [--user|--system]  install + start launchd/systemd unit
+   disable [--user|--system] stop service and remove unit
+   start [--user|--system]   start bitcoind
+   stop [--user|--system]    stop bitcoind
+   monitor [--user|--system] tail the bitcoind log
    space [--user|--system]   show data-dir disk usage
+   help <command>            show detailed help for a command
 ENDHELP
 	fi
 }
@@ -257,11 +258,13 @@ daemon:_units_dir() {
 
 # Data directory for the given mode.
 daemon:_datadir() {
-	local mode=$1
+	local mode=$1 dir
 	if [ "$mode" = system ]; then
 		printf '%s/var/lib/bitcoin\n' "$(daemon:_root)"
 	else
-		printf '%s/bitcoin\n' "${XDG_DATA_HOME:-$HOME/.local/share}"
+		dir="${XDG_DATA_HOME:-$HOME/.local/share}"
+		dir="${dir/#\~/$HOME}"
+		printf '%s/bitcoin\n' "$dir"
 	fi
 }
 
