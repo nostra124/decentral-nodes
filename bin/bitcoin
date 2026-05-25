@@ -150,7 +150,7 @@ command:help() {
 		fi
 	else
 		cat >&2 <<ENDHELP
-usage: $SELF <options> <command>
+usage: $SELF <options> <command> [<args>]
 
    options:
    -d                     Enable debug output
@@ -161,84 +161,24 @@ usage: $SELF <options> <command>
    $SELF implements a frontend for various bitcoin tools.
 
 generic commands:
-   help                    print this help message
-   help <command>          prints command specific help
+   help <command>          show detailed help for a command
    version                 print the version of $SELF
 
-wallet commands:
-   wallet new <name>       create a new wallet
-   wallet ls               list wallets
-   wallet rm <name>        delete a wallet
-   wallet derive <name>    derive addresses from seed
-   wallet addresses <name> list derived addresses
-   wallet balance <name>   show wallet balance
-   wallet index <name>     index transaction history
-   wallet history <name>   show transaction history
-   wallet tx <name> <txid> show cached transaction
-   wallet label <name> <outpoint> --tax <cat> [--note <text>]
-                           label a transaction for tax reporting
-   wallet send <name> <addr> <sats> [--fee-rate <sat/vB>]
-                           build, sign, broadcast a one-shot payment
-   wallet push <name>      git-push wallet repo
-   wallet pull <name>      git-pull wallet repo
+commands:
+   wallet                  create and manage wallets
+   backend                 manage blockchain backend (mempool|bitcoind|blockstream)
+   tx                      build, sign, broadcast transactions
+   utxo                    list, freeze, select UTXOs
+   descriptor              emit wallet descriptors
+   bip173                  Bech32 segwit address format (BIP-0173)
+   bip350                  Bech32m v1+ witness addresses (BIP-0350)
+   bip174                  Partially Signed Bitcoin Transactions (BIP-0174)
+   price                   BTC/EUR price oracle
+   tax                     tax reporting labels
+   daemon                  install and manage bitcoind
+   modules                 list available libexec plugins
 
-blockchain commands:
-   backend [view|set|auto] manage blockchain backend (mempool|bitcoind|blockstream)
-   backend chain-height    current chain tip height
-   backend estimate-fee [<blocks>]  recommended sat/vB for <blocks>
-
-transaction commands:
-   tx build <wallet> <addr> <sats> [--utxo <txid:vout>] [--fee-rate <sat/vB>]
-                           build an unsigned PSBT
-   tx sign <wallet>        sign a PSBT from stdin
-   tx decode               decode a PSBT from stdin (TSV)
-   tx finalize             finalize a PSBT from stdin
-   tx extract              extract raw tx hex from finalized PSBT
-   tx broadcast <wallet>   broadcast raw tx hex from stdin
-   tx bump <wallet> <txid> --rbf|--cpfp [--fee-rate <sat/vB>]
-                           fee-bump a cached transaction
-
-utxo commands:
-   utxo ls <wallet>        list UTXOs [--include-frozen]
-   utxo freeze <wallet> <txid:vout> [--reason <text>]
-                           freeze a UTXO
-   utxo unfreeze <wallet> <txid:vout>
-                           unfreeze a UTXO
-   utxo select <wallet> --target <sats> [--strategy greedy|branch-and-bound]
-                           preview UTXO selection
-
-descriptor commands:
-   descriptor wallet <name>  emit a checksummed wpkh descriptor for a wallet
-
-BIP-0173 / BIP-0350 (segwit address format) commands:
-   bip173 encode [-m]      bech32 encode
-   bip173 decode           bech32 decode
-   bip173 verify [-m]      bech32 verify
-   bip350 encode [-m]      bech32m encode
-   bip350 decode           bech32m decode
-   bip350 verify [-m]      bech32m verify
-
-BIP-0174 (Partially Signed Bitcoin Transaction) commands:
-   bip174 decode           decode a PSBT from stdin (TSV verbose)
-   bip174 finalize         finalize a PSBT from stdin
-   bip174 extract          extract raw tx hex from finalized PSBT
-   bip174 combine          combine PSBTs from stdin
-
-price oracle commands:
-   price get <YYYY-MM-DD>  cached EUR price for a date
-   price fetch [--from D] [--to D]
-                           populate price cache from active source
-   price source [--set <src>]
-                           view or set price source (coingecko|kraken)
-   price status            cache freshness and coverage
-
-tax commands:
-   tax label <wallet> <outpoint> --as <cat>
-                           shorthand for wallet label --tax
-
-module related commands:
-   modules                 lists the available modules (libexec plugins)
-   <module> <args>         executes a module directly
+see '$SELF help <command>' for detailed usage of each command.
 ENDHELP
 	fi
 }
@@ -3382,6 +3322,36 @@ help:bech32() {
 	echo "'bech32' was removed in 1.24.0; use 'bitcoin bip173' / 'bitcoin bip350'." >&2
 	cite 173 "Bech32 segwit address format"
 	cite 350 "Bech32m for v1+ witness addresses"
+}
+
+help:daemon() {
+	echo "install, configure, and manage the bitcoind daemon." >&2
+	echo "" >&2
+	echo "Usage: $SELF daemon <command>" >&2
+	echo "" >&2
+	echo "  install [--from <src>]  install bitcoind (brew|apt|apk|source)" >&2
+	echo "  enable [--user|--system]  install + start systemd/launchd unit" >&2
+	echo "  disable [--user|--system] tear down the service unit" >&2
+	echo "  start [--user|--system]   start bitcoind" >&2
+	echo "  stop [--user|--system]    stop bitcoind" >&2
+	echo "  monitor [--user|--system] tail the bitcoind log" >&2
+	echo "  space [--user|--system]   show data-dir disk usage" >&2
+	echo "  help <command>            show detailed help" >&2
+}
+
+help:bip173() {
+	echo "Bech32 segwit address format (BIP-0173)." >&2
+	echo "See '$SELF bip173 help' for available subcommands." >&2
+}
+
+help:bip350() {
+	echo "Bech32m v1+ witness addresses (BIP-0350)." >&2
+	echo "See '$SELF bip350 help' for available subcommands." >&2
+}
+
+help:bip174() {
+	echo "Partially Signed Bitcoin Transactions (BIP-0174)." >&2
+	echo "See '$SELF bip174 help' for available subcommands." >&2
 }
 
 # bip-0173/bip-0350 code starts here {{{

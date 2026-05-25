@@ -108,14 +108,11 @@ usage: $SELF <options> <command>
    -q                     Enable quiet mode
    -p                     Read BIP39 passphrase
 
-   $SELF implements a frontent for various bitcoin tools.
+   $SELF manages the bitcoind daemon.
 
-generic commands:
-   help                    print this help message
-   help <command>          prints command specific help.
-   version                 print the version of $SELF
+   see '$SELF help <command>' for detailed usage.
 
-$SELF commands:
+commands:
    install [--from <src>]  install the bitcoind binary (brew|apt|apk|source|rpk)
    enable [--user|--system]  install a service unit and bring bitcoind up
    disable [--user|--system] tear the service down (data dir preserved)
