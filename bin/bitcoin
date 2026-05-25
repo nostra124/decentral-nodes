@@ -132,21 +132,25 @@ done
 
 [ -n "$SELF_VERBOSE" ] && set -vx
 
+_is_libexec() {
+	local name="$1"
+	[ -n "$SELF_LIBEXEC" ] && [ -x "$SELF_LIBEXEC/$SELF/$name" ]
+}
+
 command:help() {
 	if [[ $# != 0 ]]; then
-		if ! has command $1; then
+		if has command $1 || _is_libexec "$1"; then
+			if has help $1; then
+				help:$1
+				return 0
+			else
+				exec "$SELF_LIBEXEC/$SELF/$1" help
+			fi
+		else
 			echo "'$1' is not an $SELF command"
 			echo ""
 			echo "please see '$SELF help'"
 			exit -1
-		elif ! has help $1; then
-			echo "No help found for '$1'"
-			echo ""
-			echo "please see '$SELF help'"
-			exit -2
-		else
-			help:$1
-			return 0
 		fi
 	else
 		cat >&2 <<ENDHELP
@@ -164,18 +168,24 @@ generic commands:
    help <command>          show detailed help for a command
    version                 print the version of $SELF
 
-commands:
-   wallet                  create and manage wallets
+setup:
+   daemon                  install and manage bitcoind
    backend                 manage blockchain backend (mempool|bitcoind|blockstream)
+
+wallet & transactions:
+   wallet                  create and manage wallets
    tx                      build, sign, broadcast transactions
    utxo                    list, freeze, select UTXOs
+
+blockchain primitives:
    descriptor              emit wallet descriptors
    bip173                  Bech32 segwit address format (BIP-0173)
    bip350                  Bech32m v1+ witness addresses (BIP-0350)
    bip174                  Partially Signed Bitcoin Transactions (BIP-0174)
+
+advanced:
    price                   BTC/EUR price oracle
    tax                     tax reporting labels
-   daemon                  install and manage bitcoind
    modules                 list available libexec plugins
 
 see '$SELF help <command>' for detailed usage of each command.
