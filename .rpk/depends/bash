@@ -1,0 +1,16 @@
+#!/bin/bash
+BIN="bash"
+if command -v "$BIN" > /dev/null 2>&1; then
+	exit 0
+fi
+case "$(rpk platform)" in
+	alpine)                                        rpk action sudo apk add bash ;;
+	debian|ubuntu|pureos|linuxmint)                rpk action sudo apt-get --yes install bash ;;
+	fedora|rhel|centos|rocky|almalinux)            rpk action sudo dnf install -y bash ;;
+	arch|manjaro|endeavouros)                      rpk action sudo pacman -S --noconfirm bash ;;
+	opensuse|opensuse-leap|opensuse-tumbleweed|sles) rpk action sudo zypper install -y bash ;;
+	freebsd)                                       rpk action sudo pkg install -y bash ;;
+	macos-ports)                                   rpk action sudo port install bash ;;
+	macos-brew)                                    rpk action brew install bash ;;
+	*)                                             echo "no packager for platform '$(rpk platform)' — install $BIN manually" >&2; exit 1 ;;
+esac

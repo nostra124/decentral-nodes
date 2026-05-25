@@ -1,0 +1,16 @@
+#!/bin/bash
+BIN="dc"
+if command -v "$BIN" > /dev/null 2>&1; then
+	exit 0
+fi
+case "$(rpk platform)" in
+	alpine)                                        rpk action sudo apk add dc ;;
+	debian|ubuntu|pureos|linuxmint)                rpk action sudo apt-get --yes install dc ;;
+	fedora|rhel|centos|rocky|almalinux)            rpk action sudo dnf install -y dc ;;
+	arch|manjaro|endeavouros)                      rpk action sudo pacman -S --noconfirm dc ;;
+	opensuse|opensuse-leap|opensuse-tumbleweed|sles) rpk action sudo zypper install -y dc ;;
+	freebsd)                                       rpk action sudo pkg install -y dc ;;
+	macos-ports)                                   rpk action sudo port install dc ;;
+	macos-brew)                                    rpk action brew install dc ;;
+	*)                                             echo "no packager for platform '$(rpk platform)' — install $BIN manually" >&2; exit 1 ;;
+esac

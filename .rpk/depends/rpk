@@ -1,0 +1,7 @@
+#!/bin/bash
+BIN="rpk"
+if command -v "$BIN" > /dev/null 2>&1; then
+	exit 0
+fi
+echo "rpk is required to install bitcoin; install rpk first" >&2
+exit 1

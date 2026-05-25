@@ -1,0 +1,16 @@
+#!/bin/bash
+BIN="openssl"
+if command -v "$BIN" > /dev/null 2>&1; then
+	exit 0
+fi
+case "$(rpk platform)" in
+	alpine)                                        rpk action sudo apk add openssl ;;
+	debian|ubuntu|pureos|linuxmint)                rpk action sudo apt-get --yes install openssl ;;
+	fedora|rhel|centos|rocky|almalinux)            rpk action sudo dnf install -y openssl ;;
+	arch|manjaro|endeavouros)                      rpk action sudo pacman -S --noconfirm openssl ;;
+	opensuse|opensuse-leap|opensuse-tumbleweed|sles) rpk action sudo zypper install -y openssl ;;
+	freebsd)                                       rpk action sudo pkg install -y openssl ;;
+	macos-ports)                                   rpk action sudo port install openssl ;;
+	macos-brew)                                    rpk action brew install openssl ;;
+	*)                                             echo "no packager for platform '$(rpk platform)' — install $BIN manually" >&2; exit 1 ;;
+esac

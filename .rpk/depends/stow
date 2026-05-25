@@ -1,0 +1,16 @@
+#!/bin/bash
+BIN="stow"
+if command -v "$BIN" > /dev/null 2>&1; then
+	exit 0
+fi
+case "$(rpk platform)" in
+	alpine)                                        rpk action sudo apk add stow ;;
+	debian|ubuntu|pureos|linuxmint)                rpk action sudo apt-get --yes install stow ;;
+	fedora|rhel|centos|rocky|almalinux)            rpk action sudo dnf install -y stow ;;
+	arch|manjaro|endeavouros)                      rpk action sudo pacman -S --noconfirm stow ;;
+	opensuse|opensuse-leap|opensuse-tumbleweed|sles) rpk action sudo zypper install -y stow ;;
+	freebsd)                                       rpk action sudo pkg install -y stow ;;
+	macos-ports)                                   rpk action sudo port install stow ;;
+	macos-brew)                                    rpk action brew install stow ;;
+	*)                                             echo "no packager for platform '$(rpk platform)' — install $BIN manually" >&2; exit 1 ;;
+esac
