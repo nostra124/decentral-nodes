@@ -156,28 +156,89 @@ usage: $SELF <options> <command>
    -d                     Enable debug output
    -q                     Enable quiet mode
    -p                     Read BIP39 passphrase
+   -t                     Test mode (dry run)
 
-   $SELF implements a frontent for various bitcoin tools.
+   $SELF implements a frontend for various bitcoin tools.
 
 generic commands:
    help                    print this help message
-   help <command>          prints command specific help.
+   help <command>          prints command specific help
    version                 print the version of $SELF
 
+wallet commands:
+   wallet new <name>       create a new wallet
+   wallet ls               list wallets
+   wallet rm <name>        delete a wallet
+   wallet derive <name>    derive addresses from seed
+   wallet addresses <name> list derived addresses
+   wallet balance <name>   show wallet balance
+   wallet index <name>     index transaction history
+   wallet history <name>   show transaction history
+   wallet tx <name> <txid> show cached transaction
+   wallet label <name> <outpoint> --tax <cat> [--note <text>]
+                           label a transaction for tax reporting
+   wallet send <name> <addr> <sats> [--fee-rate <sat/vB>]
+                           build, sign, broadcast a one-shot payment
+   wallet push <name>      git-push wallet repo
+   wallet pull <name>      git-pull wallet repo
+
+blockchain commands:
+   backend [view|set|auto] manage blockchain backend (mempool|bitcoind|blockstream)
+   backend chain-height    current chain tip height
+   backend estimate-fee [<blocks>]  recommended sat/vB for <blocks>
+
+transaction commands:
+   tx build <wallet> <addr> <sats> [--utxo <txid:vout>] [--fee-rate <sat/vB>]
+                           build an unsigned PSBT
+   tx sign <wallet>        sign a PSBT from stdin
+   tx decode               decode a PSBT from stdin (TSV)
+   tx finalize             finalize a PSBT from stdin
+   tx extract              extract raw tx hex from finalized PSBT
+   tx broadcast <wallet>   broadcast raw tx hex from stdin
+   tx bump <wallet> <txid> --rbf|--cpfp [--fee-rate <sat/vB>]
+                           fee-bump a cached transaction
+
+utxo commands:
+   utxo ls <wallet>        list UTXOs [--include-frozen]
+   utxo freeze <wallet> <txid:vout> [--reason <text>]
+                           freeze a UTXO
+   utxo unfreeze <wallet> <txid:vout>
+                           unfreeze a UTXO
+   utxo select <wallet> --target <sats> [--strategy greedy|branch-and-bound]
+                           preview UTXO selection
+
+descriptor commands:
+   descriptor wallet <name>  emit a checksummed wpkh descriptor for a wallet
+
+BIP-0173 / BIP-0350 (segwit address format) commands:
+   bip173 encode [-m]      bech32 encode
+   bip173 decode           bech32 decode
+   bip173 verify [-m]      bech32 verify
+   bip350 encode [-m]      bech32m encode
+   bip350 decode           bech32m decode
+   bip350 verify [-m]      bech32m verify
+
+BIP-0174 (Partially Signed Bitcoin Transaction) commands:
+   bip174 decode           decode a PSBT from stdin (TSV verbose)
+   bip174 finalize         finalize a PSBT from stdin
+   bip174 extract          extract raw tx hex from finalized PSBT
+   bip174 combine          combine PSBTs from stdin
+
+price oracle commands:
+   price get <YYYY-MM-DD>  cached EUR price for a date
+   price fetch [--from D] [--to D]
+                           populate price cache from active source
+   price source [--set <src>]
+                           view or set price source (coingecko|kraken)
+   price status            cache freshness and coverage
+
+tax commands:
+   tax label <wallet> <outpoint> --as <cat>
+                           shorthand for wallet label --tax
 
 module related commands:
-   modules                 lists the available modules
-   <module> <args>         executes the module
-
-bip173 (segregated witness outputs address format) commands:
-   bech32 [-m]
-   bech32-verify [-m]
-   bech32-encode [-m]
-   bech32-decode
-
-bip350 (native segregated witness outputs address format) commands:
-
-TODO: register in bitcoind wallet
+   modules                 lists the available modules (libexec plugins)
+   <module> <args>         executes a module directly
 ENDHELP
 	fi
 }
