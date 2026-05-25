@@ -197,8 +197,24 @@ command:version() {
 	echo $VERSION
 }
 
+help:version() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF version
+
+	  Print the $SELF version number.
+	ENDHELP
+}
+
 command:modules() {
 	[ -d "$SELF_LIBEXEC/$SELF" ] && (cd "$SELF_LIBEXEC/$SELF" && ls)
+}
+
+help:modules() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF modules
+
+	  List available libexec modules (plugins).
+	ENDHELP
 }
 
 declare -r secp256k1="
@@ -685,6 +701,14 @@ _emit_varint() {
 command:psbt() {
 	error "'psbt' was removed in 1.24.0; use 'bitcoin bip174'"
 	return 1
+}
+
+help:psbt() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF psbt
+
+	  REMOVED in 1.24.0. Use 'bitcoin bip174' instead.
+	ENDHELP
 }
 
 command:wallet() {
@@ -1652,6 +1676,14 @@ price:status() {
 command:mnemonic-to-seed() {
 	error "'mnemonic-to-seed' was removed in 1.24.0; use 'bitcoin bip39 mnemonic-to-seed'"
 	return 1
+}
+
+help:mnemonic-to-seed() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF mnemonic-to-seed
+
+	  REMOVED in 1.24.0. Use 'bitcoin bip39 mnemonic-to-seed' instead.
+	ENDHELP
 }
 
 help:wallet() {
@@ -3323,14 +3355,38 @@ command:bech32-verify() {
 	return 1
 }
 
+help:bech32-verify() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF bech32-verify
+
+	  REMOVED in 1.24.0. Use 'bitcoin bip173 verify' or 'bitcoin bip350 verify'.
+	ENDHELP
+}
+
 command:bech32-encode() {
 	error "'bech32-encode' was removed in 1.24.0; use 'bitcoin bip173 encode-values' or 'bitcoin bip350 encode-values'"
 	return 1
 }
 
+help:bech32-encode() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF bech32-encode
+
+	  REMOVED in 1.24.0. Use 'bitcoin bip173 encode-values' or 'bitcoin bip350 encode-values'.
+	ENDHELP
+}
+
 command:bech32-decode() {
 	error "'bech32-decode' was removed in 1.24.0; use 'bitcoin bip173 decode' or 'bitcoin bip350 decode'"
 	return 1
+}
+
+help:bech32-decode() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF bech32-decode
+
+	  REMOVED in 1.24.0. Use 'bitcoin bip173 decode' or 'bitcoin bip350 decode'.
+	ENDHELP
 }
 
 # 'bitcoin help bech32' survives as documentation even though the

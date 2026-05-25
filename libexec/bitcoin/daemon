@@ -157,6 +157,9 @@ daemon:_domain() {
 }
 
 command:start() {
+	for a in "$@"; do
+		case "$a" in -h|--help|help) help:start; return 0 ;; esac
+	done
 	local mode os SUDO=""
 	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
 	[ "$mode" = system ] && SUDO=sudo
@@ -171,6 +174,9 @@ command:start() {
 }
 
 command:stop() {
+	for a in "$@"; do
+		case "$a" in -h|--help|help) help:stop; return 0 ;; esac
+	done
 	local mode os SUDO=""
 	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
 	[ "$mode" = system ] && SUDO=sudo
@@ -185,6 +191,9 @@ command:stop() {
 }
 
 command:monitor() {
+	for a in "$@"; do
+		case "$a" in -h|--help|help) help:monitor; return 0 ;; esac
+	done
 	local mode os SUDO=""
 	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
 	[ "$mode" = system ] && SUDO=sudo
@@ -199,6 +208,9 @@ command:monitor() {
 }
 
 command:space() {
+	for a in "$@"; do
+		case "$a" in -h|--help|help) help:space; return 0 ;; esac
+	done
 	local mode datadir SUDO=""
 	mode="$(daemon:_mode "$@")"
 	datadir="$(daemon:_datadir "$mode")"
@@ -342,6 +354,40 @@ help:disable() {
 
 	  Bring the bitcoind service down and remove its unit file. The
 	  data directory is preserved.
+	ENDHELP
+}
+
+help:start() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF start [--user | --system]
+
+	  Start the bitcoind service. Equivalent to systemctl --user start
+	  or launchctl kickstart depending on platform.
+	ENDHELP
+}
+
+help:stop() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF stop [--user | --system]
+
+	  Stop the bitcoind service gracefully.
+	ENDHELP
+}
+
+help:monitor() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF monitor [--user | --system]
+
+	  Follow the bitcoind log output. On macOS reads from the
+	  datadir bitcoind.log; on Linux uses journalctl.
+	ENDHELP
+}
+
+help:space() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF space [--user | --system]
+
+	  Show disk usage of the bitcoind data directory.
 	ENDHELP
 }
 
