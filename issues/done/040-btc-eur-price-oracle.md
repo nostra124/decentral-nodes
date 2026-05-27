@@ -2,9 +2,14 @@
 id: FEAT-040
 type: feature
 priority: medium
-status: open
+status: done
 milestone: 1.25.0
 ---
+
+> Shipped ahead of its 1.25.0 milestone in PR #58 (the `price`
+> oracle its consumer FEAT-039 depends on). Backfilled to `done/`
+> with the tracking reconciled; the `command-surface.md` entry
+> (AC #5) landed alongside this backfill.
 
 # BTC/EUR historical price oracle — local cache
 
