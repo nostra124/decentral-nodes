@@ -1362,8 +1362,9 @@ utxo:select() {
 # FEAT-038 shorthand. `bitcoin tax label <wallet> <outpoint> --as
 # <category>` is byte-identical to `bitcoin wallet label <wallet>
 # <outpoint> --tax <category>`. Same backing code; just a more
-# discoverable entry point for the tax workflow. report-de
-# (FEAT-039) and price (FEAT-040) subcommands land in 1.25.0.
+# discoverable entry point for the tax workflow. The report-de
+# (FEAT-039) subcommand lands in 1.25.0; the price oracle
+# (FEAT-040) has shipped — see `bitcoin price`.
 command:tax() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
@@ -1395,8 +1396,9 @@ command:tax() {
 			Valid categories (FEAT-038 closed taxonomy):
 			  $(wallet:_tax_categories_str)
 
-			Reporting (FEAT-039 report-de, FEAT-040 price oracle) lands
-			in 1.25.0. This release ships only the labeling vocabulary.
+			The report-de tax report (FEAT-039) lands in 1.25.0. This
+			release ships the labeling vocabulary; the BTC/EUR price
+			oracle is available now via 'bitcoin price'.
 			ENDHELP
 			;;
 		*)

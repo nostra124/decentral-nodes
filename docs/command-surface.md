@@ -70,6 +70,7 @@ Top-level nouns the operator works with:
 | `daemon`   | Bitcoin Core lifecycle: `install`, `enable`, `disable`, `start`, `stop`, `monitor`, `space`. |
 | `backend`  | RPC backend selection: `set`, `auto`, `broadcast`. |
 | `tax`      | Tax reports: `report-de` (FEAT-039), `label` (shorthand for `wallet label`). |
+| `price`    | BTC/EUR historical price oracle (FEAT-040): `get`, `fetch`, `source`, `status`. Cache at `~/.bitcoin/cache/price/btc-eur.tsv`, one 00:00-UTC-snapshot row per day; `fetch` is the only verb that touches the network. |
 
 Rules for the surface:
 
