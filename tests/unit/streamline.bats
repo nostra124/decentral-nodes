@@ -1415,7 +1415,9 @@ bug015_env() {
 	bug015_env
 	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon start
 	[ "$status" -eq 0 ]
-	grep -q 'launchctl kickstart -k gui/.*/org.bitcoin.bitcoind' "$BUG015_CALLS"
+	# BUG-019 fix #4: plain `launchctl kickstart` (the -k force-kill
+	# raced with KeepAlive and caused the crash loop).
+	grep -q 'launchctl kickstart gui/.*/org.bitcoin.bitcoind' "$BUG015_CALLS"
 }
 
 @test "BUG-015 — stop --user signals the LaunchAgent (macos)" {

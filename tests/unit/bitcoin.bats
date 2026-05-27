@@ -67,14 +67,18 @@ teardown() {
 @test "help mentions module related commands" {
 	run "$BITCOIN_BIN" help
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"module related commands"* ]]
+	# BUG-018 regrouped the flat "module related commands" section into
+	# workflow sections; the BIP plugins now sit under "blockchain
+	# primitives".
+	[[ "$output" == *"blockchain primitives"* ]]
 }
 
 @test "help mentions bip173 (bech32) commands" {
 	run "$BITCOIN_BIN" help
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"bip173"* ]]
-	[[ "$output" == *"bech32"* ]]
+	# BUG-018: the help describes bip173 as "Bech32 segwit address …".
+	[[ "$output" == *"Bech32"* ]]
 }
 
 @test "help mentions bip350 (bech32m) commands" {
@@ -115,7 +119,8 @@ teardown() {
 
 @test "bitcoin <unknown> falls back to help" {
 	run "$BITCOIN_BIN" __no_such_command__
-	[[ "$output" == *"module related commands"* ]]
+	# BUG-018 reworked the banner; assert the usage line it always emits.
+	[[ "$output" == *"usage: bitcoin"* ]]
 }
 
 @test "bitcoin dispatches to a libexec plugin (bip13) instead of help" {
