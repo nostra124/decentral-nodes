@@ -24,12 +24,11 @@ oracle** is FEAT-040 (lands together with this in 1.25.0).
 
 ### CLI surface
 
-    bitcoin tax report-de <wallet> --year <YYYY> [--format csv|md|pdf] [--out <dir>]
+    bitcoin tax report-de <wallet> --year <YYYY> [--format csv|md] [--out <dir>]
     bitcoin tax report-de --all-wallets --year <YYYY>      # aggregate across wallets
 
 Default format: `md` (plus `csv` always — the CSV is the data
-of record). `pdf` requires a system `weasyprint` or
-`wkhtmltopdf` (warn-and-fall-back-to-md if neither present).
+of record). Output is text-only; no PDF backend.
 
 ### FIFO engine
 
@@ -87,11 +86,8 @@ applies if total §23 gain across all sources ≤ 600 EUR".
   `price_source_acq`, `price_source_disp`.
 - `income.csv` — §22 income events (mining, staking, airdrop).
 - `summary.md` — Anlage-SO-shaped human-readable summary with
-  per-Zeile mapping.
-- `anlage-so.pdf` — formatted to mirror Anlage SO §23 (one
-  disposals table, signature line, Steuerberater-friendly
-  layout). PDF is best-effort; absent if no PDF backend
-  installed.
+  per-Zeile mapping (one disposals table, the §23 totals, and a
+  signature line — Steuerberater-friendly, but plain Markdown).
 - `narrative.md` — explanation of what `tax report-de` did,
   what assumptions it made (FIFO, strict-lending or not,
   price-source choice), and what the user must check by hand.
@@ -149,13 +145,11 @@ Each fixture has an expected `disposals.csv` checked into
    choice is recorded in `narrative.md`.
 6. `loss-claim` produces a row with `proceeds_eur=0` and
    `gain_eur=-basis_eur`.
-7. `anlage-so.pdf` renders when a PDF backend is installed;
-   absent (with `warn` line) otherwise.
-8. The disclaimer paragraph is present at the top of every
+7. The disclaimer paragraph is present at the top of every
    output file and is not configurable away.
-9. All seven test fixtures' expected CSVs match
+8. All seven test fixtures' expected CSVs match
    byte-for-byte.
-10. `bitcoin-tax(1)` is extended to document `report-de` in
+9. `bitcoin-tax(1)` is extended to document `report-de` in
     full per the FEAT-041 convention — every flag, every output
     file, every fixture's expected behavior, the
     Spekulationsfrist + Verlustverrechnung legal references,
@@ -175,4 +169,7 @@ Each fixture has an expected `disposals.csv` checked into
 - Lightning routing-fee income (a Lightning-side concern, not
   a Bitcoin on-chain concern; see CLAUDE.md §1).
 - Automatic filing / ELSTER integration. Out of scope; the
-  CSV/PDF are the deliverable, the user files them.
+  CSV and Markdown summary are the deliverable, the user files
+  them.
+- PDF rendering. The summary is plain Markdown; a user who
+  wants a PDF can run it through their own converter.
