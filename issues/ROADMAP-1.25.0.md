@@ -8,8 +8,8 @@ FIFO-based German private-disposal report that a tax-resident can hand
 to their Steuerberater, or file into Anlage SO themselves.
 
 One feature, deliberately. FEAT-039 is large (a FIFO engine, eight
-label treatments, Verlustverrechnung, a PDF backend, and seven
-byte-exact fixtures); it earns a milestone of its own. No new
+label treatments, Verlustverrechnung, and seven byte-exact
+fixtures); it earns a milestone of its own. No new
 cryptographic primitives and no new BIP implementations — this is a
 **reporting** milestone built entirely on shipped rails.
 
@@ -26,7 +26,7 @@ cryptographic primitives and no new BIP implementations — this is a
 1. **FEAT-039 — `bitcoin tax report-de`.** The reporting half of the
    tax workflow. CLI:
 
-       bitcoin tax report-de <wallet> --year <YYYY> [--format csv|md|pdf] [--out <dir>]
+       bitcoin tax report-de <wallet> --year <YYYY> [--format csv|md] [--out <dir>]
        bitcoin tax report-de --all-wallets --year <YYYY>
 
    **FIFO engine.** Walk every UTXO ever held, ordered by funding-tx
@@ -52,9 +52,9 @@ cryptographic primitives and no new BIP implementations — this is a
 
    **Output** under `<out>/<wallet>-<year>/`: `disposals.csv` (the
    record of data), `income.csv` (§22 events), `summary.md`
-   (Anlage-SO-shaped, per-Zeile), `narrative.md` (assumptions made),
-   and best-effort `anlage-so.pdf` (warn-and-skip if no
-   `weasyprint` / `wkhtmltopdf`). Every file opens with the
+   (Anlage-SO-shaped, per-Zeile), and `narrative.md` (assumptions
+   made). Text-only — no PDF backend; the Markdown summary carries
+   the §23 totals and a signature line. Every file opens with the
    non-removable not-tax-advice disclaimer.
 
 ## PR sequence (smallest-first)
@@ -65,7 +65,7 @@ cryptographic primitives and no new BIP implementations — this is a
 | 2 | Label treatments + their fixtures | `lending-roundtrip` (+ `--strict-lending`), `loss-claim`, `channel`. Each fixture's expected CSV checked in. |
 | 3 | `--all-wallets` aggregation | `fixture-self-transfer-chain`: A→B→C→external, one disposal traced to A's acquisition. |
 | 4 | Rendering: `summary.md`, `narrative.md`, `income.csv`, disclaimer | The human-readable surface + §22 income section. |
-| 5 | `anlage-so.pdf` (best-effort) + `bitcoin-tax(1)` report-de man page | PDF degrades to md when no backend; man page per the FEAT-041 convention (every flag, every output file, the legal references). |
+| 5 | `bitcoin-tax(1)` report-de man page | Per the FEAT-041 convention: every flag, every output file, the legal references. |
 
 ## Depends on
 
@@ -82,7 +82,8 @@ cryptographic primitives and no new BIP implementations — this is a
 |------|--------|
 | Other jurisdictions — `tax report-at` (Austria), `report-ch` (Switzerland) | future |
 | Lightning routing-fee income (a Lightning-side concern, CLAUDE.md §1) | n/a (`lightning`) |
-| Automatic filing / ELSTER integration | out of scope — CSV/PDF are the deliverable |
+| Automatic filing / ELSTER integration | out of scope — CSV + Markdown are the deliverable |
+| PDF rendering (`weasyprint` / `wkhtmltopdf`) | dropped — output is text-only |
 | Schnorr / Taproot — `bip340` / `bip341` / `bip342` (FEAT-007) | 1.26.0 |
 | Hardware-wallet PSBT round-trip (`tx export` / `tx import`) | 1.27.0+ |
 
@@ -97,8 +98,8 @@ cryptographic primitives and no new BIP implementations — this is a
 - `--strict-lending` switches lending classification and records the
   choice in `narrative.md`.
 - `loss-claim` produces a `proceeds_eur=0`, `gain_eur=-basis_eur` row.
-- `anlage-so.pdf` renders when a PDF backend is present; absent (with a
-  `warn` line) otherwise.
+- Output is text-only (`disposals.csv` + `income.csv` + `summary.md` +
+  `narrative.md`); no PDF artifact is produced.
 - The disclaimer is present at the top of every output file.
 - `bitcoin-tax(1)` documents `report-de` in full.
 - Pre-push hook + CI green on each milestone PR.
