@@ -3,6 +3,7 @@ id: FEAT-018
 type: feature
 priority: medium
 status: open
+milestone: 1.27.0
 ---
 
 ## Progress (1.19.0 shipped — labels + history filter; AC 7 still deferred)
