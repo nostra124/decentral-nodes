@@ -1,0 +1,6 @@
+# DISCLAIMER: Not tax advice. bitcoin is open-source software provided
+# without warranty. You are responsible for the accuracy of your filing;
+# verify every figure with a Steuerberater. Output follows the Anlage SO
+# format for tax years 2023 and later.
+date_acquired,date_disposed,amount_btc,basis_eur,proceeds_eur,holding_days,gain_eur,taxable,category,acquisition_txid:vout,disposal_txid:vout,price_source_acq,price_source_disp
+2022-02-01,2023-04-01,1.00000000,20000.00,35000.00,424,15000.00,no,sale,p1:0,p4:0,test,test
