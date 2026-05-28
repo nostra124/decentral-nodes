@@ -1384,6 +1384,9 @@ command:tax() {
 			done
 			wallet:label "${args[@]}"
 			;;
+		report-de)
+			tax:report-de "$@"
+			;;
 		help)
 			cat <<-ENDHELP
 			Usage: $SELF tax <subcommand>
@@ -1393,16 +1396,21 @@ command:tax() {
 			        --tax <category> [--note <text>]'. Persists the
 			        tax-category tag on a transaction / utxo / address.
 
+			  report-de <wallet> --year <YYYY> [--out <dir>] [--all-wallets]
+			        [--strict-lending] [--giver-basis <eur>]
+			        German private-disposal report (§22 / §23 EStG) for
+			        Anlage SO. FIFO basis matching, Spekulationsfrist (>1y
+			        tax-free), Verlustverrechnung. Writes disposals.csv,
+			        income.csv, summary.md, narrative.md under
+			        <out>/<wallet>-<year>/. BTC/EUR comes from the local
+			        'bitcoin price' cache only — no network call.
+
 			Valid categories (FEAT-038 closed taxonomy):
 			  $(wallet:_tax_categories_str)
-
-			The report-de tax report (FEAT-039) lands in 1.25.0. This
-			release ships the labeling vocabulary; the BTC/EUR price
-			oracle is available now via 'bitcoin price'.
 			ENDHELP
 			;;
 		*)
-			error "unknown tax subcommand: '$sub' (expected: label, help)"
+			error "unknown tax subcommand: '$sub' (expected: label, report-de, help)"
 			return 2
 			;;
 	esac
@@ -1410,6 +1418,307 @@ command:tax() {
 
 help:tax() {
 	command:tax help
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-039 (1.25.0): bitcoin tax report-de — German private-disposal report.
+#
+# Wallet-wide FIFO over the on-disk wallet state (FEAT-038 labels +
+# FEAT-018 transaction cache) valued by the FEAT-040 price cache. No
+# network call: prices come from `bitcoin price` only, so the same wallet
+# and cache produce byte-identical output every run.
+#
+# Model: genuine inflows (purchase/income/gift-in, and lending-in under
+# --strict-lending) push lots; disposal txs (sale/spend/gift-out/loss-claim,
+# plus lending-out under --strict-lending, and channel-close) pop the oldest
+# lots by external-outflow quantity; self-transfer/change is invisible to
+# the accounting (coins stay queued); under --all-wallets a self-transfer to
+# another aggregated wallet MOVEs the lot (basis + date preserved).
+# ---------------------------------------------------------------------------
+
+# Print the non-removable disclaimer, each line prefixed with $1 (e.g. "# "
+# for CSV, "" for Markdown). Same text everywhere so AC #7 holds.
+tax:_disclaimer() {
+	local p="$1"
+	printf '%sDISCLAIMER: Not tax advice. bitcoin is open-source software provided\n' "$p"
+	printf '%swithout warranty. You are responsible for the accuracy of your filing;\n' "$p"
+	printf '%sverify every figure with a Steuerberater. Output follows the Anlage SO\n' "$p"
+	printf '%sformat for tax years 2023 and later.\n' "$p"
+}
+
+# Look up one day in the price cache (FEAT-040). Prints "<eur>\t<source>"
+# for the most recent row on that date, or nothing if absent. Cache-only,
+# never a network fetch.
+tax:_price() {
+	local d="$1" cache; cache="$(price:_cache_file)"
+	[ -s "$cache" ] || return 0
+	awk -F'\t' -v d="$d" '$1==d{v=$2; s=$3} END{ if (v!="") printf "%s\t%s", v, s }' "$cache"
+}
+
+# FIFO core. Reads the sorted event stream on stdin (12-column TSV emitted
+# by tax:report-de) and prints one disposals.csv data row per popped lot
+# whose disposal falls in $1 (the report year). Acquisitions in any year
+# build the per-wallet queue; only matching-year disposals are printed.
+tax:_fifo() {
+	awk -F'\t' -v year="$1" '
+	function btc(s){ return s/100000000.0 }
+	{
+		epoch=$1; kind=$3; actor=$4; qty=$5; price=$6; psrc=$7;
+		cat=$8; edate=$9; dop=$10; dest=$11; aop=$12
+		if (kind=="ACQ") {
+			i=tail[actor]++
+			Qq[actor,i]=qty; Qb[actor,i]=price; Qe[actor,i]=epoch
+			Qd[actor,i]=edate; Qs[actor,i]=psrc; Qo[actor,i]=aop
+		} else if (kind=="MOVE") {
+			need=qty
+			while (need>0 && head[actor]<tail[actor]) {
+				i=head[actor]+0; avail=Qq[actor,i]
+				take=(avail<need?avail:need)
+				j=tail[dest]++
+				Qq[dest,j]=take; Qb[dest,j]=Qb[actor,i]; Qe[dest,j]=Qe[actor,i]
+				Qd[dest,j]=Qd[actor,i]; Qs[dest,j]=Qs[actor,i]; Qo[dest,j]=Qo[actor,i]
+				Qq[actor,i]-=take; need-=take
+				if (Qq[actor,i]<=0) head[actor]++
+			}
+		} else if (kind=="DISP") {
+			need=qty
+			while (need>0 && head[actor]<tail[actor]) {
+				i=head[actor]+0; avail=Qq[actor,i]
+				take=(avail<need?avail:need)
+				amt=btc(take); bpb=Qb[actor,i]; basis=amt*bpb
+				proceeds=(cat=="loss-claim"?0:amt*price)
+				hold=int((epoch-Qe[actor,i])/86400)
+				gain=proceeds-basis
+				taxable=(hold>365?"no":"yes")
+				if (substr(edate,1,4)==year)
+					printf "%s,%s,%.8f,%.2f,%.2f,%d,%.2f,%s,%s,%s,%s,%s,%s\n", \
+						Qd[actor,i], edate, amt, basis, proceeds, hold, gain, \
+						taxable, cat, Qo[actor,i], dop, Qs[actor,i], psrc
+				Qq[actor,i]-=take; need-=take
+				if (Qq[actor,i]<=0) head[actor]++
+			}
+			if (need>0)
+				printf "tax report-de: disposal underflow at %s (%.8f BTC uncovered)\n", \
+					dop, btc(need) > "/dev/stderr"
+		}
+	}'
+}
+
+tax:_summary_md() {
+	local label="$1" year="$2" tgain="$3" fgain="$4" rows="$5" header="$6"
+	tax:_disclaimer ''
+	printf '\n# Anlage SO — Bitcoin private disposals %s (%s)\n\n' "$year" "$label"
+	printf 'Method: FIFO. Spekulationsfrist per §23 (1) Nr. 2 EStG (held > 365\n'
+	printf 'days → tax-free). Verlustverrechnung per §23 (3) S. 7 EStG (a §23\n'
+	printf 'loss offsets §23 gains only).\n\n'
+	printf '| Anlage SO | Position | Betrag (EUR) |\n'
+	printf '|-----------|----------|-------------:|\n'
+	printf '| Zeile 41-43 | Steuerpflichtiger Gewinn/Verlust §23 (Haltefrist <= 1 Jahr) | %s |\n' "$tgain"
+	printf '| nachrichtlich | Steuerfreier Gewinn/Verlust (Haltefrist > 1 Jahr) | %s |\n' "$fgain"
+	printf '| Zeile 44 | Verbleibender Verlust zur Verrechnung | %s |\n' \
+		"$(awk -v t="$tgain" 'BEGIN{printf "%.2f", (t<0?t:0)}')"
+	printf '\nFreigrenze (§23 (3) S. 5 EStG): a gain stays tax-free only if your\n'
+	printf '*total* §23 gain across all sources is <= 600 EUR. This report knows\n'
+	printf 'only your BTC §23 result for %s: %s EUR. Apply the Freigrenze\n' "$year" "$tgain"
+	printf 'yourself against every §23 source (gold, art, ...).\n\n'
+	printf '## Disposals\n\n'
+	printf '%s\n' "$header"
+	[ -n "$rows" ] && printf '%s\n' "$rows"
+	printf '\nSignature: _____________________   Date: ____________\n'
+}
+
+tax:_narrative_md() {
+	local label="$1" year="$2" strict="$3" allw="$4"
+	tax:_disclaimer ''
+	printf '\n# What tax report-de did (%s, %s)\n\n' "$label" "$year"
+	printf -- '- Method: wallet-wide FIFO. The oldest acquisition is deemed sold\n'
+	printf '  first; a disposal larger than one lot carries into the next.\n'
+	printf -- '- Spekulationsfrist: a lot held > 365 days is tax-free (§23 EStG);\n'
+	printf '  otherwise the gain/loss is taxable (taxable=yes).\n'
+	printf -- '- Prices: read from the local bitcoin price cache only. No network\n'
+	printf '  call was made, so re-running over the same cache is byte-identical.\n'
+	if [ "$strict" = 1 ]; then
+		printf -- '- Lending: --strict-lending was set. lending-out is a disposal at\n'
+		printf '  FMV and the returned coins are a fresh acquisition (the\n'
+		printf '  conservative reading of recent BFH guidance).\n'
+	else
+		printf -- '- Lending: default. lending-out is NOT a disposal (collateral);\n'
+		printf '  pass --strict-lending for the conservative BFH reading.\n'
+	fi
+	if [ "$allw" = 1 ]; then
+		printf -- '- Scope: --all-wallets. A self-transfer between your wallets moves\n'
+		printf '  the lot (basis + acquisition date preserved), not a disposal.\n'
+	fi
+	printf '\n## Check by hand\n\n'
+	printf -- '- Every received UTXO is labeled (bitcoin wallet label --validate).\n'
+	printf -- '- The price cache covers every acquisition and disposal date.\n'
+	printf -- '- The Freigrenze and any non-wallet §23 gains.\n'
+}
+
+tax:report-de() {
+	local year="" out="." allw=0 strict=0 giver=0 wallet=""
+	while (( $# )); do
+		case "$1" in
+			--year)           year="$2";   shift 2 ;;
+			--out)            out="$2";    shift 2 ;;
+			--all-wallets)    allw=1;      shift ;;
+			--strict-lending) strict=1;    shift ;;
+			--giver-basis)    giver="$2";  shift 2 ;;
+			--format)         shift 2 ;;
+			--*) error "tax report-de: unknown flag '$1'"; return 2 ;;
+			*)
+				if [ -z "$wallet" ]; then wallet="$1"
+				else error "tax report-de: unexpected argument '$1'"; return 2; fi
+				shift ;;
+		esac
+	done
+	if [ -z "$year" ]; then
+		error "tax report-de: --year <YYYY> is required"; return 2
+	fi
+	if [[ ! "$year" =~ ^[0-9]{4}$ ]]; then
+		error "tax report-de: --year '$year' must be a four-digit year"; return 2
+	fi
+	if ! command -v jq >/dev/null 2>&1; then
+		error "tax report-de: jq is required"; return 5
+	fi
+
+	local root; root="$(wallet:_root)"
+	local -a wallets=()
+	local label d nm
+	if (( allw )); then
+		[ -n "$wallet" ] && { error "tax report-de: pass <wallet> OR --all-wallets, not both"; return 2; }
+		for d in "$root"/*/; do
+			[ -d "$d" ] || continue
+			nm="$(basename "$d")"
+			[ -f "$d/addresses" ] && wallets+=( "$nm" )
+		done
+		[ ${#wallets[@]} -gt 0 ] || { error "tax report-de: no wallets under $root"; return 4; }
+		label="all-wallets"
+	else
+		[ -n "$wallet" ] || { error "tax report-de: <wallet> or --all-wallets required"; return 2; }
+		[ -d "$root/$wallet" ] || { error "tax report-de: no such wallet '$wallet' at $root/$wallet"; return 4; }
+		wallets=( "$wallet" )
+		label="$wallet"
+	fi
+
+	# owner map: address -> owning wallet (across the aggregated set)
+	local -A owner=()
+	local w a _i _l
+	for w in "${wallets[@]}"; do
+		[ -f "$root/$w/addresses" ] || continue
+		while IFS=$'\t' read -r _i a _l; do
+			[ -n "$a" ] && owner["$a"]="$w"
+		done < "$root/$w/addresses"
+	done
+
+	local events income
+	events="$(mktemp)"; income="$(mktemp)"
+	local outpoint cat note txid vidx json epoch date val ps eur src
+	local idx addr value ext oown first_ext destw ow rcat bpb
+	for w in "${wallets[@]}"; do
+		# Acquisitions (and §22 income) from labels/utxo.
+		if [ -f "$root/$w/labels/utxo" ]; then
+			while IFS=$'\t' read -r outpoint cat note; do
+				[ -n "$outpoint" ] || continue
+				case "$cat" in
+					purchase|income|gift-in) : ;;
+					lending-in) (( strict )) || continue ;;
+					*) continue ;;
+				esac
+				txid="${outpoint%%:*}"; vidx="${outpoint#*:}"
+				json="$root/$w/transactions/$txid.json"
+				[ -s "$json" ] || { warn "tax report-de: $w: no tx json for $txid (skipping $outpoint)"; continue; }
+				epoch="$(jq -r '.status.block_time' "$json")"
+				val="$(jq -r --argjson i "$vidx" '.vout[$i].value // empty' "$json")"
+				[ -n "$val" ] || { warn "tax report-de: $w: $outpoint has no vout value"; continue; }
+				date="$(date -u -d "@$epoch" +%F)"
+				ps="$(tax:_price "$date")"; eur="${ps%%$'\t'*}"; src="${ps#*$'\t'}"
+				if [ -z "$ps" ]; then warn "tax report-de: no cached price for $date (run 'bitcoin price fetch')"; eur=0; src=NA; fi
+				if [ "$cat" = gift-in ]; then
+					if [ "${giver:-0}" != 0 ]; then
+						bpb="$(awk -v g="$giver" -v v="$val" 'BEGIN{printf "%.8f", g*100000000.0/v}')"
+					else bpb=0; fi
+					eur="$bpb"; src="giver"
+				fi
+				printf '%s\t0\tACQ\t%s\t%s\t%s\t%s\t%s\t%s\t\t\t%s\n' \
+					"$epoch" "$w" "$val" "$eur" "$src" "$cat" "$date" "$outpoint" >> "$events"
+				if [ "$cat" = income ] && [ "${date:0:4}" = "$year" ]; then
+					printf '%s,%s,%.8f,%.2f,income\n' "$date" "$outpoint" \
+						"$(awk -v v="$val" 'BEGIN{printf "%.8f", v/100000000.0}')" \
+						"$(awk -v v="$val" -v p="$eur" 'BEGIN{printf "%.2f", (v/100000000.0)*p}')" >> "$income"
+				fi
+			done < "$root/$w/labels/utxo"
+		fi
+		# Disposals / cross-wallet moves from labels/tx.
+		if [ -f "$root/$w/labels/tx" ]; then
+			while IFS=$'\t' read -r txid cat note; do
+				[ -n "$txid" ] || continue
+				case "$cat" in
+					channel-open) continue ;;
+					lending-out) (( strict )) || continue ;;
+					sale|spend|gift-out|loss-claim|channel-close|self-transfer) : ;;
+					*) continue ;;
+				esac
+				json="$root/$w/transactions/$txid.json"
+				[ -s "$json" ] || { warn "tax report-de: $w: no tx json for $txid"; continue; }
+				epoch="$(jq -r '.status.block_time' "$json")"
+				date="$(date -u -d "@$epoch" +%F)"
+				ext=0; oown=0; first_ext=""; destw=""
+				while IFS=$'\t' read -r idx addr value; do
+					[ -n "$addr" ] || continue
+					ow="${owner[$addr]:-}"
+					if [ -z "$ow" ]; then
+						ext=$(( ext + value )); [ -z "$first_ext" ] && first_ext="$idx"
+					elif [ "$ow" != "$w" ]; then
+						oown=$(( oown + value )); [ -z "$destw" ] && destw="$ow"
+					fi
+				done < <(jq -r '.vout|to_entries[]|"\(.key)\t\(.value.scriptpubkey_address)\t\(.value.value)"' "$json")
+				if [ "$cat" = self-transfer ]; then
+					(( oown > 0 )) || continue
+					printf '%s\t1\tMOVE\t%s\t%s\t\t\t\t%s\t\t%s\t\n' \
+						"$epoch" "$w" "$oown" "$date" "$destw" >> "$events"
+					continue
+				fi
+				(( ext > 0 )) || { warn "tax report-de: $w: $txid ($cat) has no external output; skipping"; continue; }
+				ps="$(tax:_price "$date")"; eur="${ps%%$'\t'*}"; src="${ps#*$'\t'}"
+				if [ -z "$ps" ]; then warn "tax report-de: no cached price for $date"; eur=0; src=NA; fi
+				rcat="$cat"; [ "$cat" = channel-close ] && rcat=spend
+				printf '%s\t2\tDISP\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t\t\n' \
+					"$epoch" "$w" "$ext" "$eur" "$src" "$rcat" "$date" "$txid:$first_ext" >> "$events"
+			done < "$root/$w/labels/tx"
+		fi
+	done
+
+	local rows
+	rows="$(LC_ALL=C sort -t$'\t' -k1,1n -k2,2n "$events" | tax:_fifo "$year")"
+	rm -f "$events"
+
+	local outdir="$out/$label-$year"
+	if ! mkdir -p "$outdir"; then
+		error "tax report-de: cannot create output dir $outdir"; rm -f "$income"; return 6
+	fi
+
+	local header="date_acquired,date_disposed,amount_btc,basis_eur,proceeds_eur,holding_days,gain_eur,taxable,category,acquisition_txid:vout,disposal_txid:vout,price_source_acq,price_source_disp"
+	{
+		tax:_disclaimer '# '
+		printf '%s\n' "$header"
+		[ -n "$rows" ] && printf '%s\n' "$rows"
+	} > "$outdir/disposals.csv"
+	{
+		tax:_disclaimer '# '
+		printf '%s\n' "date,txid:vout,amount_btc,fmv_eur,category"
+		[ -s "$income" ] && cat "$income"
+	} > "$outdir/income.csv"
+	rm -f "$income"
+
+	local tgain fgain
+	tgain="$(printf '%s\n' "$rows" | awk -F, 'NF>=8 && $8=="yes"{s+=$7} END{printf "%.2f", s+0}')"
+	fgain="$(printf '%s\n' "$rows" | awk -F, 'NF>=8 && $8=="no"{s+=$7} END{printf "%.2f", s+0}')"
+
+	tax:_summary_md   "$label" "$year" "$tgain" "$fgain" "$rows" "$header" > "$outdir/summary.md"
+	tax:_narrative_md "$label" "$year" "$strict" "$allw" > "$outdir/narrative.md"
+
+	info "tax report-de: wrote $outdir/{disposals.csv,income.csv,summary.md,narrative.md}"
 }
 
 # FEAT-040: BTC/EUR historical price oracle (local cache).
