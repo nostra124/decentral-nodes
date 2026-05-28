@@ -3,6 +3,7 @@ id: FEAT-026
 type: feature
 priority: medium
 status: open
+milestone: 1.26.0
 ---
 
 ## Progress (1.20.0 shipped — wpkh / pkh / sh(wpkh); tr and combo still deferred)

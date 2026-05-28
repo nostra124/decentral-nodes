@@ -3,6 +3,7 @@ id: FEAT-019
 type: feature
 priority: medium
 status: open
+milestone: 1.28.0
 ---
 
 ## Progress (1.16.0 shipped — skill content + opencode entry + install plumbing)

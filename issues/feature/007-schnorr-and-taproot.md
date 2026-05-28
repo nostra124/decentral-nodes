@@ -3,6 +3,7 @@ id: FEAT-007
 type: feature
 priority: medium
 status: open
+milestone: 1.26.0
 ---
 
 # Schnorr signatures and Taproot (BIP-340 / BIP-341 / BIP-342)

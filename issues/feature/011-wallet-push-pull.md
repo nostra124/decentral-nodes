@@ -3,6 +3,7 @@ id: FEAT-011
 type: feature
 priority: medium
 status: open
+milestone: 1.27.0
 ---
 
 ## Progress (1.9.0 shipped — push/pull/remote-add only)
