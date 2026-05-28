@@ -1,8 +1,9 @@
-.\" Manpage for bitcoin-tax(1) — tax-label vocabulary (FEAT-038).
-.TH BITCOIN-TAX 1 "2026-05-21" "bitcoin 1.23.0" "User Commands"
+.\" Manpage for bitcoin-tax(1) — tax-label vocabulary (FEAT-038)
+.\" and the German private-disposal report (FEAT-039).
+.TH BITCOIN-TAX 1 "2026-05-28" "bitcoin 1.25.0" "User Commands"
 
 .SH NAME
-bitcoin\-tax \- tax-label vocabulary and (in 1.25.0) reporting
+bitcoin\-tax \- tax-label vocabulary and German private-disposal reporting
 
 .SH SYNOPSIS
 .B bitcoin tax label
@@ -12,20 +13,32 @@ bitcoin\-tax \- tax-label vocabulary and (in 1.25.0) reporting
 .I category
 .RI [ "--note text" ]
 .br
+.B bitcoin tax report-de
+.I wallet
+.B --year
+.I YYYY
+.RI [ "--out dir" ]
+.RI [ --all-wallets ]
+.RI [ --strict-lending ]
+.RI [ "--giver-basis eur" ]
+.br
 .B bitcoin tax help
 
 .SH DESCRIPTION
 .B bitcoin tax
-is the tax-workflow entry point. In 1.23.0 it ships exactly one
-subcommand \(em
+is the tax-workflow entry point. The
 .B label
-\(em which is a discoverable shorthand for
-.BR "bitcoin wallet label" .
-The report engine
-.RB ( "tax report-de" )
-and the BTC/EUR price oracle
-.RB ( "tax price" )
-land in 1.25.0 with FEAT-039 / FEAT-040.
+verb is a discoverable shorthand for
+.BR "bitcoin wallet label" ;
+.B report-de
+generates the FIFO-based German private-disposal report (Anlage SO,
+\(sc\(sc 22 / 23 EStG) from the wallet's labels and transaction cache,
+valued by the local
+.BR bitcoin-price (1)
+cache. The report makes
+.B no
+network call \(em prices come from the cache only, so the same wallet
+and cache produce byte-identical output every run.
 
 The
 .B label
@@ -71,8 +84,69 @@ Persist a tax category on the outpoint. Byte-identical to
 .B tax
 prefix exists purely for discoverability of the tax workflow.
 .TP
+.BI "report-de " "wallet" " --year " YYYY " [options]"
+Generate the German private-disposal report for the given tax
+.IR year .
+Walks every acquisition chronologically and matches each disposal
+against the oldest lots (FIFO / Fifo-Methode). For each popped lot it
+computes the holding period, the Spekulationsfrist
+.RB ( "\(sc 23 (1) Nr. 2 EStG" :
+held > 365 days is tax-free, otherwise taxable), the EUR cost basis and
+proceeds (both from the price cache), and the gain. A
+.B loss-claim
+is a disposal at 0 EUR proceeds whose loss feeds Verlustverrechnung
+.RB ( "\(sc 23 (3) S. 7 EStG" ).
+.B income
+events are reported separately as
+.RB "\(sc 22 EStG"
+income. Lots held in
+.BR self-transfer / channel-open
+form are not disposals; their basis is preserved (and, under
+.BR --all-wallets ,
+carried to the receiving wallet). Writes four files under
+.IR <out>/<wallet>-<year>/
+(or
+.I <out>/all-wallets-<year>/
+with
+.BR --all-wallets ).
+.TP
 .B help
-List the closed taxonomy and the planned 1.25.0 verbs.
+List the closed taxonomy and the report verb.
+
+.SH "REPORT-DE OPTIONS"
+.TP
+.BI "--year " YYYY
+Tax year to report. Required. Only disposals dated in this year appear
+in the output; acquisitions from any year build the FIFO basis.
+.TP
+.BI "--out " dir
+Output directory (default the current directory). The report is written
+to a
+.IB dir / <wallet> - <year>
+subdirectory.
+.TP
+.B --all-wallets
+Aggregate across every wallet under the data root. A
+.B self-transfer
+to another aggregated wallet moves the lot (basis + acquisition date
+preserved) instead of being treated as a disposal, so a coin moved
+A\(->B\(->C and then sold from C traces back to its original
+acquisition in A.
+.TP
+.B --strict-lending
+Treat
+.B lending-out
+as a disposal at fair market value and the returned coins
+.RB ( lending-in )
+as a fresh acquisition \(em the conservative reading of recent BFH
+guidance. The default treats lending as collateral (no disposal). The
+choice is recorded in
+.IR narrative.md .
+.TP
+.BI "--giver-basis " eur
+For
+.B gift-in
+acquisitions, the giver's known EUR cost basis (else basis is 0).
 
 .SH EXIT STATUS
 .TP
@@ -80,7 +154,17 @@ List the closed taxonomy and the planned 1.25.0 verbs.
 Success.
 .TP
 .B 2
-Missing required argument, or unknown subcommand.
+Missing required argument (e.g.
+.BR --year ),
+or unknown subcommand / flag.
+.TP
+.B 4
+No such wallet, or no wallets found under the data root.
+.TP
+.B 5
+A required tool
+.RB ( jq )
+is not installed.
 .TP
 .B 6
 Category not in the closed taxonomy (error names the valid set).
@@ -102,6 +186,36 @@ correctly.
 .TP
 .IB <wallet-repo>/labels/tx
 TSV store for per-transaction labels, same format.
+.TP
+.IB <wallet-repo>/transactions/ <txid> .json
+Cached decoded transactions (from
+.BR "bitcoin wallet index" )
+that
+.B report-de
+reads for amounts and block timestamps. Never fetched during a report.
+.TP
+.IB <out>/<wallet>-<year>/disposals.csv
+The record of data: one row per popped lot, columns
+.IR date_acquired ", " date_disposed ", " amount_btc ", " basis_eur ", " proceeds_eur ", " holding_days ", " gain_eur ", " taxable ", " category ", " acquisition_txid:vout ", " disposal_txid:vout ", " price_source_acq ", " price_source_disp .
+.TP
+.IB <out>/<wallet>-<year>/income.csv
+\(sc 22 EStG income events (mining / staking / airdrop) at fair market
+value on receipt.
+.TP
+.IB <out>/<wallet>-<year>/summary.md
+Anlage-SO-shaped summary: the \(sc 23 totals mapped to Zeile 41\(en44,
+the Freigrenze condition
+.RB ( "\(sc 23 (3) S. 5 EStG" :
+gains stay tax-free only if the total \(sc 23 gain across all sources is
+\(<= 600 EUR), and a signature line.
+.TP
+.IB <out>/<wallet>-<year>/narrative.md
+Plain-language record of the assumptions made (FIFO, the lending mode,
+the price source) and what the filer must still check by hand.
+.PP
+Every output file opens with the same non-removable disclaimer: the
+report is not tax advice, the software carries no warranty, and the
+filer is responsible for accuracy.
 
 .SH ENVIRONMENT
 .TP
@@ -112,16 +226,24 @@ The wallet's
 .B labels/
 directory lives under
 .IB $XDG_DATA_HOME /bitcoin/wallets/ <name> /labels/ .
+.TP
+.B BITCOIN_PRICE_CACHE
+Inherited from
+.BR bitcoin-price (1).
+The BTC/EUR cache
+.B report-de
+reads (default
+.IR ~/.bitcoin/cache/price/btc-eur.tsv ).
 
 .SH SEE ALSO
 .BR bitcoin (1),
-.BR bitcoin-wallet (1)
+.BR bitcoin-wallet (1),
+.BR bitcoin-price (1)
 
 .SH HISTORY
-Verb introduced in bitcoin 1.23.0 (FEAT-038). The 13-category
-taxonomy lands in this release; the report engine
-.RB ( "tax report-de" )
-and the BTC/EUR price oracle
-.RB ( "tax price" )
-follow in 1.25.0 (FEAT-039 + FEAT-040). The taxonomy is
-expected to remain stable across those releases.
+.B label
+introduced in bitcoin 1.23.0 with the 13-category FEAT-038 taxonomy.
+.B report-de
+added in 1.25.0 (FEAT-039) on top of the FEAT-040 price oracle. The
+taxonomy is expected to remain stable so historical labels keep
+reporting correctly.
