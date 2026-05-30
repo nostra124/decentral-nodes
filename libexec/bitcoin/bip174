@@ -1125,7 +1125,7 @@ command:finalize() {
 			# BIP-341 Taproot key-path: one-element witness [sig].
 			local -i tks_len=$(( ${#tap_key_sig} / 2 ))
 			local tap_witness="$(psbt:_emit_varint 1)$(psbt:_emit_varint "$tks_len")$tap_key_sig"
-			new_blob+="01" "08"
+			new_blob+="0108"
 			new_blob+="$(psbt:_emit_varint $(( ${#tap_witness} / 2 )))"
 			new_blob+="$tap_witness"
 		elif [ -n "$partial_sig_value" ]; then
@@ -1138,7 +1138,7 @@ command:finalize() {
 				local p2pkh_ss=""
 				p2pkh_ss+="$(printf '%02x' "$ps_sig_len")$partial_sig_value"
 				p2pkh_ss+="$(printf '%02x' "$ps_pub_len")$partial_sig_pubkey"
-				new_blob+="01" "07"
+				new_blob+="0107"
 				new_blob+="$(psbt:_emit_varint $(( ${#p2pkh_ss} / 2 )))"
 				new_blob+="$p2pkh_ss"
 			elif [[ "$wu_script" =~ ^a914[0-9a-f]{40}87$ ]] && [ -n "$redeem_script_val" ]; then
@@ -1146,7 +1146,7 @@ command:finalize() {
 				# FINAL_SCRIPTWITNESS = [sig, pubkey] (BIP-141).
 				local -i rs_len=$(( ${#redeem_script_val} / 2 ))
 				local p2sh_ss="$(printf '%02x' "$rs_len")$redeem_script_val"
-				new_blob+="01" "07"
+				new_blob+="0107"
 				new_blob+="$(psbt:_emit_varint $(( ${#p2sh_ss} / 2 )))"
 				new_blob+="$p2sh_ss"
 				local -i p2sh_sig_len=$(( ${#partial_sig_value} / 2 ))
@@ -1155,7 +1155,7 @@ command:finalize() {
 				p2sh_wit+="$(psbt:_emit_varint 2)"
 				p2sh_wit+="$(psbt:_emit_varint "$p2sh_sig_len")$partial_sig_value"
 				p2sh_wit+="$(psbt:_emit_varint "$p2sh_pub_len")$partial_sig_pubkey"
-				new_blob+="01" "08"
+				new_blob+="0108"
 				new_blob+="$(psbt:_emit_varint $(( ${#p2sh_wit} / 2 )))"
 				new_blob+="$p2sh_wit"
 			else
@@ -1166,7 +1166,7 @@ command:finalize() {
 				p2wpkh_wit+="$(psbt:_emit_varint 2)"
 				p2wpkh_wit+="$(psbt:_emit_varint "$pw_sig_len")$partial_sig_value"
 				p2wpkh_wit+="$(psbt:_emit_varint "$pw_pub_len")$partial_sig_pubkey"
-				new_blob+="01" "08"
+				new_blob+="0108"
 				new_blob+="$(psbt:_emit_varint $(( ${#p2wpkh_wit} / 2 )))"
 				new_blob+="$p2wpkh_wit"
 			fi

@@ -717,7 +717,7 @@ command:wallet() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		new|ls|rm|help|derive|addresses|label|balance|broadcast|build|sign|send|index|tx|history|remote|push|pull) wallet:"$sub" "$@" ;;
+		new|ls|rm|help|derive|addresses|label|balance|broadcast|build|sign|send|index|tx|history|remote|push|pull|watch|xpub) wallet:"$sub" "$@" ;;
 		*)
 			error "unknown wallet subcommand: '$sub'"
 			wallet:help >&2
@@ -2011,6 +2011,13 @@ wallet:help() {
 	  new <name>        create a new wallet at $(wallet:_root)/<name>
 	                    generates a BIP-39 mnemonic and stores it via
 	                    'secret put <name>/seed'
+	  watch <name> <xpub>
+	                    create a watch-only wallet from an account xpub
+	                    (m/84h/0h/0h). Derives addresses without a seed.
+	                    Signing is not possible on watch-only wallets.
+	  xpub <name>       print the account-level xpub (m/84h/0h/0h) for
+	                    a regular wallet; useful for watch-only setup or
+	                    cosigner coordination
 	  ls                list existing wallets
 	  rm [-f] <name>    remove a wallet (-f also removes secret/<name>/seed)
 	  derive <name>     derive next BIP-84 receive address; append to ledger
@@ -2085,25 +2092,35 @@ wallet:_next_index() {
 # mnemonic in secret. Returns just the bc1q… address on stdout.
 wallet:_derive_address() {
 	local name="$1" idx="$2"
-	if ! command -v secret >/dev/null 2>&1; then
-		error "wallet derive: 'secret' not in PATH (cannot read seed)"
-		return 5
-	fi
-	# Resolve libexec for the bip32/bip13/bip39 plugins.
-	# When sourced, SELF_LIBEXEC must be set by caller; when dispatched,
-	# the parent bin/bitcoin sets it.
 	local libexec="${SELF_LIBEXEC:?wallet derive: SELF_LIBEXEC must be set}"
 	local pubkey
-	pubkey="$(
-		secret get "$name/seed" |
-		"$libexec/${SELF:-bitcoin}/bip39" mnemonic-to-seed |
-		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
-		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
-		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/0/$idx/N" 2>/dev/null |
-		tail -c 33 |
-		basenc --base16 -w0 |
-		tr A-F a-f
-	)"
+	if wallet:_is_watch_only "$name"; then
+		local path; path="$(wallet:_path "$name")"
+		local xpub; read -r xpub < "$path/xpub"
+		pubkey="$(
+			printf '%s\n' "$xpub" |
+			"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+			"$libexec/${SELF:-bitcoin}/bip32" derive "/0/$idx" 2>/dev/null |
+			tail -c 33 |
+			basenc --base16 -w0 |
+			tr A-F a-f
+		)"
+	else
+		if ! command -v secret >/dev/null 2>&1; then
+			error "wallet derive: 'secret' not in PATH (cannot read seed)"
+			return 5
+		fi
+		pubkey="$(
+			secret get "$name/seed" |
+			"$libexec/${SELF:-bitcoin}/bip39" mnemonic-to-seed |
+			"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
+			"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+			"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/0/$idx/N" 2>/dev/null |
+			tail -c 33 |
+			basenc --base16 -w0 |
+			tr A-F a-f
+		)"
+	fi
 	if [[ ! "$pubkey" =~ ^0[23][[:xdigit:]]{64}$ ]]; then
 		error "wallet derive: pubkey derivation produced unexpected output '$pubkey'"
 		return 6
@@ -3019,6 +3036,10 @@ tx:build() {
 # compressed pubkey.
 wallet:_derive_privkey_hex() {
 	local name="$1" idx="$2"
+	if wallet:_is_watch_only "$name"; then
+		error "tx sign: '$name' is a watch-only wallet — cannot derive private key"
+		return 4
+	fi
 	if ! command -v secret >/dev/null 2>&1; then
 		error "tx sign: 'secret' not in PATH (cannot read seed for '$name')"
 		return 5
@@ -3535,6 +3556,121 @@ wallet:balance() {
 		fi
 	done < "$ledger"
 	echo "$total"
+}
+
+# FEAT-045: watch-only wallet helpers.
+
+wallet:_is_watch_only() {
+	local name="$1"
+	local path; path="$(wallet:_path "$name")"
+	[ -f "$path/xpub" ]
+}
+
+# Export the account-level xpub (m/84h/0h/0h) from a regular wallet.
+wallet:xpub() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet xpub: name required"
+		return 2
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ ! -d "$path" ]; then
+		error "wallet xpub: no such wallet '$name' at $path"
+		return 3
+	fi
+	if wallet:_is_watch_only "$name"; then
+		# Already a watch-only wallet — just print the stored xpub.
+		cat "$path/xpub"
+		return 0
+	fi
+	if ! command -v secret >/dev/null 2>&1; then
+		error "wallet xpub: 'secret' not in PATH"
+		return 5
+	fi
+	local libexec="${SELF_LIBEXEC:?wallet xpub: SELF_LIBEXEC must be set}"
+	local xpub
+	xpub="$(
+		secret get "$name/seed" |
+		"$libexec/${SELF:-bitcoin}/bip39" mnemonic-to-seed |
+		"$libexec/${SELF:-bitcoin}/bip32" create 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip32" derive "m/84h/0h/0h/N" 2>/dev/null |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-encode 2>/dev/null
+	)" || {
+		error "wallet xpub: xpub derivation failed for '$name'"
+		return 6
+	}
+	if [ -z "$xpub" ]; then
+		error "wallet xpub: derivation produced empty output for '$name'"
+		return 7
+	fi
+	printf '%s\n' "$xpub"
+}
+
+# Create a watch-only wallet from an account xpub (no seed required).
+wallet:watch() {
+	local name="${1:-}" xpub="${2:-}"
+	if [ -z "$name" ] || [ -z "$xpub" ]; then
+		error "wallet watch: usage: wallet watch <name> <xpub>"
+		return 2
+	fi
+	if ! wallet:_valid_name "$name"; then
+		error "wallet watch: invalid name '$name' (must match [A-Za-z0-9][A-Za-z0-9_-]*)"
+		return 3
+	fi
+	local path; path="$(wallet:_path "$name")"
+	if [ -e "$path" ]; then
+		error "wallet watch: '$name' already exists at $path"
+		return 4
+	fi
+	local libexec="${SELF_LIBEXEC:?wallet watch: SELF_LIBEXEC must be set}"
+	# Validate xpub: must base58-decode to 78 bytes with a public version code.
+	local raw_hex
+	raw_hex="$(printf '%s\n' "$xpub" |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+		basenc --base16 -w0 2>/dev/null | tr A-F a-f)" || true
+	local -i ver=0
+	if [ "${#raw_hex}" -ge 8 ]; then
+		ver=$(( 16#${raw_hex:0:8} ))
+	fi
+	# BIP-32 public version codes: mainnet 0x0488B21E, testnet 0x043587CF.
+	if (( ver != 0x0488B21E && ver != 0x043587CF )); then
+		error "wallet watch: '$xpub' is not a valid xpub (bad version code)"
+		return 5
+	fi
+
+	mkdir -p "$path" || { error "wallet watch: mkdir $path failed"; return 10; }
+	local self_abs; self_abs="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+	(
+		cd "$path" || exit 1
+		git init -q -b main || git init -q
+		printf '%s\n' "$xpub" > xpub
+		cat > config <<-CFG
+		# bitcoin wallet '$name' — watch-only (FEAT-045)
+		name=$name
+		network=testnet
+		watch-only=1
+		CFG
+		: > descriptors
+		cat > .gitattributes <<-GA
+		addresses     merge=bitcoin-addresses-union
+		labels/tx     merge=bitcoin-labels-lww
+		labels/utxo   merge=bitcoin-labels-lww
+		descriptors   merge=bitcoin-descriptors-conflict
+		GA
+		git config merge.bitcoin-addresses-union.driver      "$self_abs _merge addresses %A %O %B"
+		git config merge.bitcoin-addresses-union.name        "addresses union, sort by index (FEAT-011)"
+		git config merge.bitcoin-labels-lww.driver           "$self_abs _merge labels-lww %A %O %B"
+		git config merge.bitcoin-labels-lww.name             "labels last-writer-wins per row (FEAT-018 AC7)"
+		git config merge.bitcoin-descriptors-conflict.driver "$self_abs _merge descriptors-conflict %A %O %B"
+		git config merge.bitcoin-descriptors-conflict.name   "descriptors merge always conflicts (FEAT-011 AC4)"
+		git add xpub config descriptors .gitattributes
+		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
+		    -c commit.gpgsign=false \
+			commit -q -m "wallet watch: $name"
+	) || { error "wallet watch: failed to initialise repo at $path"; return 11; }
+
+	info "watch-only wallet '$name' created at $path"
 }
 
 wallet:new() {
