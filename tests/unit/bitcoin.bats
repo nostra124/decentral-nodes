@@ -2500,78 +2500,69 @@ STR
 # ---------------------------------------------------------------------------
 
 @test "FEAT-045 — wallet watch creates a watch-only wallet (no seed in secret)" {
-	local td; td="$(mktemp -d)"
+	setup_wallet_env
 	local name="watch045a_$$"
-	# A known valid xpub (BIP-32 test vector 1 account-level public key).
 	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" run bitcoin wallet watch "$name" "$xpub"
+	run "$BITCOIN_BIN" wallet watch "$name" "$xpub"
 	[ "$status" -eq 0 ]
-	local wpath="$td/.local/share/bitcoin/wallets/$name"
+	local wpath="$XDG_DATA_HOME/bitcoin/wallets/$name"
 	[ -d "$wpath" ]
 	[ -f "$wpath/xpub" ]
 	grep -q "watch-only=1" "$wpath/config"
 	# No secret was stored.
-	run secret get "$name/seed" 2>/dev/null
-	[ "$status" -ne 0 ]
-	rm -rf "$td"
+	[ ! -f "$SECRET_STORE/$name/seed" ]
 }
 
 @test "FEAT-045 — wallet watch rejects an invalid xpub" {
-	local td; td="$(mktemp -d)"
+	setup_wallet_env
 	local name="watch045b_$$"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" run bitcoin wallet watch "$name" "notanxpub"
+	run "$BITCOIN_BIN" wallet watch "$name" "notanxpub"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"not a valid xpub"* ]]
-	rm -rf "$td"
 }
 
 @test "FEAT-045 — wallet watch rejects a duplicate name" {
-	local td; td="$(mktemp -d)"
+	setup_wallet_env
 	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
 	local name="watch045c_$$"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" bitcoin wallet watch "$name" "$xpub"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" run bitcoin wallet watch "$name" "$xpub"
+	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	run "$BITCOIN_BIN" wallet watch "$name" "$xpub"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"already exists"* ]]
-	rm -rf "$td"
 }
 
 @test "FEAT-045 — wallet xpub rejects a missing wallet" {
-	local td; td="$(mktemp -d)"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" run bitcoin wallet xpub "nosuchwalletfeat045"
+	setup_wallet_env
+	run "$BITCOIN_BIN" wallet xpub "nosuchwalletfeat045"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"no such wallet"* ]]
-	rm -rf "$td"
 }
 
 @test "FEAT-045 — wallet xpub on a watch-only wallet prints the stored xpub" {
-	local td; td="$(mktemp -d)"
+	setup_wallet_env
 	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
 	local name="watch045d_$$"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" bitcoin wallet watch "$name" "$xpub"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" run bitcoin wallet xpub "$name"
+	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	run "$BITCOIN_BIN" wallet xpub "$name"
 	[ "$status" -eq 0 ]
 	[ "$output" = "$xpub" ]
-	rm -rf "$td"
 }
 
 @test "FEAT-045 — tx sign on a watch-only wallet exits non-zero with clear message" {
-	local td; td="$(mktemp -d)"
+	setup_wallet_env
 	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
 	local name="watch045e_$$"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" bitcoin wallet watch "$name" "$xpub"
-	# seed a fake address ledger so tx sign tries to sign
-	local wpath="$td/.local/share/bitcoin/wallets/$name"
+	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	local wpath="$XDG_DATA_HOME/bitcoin/wallets/$name"
 	printf '0\ttb1qfake000000000000000000000000000\t\n' > "$wpath/addresses"
 	local psbt="70736274ff010052020000000100000000000000000000000000000000000000000000000000000000000000000000000000feffffff0150c300000000000016001400000000000000000000000000000000000000000000000000010122a0860100000000001976a914c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e288ac0000"
-	XDG_DATA_HOME="$td/.local/share" HOME="$td" run bash -c "printf '%s\n' '$psbt' | bitcoin tx sign '$name'"
+	run bash -c "printf '%s\n' '$psbt' | '$BITCOIN_BIN' tx sign '$name'"
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"watch-only"* ]]
-	rm -rf "$td"
 }
 
 @test "FEAT-045 — wallet watch/xpub are listed in wallet help" {
-	run bitcoin wallet help
+	run "$BITCOIN_BIN" wallet help
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"watch"* ]]
 	[[ "$output" == *"xpub"* ]]
@@ -2588,76 +2579,74 @@ STR
 # ---------------------------------------------------------------------------
 
 @test "FEAT-046 — address validate accepts a P2PKH mainnet address" {
-    run bitcoin address validate "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
-    [ "$status" -eq 0 ]
+	run "$BITCOIN_BIN" address validate "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+	[ "$status" -eq 0 ]
 }
 
 @test "FEAT-046 — address validate accepts a P2SH mainnet address" {
-    run bitcoin address validate "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
-    [ "$status" -eq 0 ]
+	run "$BITCOIN_BIN" address validate "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+	[ "$status" -eq 0 ]
 }
 
 @test "FEAT-046 — address validate accepts a P2WPKH bech32 address" {
-    run bitcoin address validate "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
-    [ "$status" -eq 0 ]
+	run "$BITCOIN_BIN" address validate "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+	[ "$status" -eq 0 ]
 }
 
 @test "FEAT-046 — address validate accepts a testnet bech32 address" {
-    run bitcoin address validate "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
-    [ "$status" -eq 0 ]
+	run "$BITCOIN_BIN" address validate "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+	[ "$status" -eq 0 ]
 }
 
 @test "FEAT-046 — address validate rejects garbage" {
-    run bitcoin address validate "notanaddress"
-    [ "$status" -ne 0 ]
+	run "$BITCOIN_BIN" address validate "notanaddress"
+	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-046 — address validate rejects empty input" {
-    run bitcoin address validate
-    [ "$status" -ne 0 ]
+	run "$BITCOIN_BIN" address validate
+	[ "$status" -ne 0 ]
 }
 
 @test "FEAT-046 — address type: P2PKH → p2pkh" {
-    run bitcoin address type "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
-    [ "$status" -eq 0 ]
-    [ "$output" = "p2pkh" ]
+	run "$BITCOIN_BIN" address type "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+	[ "$status" -eq 0 ]
+	[ "$output" = "p2pkh" ]
 }
 
 @test "FEAT-046 — address type: P2SH → p2sh" {
-    run bitcoin address type "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
-    [ "$status" -eq 0 ]
-    [ "$output" = "p2sh" ]
+	run "$BITCOIN_BIN" address type "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+	[ "$status" -eq 0 ]
+	[ "$output" = "p2sh" ]
 }
 
 @test "FEAT-046 — address type: P2WPKH → p2wpkh" {
-    run bitcoin address type "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
-    [ "$status" -eq 0 ]
-    [ "$output" = "p2wpkh" ]
+	run "$BITCOIN_BIN" address type "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+	[ "$status" -eq 0 ]
+	[ "$output" = "p2wpkh" ]
 }
 
 @test "FEAT-046 — address decode: P2PKH returns 20-byte hash160 as hex" {
-    run bitcoin address decode "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
-    [ "$status" -eq 0 ]
-    # genesis address hash = 62e907b15cbf27d5425399ebf6f0fb50ebb88f18
-    [ "$output" = "62e907b15cbf27d5425399ebf6f0fb50ebb88f18" ]
+	run "$BITCOIN_BIN" address decode "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+	[ "$status" -eq 0 ]
+	[ "$output" = "62e907b15cbf27d5425399ebf6f0fb50ebb88f18" ]
 }
 
 @test "FEAT-046 — address decode: P2WPKH returns witness program as hex" {
-    run bitcoin address decode "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
-    [ "$status" -eq 0 ]
-    # known witness program for that address
-    [ "$output" = "751e76e8199196f454321e6cf37985a485c41dc7" ]
+	run "$BITCOIN_BIN" address decode "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+	[ "$status" -eq 0 ]
+	[ "$output" = "751e76e8199196f454321e6cf37985a485c41dc7" ]
 }
 
 @test "FEAT-046 — address help lists every subcommand" {
-    run bitcoin address help
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"validate"* ]]
-    [[ "$output" == *"type"* ]]
-    [[ "$output" == *"decode"* ]]
+	run "$BITCOIN_BIN" address help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"validate"* ]]
+	[[ "$output" == *"type"* ]]
+	[[ "$output" == *"decode"* ]]
 }
 
 @test "FEAT-046 — bitcoin help mentions address" {
-    run bitcoin help
-    [[ "$output" == *"address"* ]]
+	run "$BITCOIN_BIN" help
+	[[ "$output" == *"address"* ]]
 }
