@@ -885,7 +885,12 @@ command:sign() {
 		local blob="${PSBT_PARSE_INPUT_RECORDS[i]}"
 		local wu; wu="$(psbt:_input_record_value "$blob" "01")"
 		if [ -z "$wu" ]; then
-			# No WITNESS_UTXO record — can't sign without it.
+			# No WITNESS_UTXO record — can't sign without it. This is a
+			# failure branch (CLAUDE.md §10): surface it instead of
+			# silently emitting an unsigned PSBT with exit 0. A genuinely
+			# foreign input (key mismatch) is handled later as a quiet
+			# no-op; missing UTXO data is a malformed/incomplete PSBT.
+			warn "psbt sign: input $i has no WITNESS_UTXO record; not signing it"
 			continue
 		fi
 		# wu = 8-byte LE value + varint scriptlen + scriptPubKey.
