@@ -151,15 +151,50 @@ command:help() {
 	        Pass no <merkle-root> for the BIP-86 key-path-only case.
 	  address <internal-x-hex> [--testnet|--regtest|--mainnet]
 	        Render the P2TR address (bech32m, witness version 1).
+	  sign-scalar <sk-hex> [<merkle-root-hex>]
+	        Compute the tweaked signing scalar t' = (d' + t) mod n
+	        where d' is sk negated if sk·G has odd y. Feed the result
+	        to 'bip340 sign' to produce a key-path Taproot signature.
 
 	Implements BIP-341 (Taproot output-key derivation). bech32m encoding
 	is delegated to libexec/bitcoin/bip350.
 	ENDHELP
 }
+# BIP-341 §Constructing and spending Taproot outputs / §Common
+# Signature Message Computation. Returns the scalar that, when fed to
+# `bip340 sign`, produces a valid key-path Taproot signature for the
+# tweaked output key.
+#
+#   d' = sk if sk·G has even y, else (n − sk)
+#   t  = tagged_hash("TapTweak", x_only(sk·G) || merkle) mod n
+#   t' = (d' + t) mod n
+#
+# Pass no <merkle-root> for the BIP-86 key-path-only case.
+command:sign-scalar() {
+	[ $# -ge 1 ] || { error "sign-scalar: usage: sign-scalar <sk-hex> [<merkle-root-hex>]"; return 2; }
+	local sk="${1^^}" merkle="${2:-}"
+	merkle="${merkle^^}"
+	[ ${#sk} -eq 64 ] || { error "sign-scalar: sk must be 32 bytes (64 hex), got ${#sk}"; return 3; }
+	local Px Py
+	read Px Py < <(ec_mul "$sk" "$BIP341_GX" "$BIP341_GY")
+	[ -n "$Py" ] || { error "sign-scalar: failed to derive public key"; return 4; }
+	# d' = sk if Py even, else n - sk
+	local par d
+	par=$(dc -e "16i $Py 2 % p")
+	if [ "$par" = 0 ]; then d="$sk"
+	else d=$(dc -e "16o16i $BIP341_N $sk - p"); fi
+	# t = tagged_hash("TapTweak", Px || merkle) mod n
+	local t
+	t=$(_tagged_hash "TapTweak" "${Px}${merkle}")
+	t=$(dc -e "16o16i $BIP341_N sp $t lp % p")
+	# t' = (d + t) mod n  → pad to 64 hex
+	_pad64 "$(dc -e "16o16i $BIP341_N sp $d $t + lp % p")"
+}
+
 command:version() { echo "$VERSION"; }
 
 cmd="${1:-help}"; shift 2>/dev/null || true
 case "$cmd" in
-	tweak|address|help|version) "command:$cmd" "$@" ;;
-	*) error "unknown subcommand '$cmd' (expected: tweak, address, help)"; exit 2 ;;
+	tweak|address|sign-scalar|help|version) "command:$cmd" "$@" ;;
+	*) error "unknown subcommand '$cmd' (expected: tweak, address, sign-scalar, help)"; exit 2 ;;
 esac
