@@ -1,63 +1,77 @@
 #!/bin/sh
-# install template for per-script repos (FEAT-191 autoconf umbrella).
+# install — mimics rpk's package + stow dance, without requiring rpk.
 #
-# Standalone equivalent of `rpk install bitcoin`: runs the same
-# stow-based deploy into the rpk-convention prefix ($HOME/.local for
-# non-root, /usr/local for root), but without requiring rpk to be
-# installed. No --prefix knob — the rpk convention is the only
-# supported layout.
-#
-# One-line bootstrap:
-#   curl -sSL https://github.com/nostra124/<pkg>/raw/master/install | sh
-#
-# Or with a clone:
-#   git clone https://github.com/nostra124/<pkg>
-#   cd <pkg>
+#   git clone https://github.com/nostra124/bitcoin
+#   cd bitcoin
 #   ./install
 
 set -e
 
-PACKAGE='bitcoin'   # render-time substitution at PR-create time
-REPO="https://github.com/nostra124/$PACKAGE"
-BRANCH="master"
+PACKAGE='bitcoin'
 
-usage() {
-	cat <<EOF
-Usage: $0 [options]
-
-  --repo=URL       upstream git repo (default: $REPO)
-  --branch=NAME    branch to install (default: $BRANCH)
-  --help           this message
-
-Installs via stow into the rpk-convention prefix:
-  \$HOME/.local      (non-root)
-  /usr/local         (root)
-EOF
-	exit 0
-}
-
-for arg in "$@"; do
-	case "$arg" in
-		--repo=*)   REPO="${arg#--repo=}" ;;
-		--branch=*) BRANCH="${arg#--branch=}" ;;
-		--help|-h)  usage ;;
-		*)          echo "unknown: $arg"; exit 1 ;;
-	esac
-done
-
-# If we're inside a checkout (this script is in the repo root), use
-# it. Otherwise clone to a temp dir.
-if [ -f Makefile.in ] && [ -f configure ]; then
-	cd "$(dirname "$0")"
+# rpk convention: $HOME/.local for non-root, /usr/local for root.
+if [ "$(id -u)" -eq 0 ]; then
+    PREFIX=/usr/local
 else
-	tmp=$(mktemp -d)
-	trap 'rm -rf "$tmp"' EXIT
-	git clone --depth 1 --branch "$BRANCH" "$REPO" "$tmp/$PACKAGE"
-	cd "$tmp/$PACKAGE"
+    PREFIX="$HOME/.local"
 fi
 
-# configure verifies bash/stow/git, renders Makefile against the
-# rpk-convention prefix; `make install` builds the build/$PACKAGE
-# mirror and stows it into the prefix.
-./configure
-make install
+if [ ! -f VERSION ]; then
+    echo "install: VERSION file missing" >&2
+    exit 1
+fi
+VERSION=$(cat VERSION)
+
+for tool in stow git; do
+    command -v "$tool" >/dev/null || { echo "install: required tool not found: $tool" >&2; exit 1; }
+done
+
+PKG_DIR="$PREFIX/pkg"
+STAGING="$PKG_DIR/$PACKAGE-$VERSION.staging"
+TARGET="$PKG_DIR/$PACKAGE-$VERSION"
+
+mkdir -p "$STAGING/bin" \
+         "$STAGING/libexec/$PACKAGE" \
+         "$STAGING/etc/bash_completion.d" \
+         "$STAGING/share/man/man1" \
+         "$STAGING/share/doc/$PACKAGE" \
+         "$STAGING/share/$PACKAGE"
+
+cp -a bin/* "$STAGING/bin/"
+ln -sf "$PACKAGE" "$STAGING/bin/$PACKAGE.sh"
+
+[ -d "libexec/$PACKAGE" ]      && cp -a "libexec/$PACKAGE/"* "$STAGING/libexec/$PACKAGE/"
+[ -d etc/bash_completion.d ]   && cp -a etc/bash_completion.d/* "$STAGING/etc/bash_completion.d/"
+[ -d share/man/man1 ]          && cp -a share/man/man1/* "$STAGING/share/man/man1/"
+[ -d "share/doc/$PACKAGE" ]    && cp -a "share/doc/$PACKAGE/"* "$STAGING/share/doc/$PACKAGE/"
+[ -d "share/$PACKAGE" ]        && cp -a "share/$PACKAGE/"* "$STAGING/share/$PACKAGE/"
+
+if ls -d "skills/$PACKAGE-"* >/dev/null 2>&1; then
+    for skill in "skills/$PACKAGE-"*; do
+        name=$(basename "$skill")
+        if [ -f "$skill/SKILL.md" ]; then
+            mkdir -p "$STAGING/share/claude/skills/$name" \
+                     "$STAGING/share/raven/skills/$name"
+            install -m 644 "$skill/SKILL.md" "$STAGING/share/claude/skills/$name/SKILL.md"
+            install -m 644 "$skill/SKILL.md" "$STAGING/share/raven/skills/$name/SKILL.md"
+        fi
+        if [ -f "$skill/opencode.md" ]; then
+            mkdir -p "$STAGING/share/opencode/commands"
+            install -m 644 "$skill/opencode.md" "$STAGING/share/opencode/commands/$name.md"
+        fi
+    done
+fi
+
+[ -f VERSION ] && install -m 644 VERSION "$STAGING/share/$PACKAGE/version"
+
+mv "$STAGING" "$TARGET"
+
+# Unstow any previously stowed versions, then stow the new one.
+for old in "$PKG_DIR/$PACKAGE-"*/; do
+    old_name=$(basename "$old")
+    [ "$old_name" = "$PACKAGE-$VERSION" ] && continue
+    stow --no-folding --target="$PREFIX" --delete "$old_name" -d "$PKG_DIR" 2>/dev/null || true
+done
+stow --no-folding --target="$PREFIX" -d "$PKG_DIR" "$PACKAGE-$VERSION"
+
+echo "installed $PACKAGE $VERSION"
