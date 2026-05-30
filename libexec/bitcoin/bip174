@@ -318,6 +318,17 @@ psbt:_hash160_hex() {
 	printf '\n'
 }
 
+# Single-SHA-256 of input hex. Pipe-friendly like _hash160_hex.
+# Used by the BIP-341 TapSighash construction (sha_prevouts etc).
+psbt:_sha256_hex() {
+	local hex; read -r hex
+	printf '%s' "$hex" \
+		| xxd -r -p \
+		| openssl dgst -sha256 -binary \
+		| xxd -p -c 0 \
+		| tr -d '\n'
+}
+
 # Double-SHA-256 of input hex. Pipe-friendly like _hash160_hex.
 psbt:_sha256d_hex() {
 	local hex; read -r hex
@@ -497,6 +508,85 @@ psbt:_bip143_sighash() {
 	preimage+="$sighash_type_le4"
 
 	printf '%s' "$preimage" | psbt:_sha256d_hex
+}
+
+# Compute the BIP-341 TapSighash for a key-path Taproot input.
+# Implements BIP-341 §Common Signature Message Computation for the
+# default case (SIGHASH_DEFAULT, no annex, no script-path). All five
+# component sha256s are single SHA-256 (not double).
+#   $1 unsigned tx hex
+#   $2 input index (0-based)
+#   $3 all-inputs amounts concat — 8-byte LE per input, in order
+#   $4 all-inputs scriptpubkeys concat — varint(len)+scriptpubkey per input
+#   $5 sighash type byte (default 00 = SIGHASH_DEFAULT)
+# Output: 32-byte sighash hex (the tagged_hash("TapSighash", msg) result).
+psbt:_bip341_sighash() {
+	local tx="$1" idx="$2" all_amounts="$3" all_scripts="$4" hash_type="${5:-00}"
+
+	local saved_hex="${psbt_hex:-}" saved_pos="${psbt_pos:-0}" saved_len="${psbt_len:-0}"
+	psbt_hex="$tx"
+	local -gi psbt_len=${#psbt_hex} psbt_pos=0
+	PSBT_LAST_HEX=""
+	PSBT_LAST_VINT=0
+
+	psbt:_take 4 || { error "psbt sign (taproot): truncated version"; return 1; }
+	local nVersion_le="$PSBT_LAST_HEX"
+
+	psbt:_take_varint || { error "psbt sign (taproot): truncated input count"; return 1; }
+	local -i n_in=$PSBT_LAST_VINT
+	local prevouts="" sequences=""
+	local k
+	for ((k=0; k<n_in; k++)); do
+		psbt:_take 32 || { error "psbt sign (taproot): truncated prev_txid"; return 1; }
+		local prev_txid="$PSBT_LAST_HEX"
+		psbt:_take 4 || { error "psbt sign (taproot): truncated prev_vout"; return 1; }
+		local prev_vout="$PSBT_LAST_HEX"
+		prevouts+="$prev_txid$prev_vout"
+		psbt:_take_varint || { error "psbt sign (taproot): truncated scriptSig length"; return 1; }
+		local -i ss_len=$PSBT_LAST_VINT
+		psbt:_take "$ss_len" || { error "psbt sign (taproot): truncated scriptSig"; return 1; }
+		psbt:_take 4 || { error "psbt sign (taproot): truncated sequence"; return 1; }
+		sequences+="$PSBT_LAST_HEX"
+	done
+
+	psbt:_take_varint || { error "psbt sign (taproot): truncated output count"; return 1; }
+	local -i n_out=$PSBT_LAST_VINT
+	local outputs=""
+	for ((k=0; k<n_out; k++)); do
+		psbt:_take 8 || { error "psbt sign (taproot): truncated output value"; return 1; }
+		outputs+="$PSBT_LAST_HEX"
+		psbt:_take_varint || { error "psbt sign (taproot): truncated script length"; return 1; }
+		local -i sp_len=$PSBT_LAST_VINT
+		outputs+="$(psbt:_emit_varint "$sp_len")"
+		psbt:_take "$sp_len" || { error "psbt sign (taproot): truncated scriptPubKey"; return 1; }
+		outputs+="$PSBT_LAST_HEX"
+	done
+
+	psbt:_take 4 || { error "psbt sign (taproot): truncated locktime"; return 1; }
+	local nLocktime_le="$PSBT_LAST_HEX"
+
+	psbt_hex="$saved_hex"; psbt_pos=$saved_pos; psbt_len=$saved_len
+
+	# Five single-sha256 component hashes per BIP-341.
+	local sha_prevouts;      sha_prevouts="$(printf '%s' "$prevouts"      | psbt:_sha256_hex)"
+	local sha_amounts;       sha_amounts="$(printf '%s' "$all_amounts"    | psbt:_sha256_hex)"
+	local sha_scriptpubkeys; sha_scriptpubkeys="$(printf '%s' "$all_scripts" | psbt:_sha256_hex)"
+	local sha_sequences;     sha_sequences="$(printf '%s' "$sequences"    | psbt:_sha256_hex)"
+	local sha_outputs;       sha_outputs="$(printf '%s' "$outputs"        | psbt:_sha256_hex)"
+
+	# Sighash message:
+	#   epoch(0x00) || hash_type(1) || nVersion(4) || nLocktime(4)
+	#   || sha_prevouts || sha_amounts || sha_scriptpubkeys
+	#   || sha_sequences || sha_outputs
+	#   || spend_type(0x00 = no annex, key-path) || input_index(4 LE)
+	local input_index_le; input_index_le="$(_le32 "$idx")"
+	local msg="00${hash_type}${nVersion_le}${nLocktime_le}"
+	msg+="$sha_prevouts$sha_amounts$sha_scriptpubkeys$sha_sequences$sha_outputs"
+	msg+="00"
+	msg+="$input_index_le"
+
+	# tagged_hash("TapSighash", msg) — delegate to bip340.
+	"$SELF_LIBEXEC/bitcoin/bip340" tagged-hash TapSighash "$msg" | tr A-F a-f
 }
 
 # Parse a PSBT into structured per-input records. Populates the
@@ -680,11 +770,29 @@ command:sign() {
 	local pubkey_hash; pubkey_hash="$(printf '%s' "$pubkey" | psbt:_hash160_hex)"
 	local expected_script="0014${pubkey_hash}"
 
+	# Taproot key-path matching is lazy — compute Qx only on first 5120
+	# encounter, since the bip340/bip341 calls each cost a scalar mult
+	# (≈10 s with the affine engine).
+	local expected_taproot_script="" taproot_pubkey_x="" taproot_output_x=""
+	local _all_amounts_le="" _all_scripts_with_varint="" _all_inputs_have_wu=1
+
 	# Parse the PSBT into per-section blobs.
 	psbt:_parse_structured "$raw" || return 7
 
 	local -i n_in=$PSBT_PARSE_N_IN n_out=$PSBT_PARSE_N_OUT
 	local tx="$PSBT_PARSE_UNSIGNED_TX"
+
+	# Pre-pass: collect every input's amount + scriptPubKey from its
+	# WITNESS_UTXO. BIP-341 TapSighash needs all of them. If any input
+	# lacks WITNESS_UTXO, the flag stays unset and Taproot signing is
+	# skipped for this run; P2WPKH signing still works per-input.
+	local -i _k
+	for ((_k=0; _k<n_in; _k++)); do
+		local _wu; _wu="$(psbt:_input_record_value "${PSBT_PARSE_INPUT_RECORDS[_k]}" "01")"
+		if [ -z "$_wu" ]; then _all_inputs_have_wu=0; _all_amounts_le=""; _all_scripts_with_varint=""; break; fi
+		_all_amounts_le+="${_wu:0:16}"
+		_all_scripts_with_varint+="${_wu:16}"   # varint(L) || scriptPubKey, verbatim
+	done
 
 	local -i i
 	for ((i=0; i<n_in; i++)); do
@@ -710,27 +818,54 @@ command:sign() {
 			continue
 		fi
 		local script="${rest:script_start:script_len_bytes*2}"
-		if [[ "$script" != "$expected_script" ]]; then
-			# Not signable by this key.
+		if [[ "$script" = "$expected_script" ]]; then
+			# P2WPKH (existing path).
+			# scriptCode for P2WPKH per BIP-143: 1976a914 <20-byte hash> 88ac
+			local script_code="1976a914${pubkey_hash}88ac"
+			local sighash; sighash="$(psbt:_bip143_sighash "$tx" "$i" "$script_code" "$amount_le" 01)" || return 8
+			local sig; sig="$(psbt:_sign_sighash "$key_hex" "$sighash")" || return 9
+			sig+="01"   # SIGHASH_ALL byte
+			# Insert PSBT_IN_PARTIAL_SIG: key = 0x02 || pubkey(33B); value = sig || sighash byte.
+			local key_field="02${pubkey}"
+			local -i key_len=$(( ${#key_field} / 2 ))
+			local -i val_len=$(( ${#sig} / 2 ))
+			local new_record=""
+			new_record+="$(psbt:_emit_varint "$key_len")"
+			new_record+="$key_field"
+			new_record+="$(psbt:_emit_varint "$val_len")"
+			new_record+="$sig"
+			PSBT_PARSE_INPUT_RECORDS[i]+="$new_record"
 			continue
 		fi
-		# scriptCode for P2WPKH per BIP-143: 1976a914 <20-byte hash> 88ac
-		local script_code="1976a914${pubkey_hash}88ac"
-		local sighash; sighash="$(psbt:_bip143_sighash "$tx" "$i" "$script_code" "$amount_le" 01)" || return 8
-		local sig; sig="$(psbt:_sign_sighash "$key_hex" "$sighash")" || return 9
-		# Append SIGHASH_ALL byte.
-		sig+="01"
-		# Insert PSBT_IN_PARTIAL_SIG record: keylen + (0x02 + pubkey) + vallen + (sig+sighash)
-		# key field = 0x02 (type) || compressed pubkey (33 B) = 34 bytes
-		local key_field="02${pubkey}"
-		local -i key_len=$(( ${#key_field} / 2 ))
-		local -i val_len=$(( ${#sig} / 2 ))
-		local new_record=""
-		new_record+="$(psbt:_emit_varint "$key_len")"
-		new_record+="$key_field"
-		new_record+="$(psbt:_emit_varint "$val_len")"
-		new_record+="$sig"
-		PSBT_PARSE_INPUT_RECORDS[i]+="$new_record"
+		# BIP-371 Taproot key-path. Compute Qx lazily.
+		if [[ "$script" =~ ^5120[0-9a-f]{64}$ ]]; then
+			if [ -z "$expected_taproot_script" ]; then
+				taproot_pubkey_x="$("$SELF_LIBEXEC/bitcoin/bip340" pubkey "$key_hex" 2>/dev/null | tr A-F a-f)"
+				taproot_output_x="$("$SELF_LIBEXEC/bitcoin/bip341" tweak "$taproot_pubkey_x" 2>/dev/null | tr A-F a-f)"
+				expected_taproot_script="5120${taproot_output_x}"
+			fi
+			if [[ "$script" = "$expected_taproot_script" ]]; then
+				if (( ! _all_inputs_have_wu )); then
+					warn "psbt sign: Taproot sighash requires WITNESS_UTXO on every input; skipping input $i"
+					continue
+				fi
+				local tap_sighash; tap_sighash="$(psbt:_bip341_sighash "$tx" "$i" "$_all_amounts_le" "$_all_scripts_with_varint")" || return 10
+				local d_tweaked; d_tweaked="$("$SELF_LIBEXEC/bitcoin/bip341" sign-scalar "$key_hex" 2>/dev/null | tr A-F a-f)" || return 11
+				local tap_sig; tap_sig="$("$SELF_LIBEXEC/bitcoin/bip340" sign "$d_tweaked" "$tap_sighash" 2>/dev/null | tr A-F a-f)" || return 12
+				# Insert PSBT_IN_TAP_KEY_SIG (type 0x13, no key data).
+				local key_field_tap="13"
+				local -i key_len_tap=1
+				local -i val_len_tap=$(( ${#tap_sig} / 2 ))
+				local new_tap=""
+				new_tap+="$(psbt:_emit_varint "$key_len_tap")"
+				new_tap+="$key_field_tap"
+				new_tap+="$(psbt:_emit_varint "$val_len_tap")"
+				new_tap+="$tap_sig"
+				PSBT_PARSE_INPUT_RECORDS[i]+="$new_tap"
+				continue
+			fi
+		fi
+		# Not signable by this key.
 	done
 
 	# Re-emit the PSBT.
@@ -802,7 +937,7 @@ command:finalize() {
 	local -i i
 	for ((i=0; i<n_in; i++)); do
 		local blob="${PSBT_PARSE_INPUT_RECORDS[i]}"
-		local witness_utxo="" partial_sig_value="" partial_sig_pubkey=""
+		local witness_utxo="" partial_sig_value="" partial_sig_pubkey="" tap_key_sig=""
 		# Walk records, capturing what we need.
 		local tsv_line type_byte key_hex val_hex
 		while IFS=$'\t' read -r type_byte key_hex val_hex; do
@@ -816,30 +951,46 @@ command:finalize() {
 						partial_sig_value="$val_hex"
 					fi
 					;;
+				13)
+					# BIP-371 PSBT_IN_TAP_KEY_SIG: key is just the 0x13 type
+					# byte; value is the 64-byte Schnorr sig (SIGHASH_DEFAULT)
+					# or 65-byte sig+hashtype.
+					[ -z "$tap_key_sig" ] && tap_key_sig="$val_hex"
+					;;
 			esac
 		done < <(psbt:_input_records_tsv "$blob")
-		if [ -z "$partial_sig_value" ] || [ -z "$witness_utxo" ]; then
-			# Nothing to finalize on this input; pass through unchanged.
+		if [ -z "$witness_utxo" ]; then
+			# No previous output info; can't finalize. Pass through.
 			continue
 		fi
-		# Build witness stack: 02 (count) + varint(sig_len) + sig + 21 + pubkey.
-		local -i sig_len_bytes=$(( ${#partial_sig_value} / 2 ))
-		local -i pub_len_bytes=$(( ${#partial_sig_pubkey} / 2 ))
-		local witness_stack=""
-		witness_stack+="$(psbt:_emit_varint 2)"
-		witness_stack+="$(psbt:_emit_varint "$sig_len_bytes")"
-		witness_stack+="$partial_sig_value"
-		witness_stack+="$(psbt:_emit_varint "$pub_len_bytes")"
-		witness_stack+="$partial_sig_pubkey"
-		# Rebuild the input map: keep WITNESS_UTXO, add FINAL_SCRIPTWITNESS
-		# (type 0x08).
 		local new_blob=""
 		# Re-emit WITNESS_UTXO with the same shape (keylen=1, key=01).
 		new_blob+="01"
 		new_blob+="01"
 		new_blob+="$(psbt:_emit_varint $(( ${#witness_utxo} / 2 )))"
 		new_blob+="$witness_utxo"
-		# FINAL_SCRIPTWITNESS record.
+		# Build the witness stack per script type.
+		local witness_stack=""
+		if [ -n "$tap_key_sig" ]; then
+			# BIP-341 key-path: a one-element stack [sig].
+			local -i sig_len_bytes=$(( ${#tap_key_sig} / 2 ))
+			witness_stack+="$(psbt:_emit_varint 1)"
+			witness_stack+="$(psbt:_emit_varint "$sig_len_bytes")"
+			witness_stack+="$tap_key_sig"
+		elif [ -n "$partial_sig_value" ]; then
+			# P2WPKH: two-element stack [sig+sighash, pubkey].
+			local -i sig_len_bytes=$(( ${#partial_sig_value} / 2 ))
+			local -i pub_len_bytes=$(( ${#partial_sig_pubkey} / 2 ))
+			witness_stack+="$(psbt:_emit_varint 2)"
+			witness_stack+="$(psbt:_emit_varint "$sig_len_bytes")"
+			witness_stack+="$partial_sig_value"
+			witness_stack+="$(psbt:_emit_varint "$pub_len_bytes")"
+			witness_stack+="$partial_sig_pubkey"
+		else
+			# Nothing to finalize on this input; pass through unchanged.
+			continue
+		fi
+		# FINAL_SCRIPTWITNESS record (type 0x08).
 		new_blob+="01"
 		new_blob+="08"
 		new_blob+="$(psbt:_emit_varint $(( ${#witness_stack} / 2 )))"

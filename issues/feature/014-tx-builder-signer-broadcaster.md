@@ -3,7 +3,7 @@ id: FEAT-014
 type: feature
 priority: high
 status: open
-milestone: 1.28.0
+milestone: 1.29.0
 ---
 
 ## Progress (1.21.0 shipped — mainnet-send guard closes AC 5)
