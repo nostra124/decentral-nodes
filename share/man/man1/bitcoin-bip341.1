@@ -1,0 +1,152 @@
+.\" Manpage for bitcoin-bip341(1) — Taproot tweak and P2TR address (BIP-341).
+.TH BITCOIN-BIP341 1 "2026-05-28" "bitcoin 1.26.0" "User Commands"
+
+.SH NAME
+bitcoin\-bip341 \- Taproot output-key tweak and P2TR address (BIP-341)
+
+.SH SYNOPSIS
+.B bitcoin bip341 tweak
+.I internal-x-hex
+.RI [ merkle-root-hex ]
+.br
+.B bitcoin bip341 address
+.I internal-x-hex
+.RI [ --mainnet | --testnet | --regtest ]
+.br
+.B bitcoin bip341 help
+
+.SH DESCRIPTION
+.B bitcoin bip341
+implements BIP-341 Taproot output-key derivation. Given an internal
+x-only key
+.I P
+and an optional merkle root
+.IR m ,
+it computes the tweaked output key
+.BR "Q = P + t \(mu G" ,
+where
+.B t = tagged_hash("TapTweak", P || m).
+Pass no
+.I merkle-root-hex
+for the BIP-86 key-path-only case
+.RB ( m
+is empty); pass a 32-byte merkle root for script-path-capable outputs.
+
+The
+.B address
+subcommand wraps the result in a BIP-350 bech32m envelope with
+witness version 1, producing a P2TR address
+.RB ( bc1p... ,
+.BR tb1p... ,
+or
+.BR bcrt1p... ).
+
+Per the repo's no-shared-library convention (CLAUDE.md \(sc 4 / \(sc 5),
+this plugin owns its own secp256k1 affine arithmetic. bech32m
+encoding is delegated to
+.BR bitcoin-bip350 (1)
+via the sibling-libexec convention.
+
+.SH OPTIONS
+The
+.B address
+subcommand accepts a network selector:
+.BR --mainnet ,
+.BR --testnet ,
+.BR --regtest .
+Default is
+.BR --mainnet .
+Other subcommands take no flags.
+
+.SH SUBCOMMANDS
+.TP
+.BI "tweak " "internal-x-hex " [ merkle-root-hex ]
+Print the 32-byte tweaked output x-only key.
+Errors if the internal key is not a valid x-coordinate of any
+secp256k1 point (exit code 4) or if the tweaked point is at
+infinity (exit code 5).
+.TP
+.BI "address " "internal-x-hex " [ "--mainnet|--testnet|--regtest" ]
+Print the P2TR bech32m address. Defaults to
+.B --mainnet
+(HRP
+.IR bc );
+.B --testnet
+gives
+.IR tb ;
+.B --regtest
+gives
+.IR bcrt .
+
+.SH EXAMPLES
+BIP-86 abandon-mnemonic reference (m/86\(fmh/0\(fmh/0\(fmh/0/0):
+.PP
+.RS
+.nf
+$ bitcoin bip341 address \\
+    CC8A4BC64D897BDDC5FBC2F670F7A8BA0B386779106CF1223C6FC5D7CD6FC115
+bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr
+.fi
+.RE
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 2
+Missing argument or unknown subcommand / flag.
+.TP
+.B 3
+Malformed input (e.g.
+.I internal-x-hex
+not 32 bytes).
+.TP
+.B 4
+Internal key is not a valid x-coordinate of any secp256k1 point.
+.TP
+.B 5
+Tweaked point is at infinity (cryptographically impossible for honest inputs).
+
+.SH FILES
+.TP
+.IB share/doc/bitcoin/bips/bip-0341.mediawiki
+Local copy of BIP-341.
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+If set, emit
+.B debug -
+trace lines to stderr.
+.TP
+.B SELF_QUIET
+If set, suppress informational
+.B info -
+lines.
+.TP
+.B SELF_LIBEXEC
+Inherited from
+.BR bitcoin (1);
+sibling plugins (e.g.
+.BR bip350 )
+are located via
+.IB $SELF_LIBEXEC /bitcoin/ .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip340 (1),
+.BR bitcoin-bip350 (1),
+.BR bitcoin-bip380 (1)
+
+.SH STANDARDS
+BIP-341 \(em Taproot: SegWit version 1 spending rules:
+<https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki>.
+BIP-86 \(em Key Derivation for Single Key P2TR Outputs:
+<https://github.com/bitcoin/bips/blob/master/bip-0086.mediawiki>.
+
+.SH HISTORY
+Introduced in bitcoin 1.26.0 (FEAT-007). Script-path (tapleaf
+hashing per BIP-342) is not yet implemented; the merkle-root
+argument is accepted but the plugin does not synthesise tap-leaves
+for you.
