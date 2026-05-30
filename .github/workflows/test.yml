@@ -50,3 +50,25 @@ jobs:
           name: bats-log
           path: bats.log
           if-no-files-found: ignore
+
+  lint:
+    name: shellcheck + cmd-names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # Gating: catches the BUG-013/014/016 family (command:<name> calls
+      # with no matching definition). Verified clean on the tree.
+      - name: lint-cmd-names
+        run: tools/lint-cmd-names
+
+      # Advisory for now (FEAT-049): the tree is not yet clean under
+      # `shellcheck -S warning` (e.g. bip350 has array-quoting findings),
+      # so this reports without failing the gate. Promote to blocking
+      # once swept clean — tracked as FEAT-052.
+      - name: shellcheck (advisory)
+        continue-on-error: true
+        run: shellcheck -S warning bin/* $(find libexec/bitcoin -type f)

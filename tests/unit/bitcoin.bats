@@ -404,7 +404,7 @@ STUB
 	setup_wallet_env
 	run "$BITCOIN_BIN" wallet rm no-such-wallet
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"no-such-wallet"* ]] || [[ "$stderr" == *"no-such-wallet"* ]] || true
+	[[ "$output" == *"no-such-wallet"* ]] || [[ "$stderr" == *"no-such-wallet"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -553,7 +553,7 @@ curl_fixture() {
 	# No fixture → stub-curl exits 22.
 	run "$BITCOIN_BIN" backend chain-height
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"mempool"* ]] || [[ "$stderr" == *"mempool"* ]] || true
+	[[ "$output" == *"mempool"* ]] || [[ "$stderr" == *"mempool"* ]]
 }
 
 @test "FEAT-012 — bitcoin help backend cites the BIPs in scope (380 for descriptors → addresses)" {
@@ -1005,7 +1005,7 @@ build_utxo_fixture() {
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100 01)"
 	run "$BITCOIN_BIN" tx build alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"insufficient"* ]] || [[ "$stderr" == *"insufficient"* ]] || true
+	[[ "$output" == *"insufficient"* ]] || [[ "$stderr" == *"insufficient"* ]]
 }
 
 @test "FEAT-014 — wallet build rejects an invalid output address" {
@@ -1122,7 +1122,7 @@ psbt_vec1() {
 	# Strip the 5-byte magic+separator (10 hex chars).
 	run bash -c "$(declare -f psbt_vec1); psbt_vec1 | cut -c11- | '$BITCOIN_BIN' bip174 decode"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"magic"* ]] || true
+	[[ "$output" == *"magic"* ]]
 }
 
 @test "FEAT-008 — psbt decode rejects empty input" {
@@ -1333,7 +1333,7 @@ build_alice_psbt() {
 @test "FEAT-008 — psbt sign rejects a malformed private key" {
 	run bash -c "echo '70736274ff00' | '$BITCOIN_BIN' bip174 sign not-a-hex-key"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"privkey-hex"* ]] || [[ "$stderr" == *"privkey-hex"* ]] || true
+	[[ "$output" == *"privkey-hex"* ]] || [[ "$stderr" == *"privkey-hex"* ]]
 }
 
 @test "FEAT-008 — psbt sign rejects empty stdin" {
@@ -1418,7 +1418,7 @@ signed_alice_psbt() {
 	# Skip the finalize step → input still has PARTIAL_SIG, no witness.
 	run bash -c "echo '$signed' | '$BITCOIN_BIN' bip174 extract"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"not finalised"* ]] || [[ "$stderr" == *"not finalised"* ]] || true
+	[[ "$output" == *"not finalised"* ]] || [[ "$stderr" == *"not finalised"* ]]
 }
 
 @test "FEAT-008 — psbt finalize is a no-op on an unsigned PSBT" {
@@ -1554,7 +1554,7 @@ wallet_set_network() {
 	curl_fixture "https://mempool.space/api/address/$addr/utxo" "$(build_utxo_fixture 100000 01)"
 	run "$BITCOIN_BIN" wallet send alice bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 50000 --fee-rate 1
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"mainnet"* ]] || [[ "$stderr" == *"mainnet"* ]] || true
+	[[ "$output" == *"mainnet"* ]] || [[ "$stderr" == *"mainnet"* ]]
 }
 
 @test "FEAT-014 — wallet send on a mainnet wallet succeeds with --mainnet" {
@@ -1719,16 +1719,19 @@ wallet_set_network() {
 
 # ---------------------------------------------------------------------------
 # FEAT-019 / FEAT-048 — bitcoin-wallet agent skill. The AI-facing
-# companion to the FEAT-015 human walkthrough. Lives at
-# skills/bitcoin-wallet/{SKILL.md,opencode.md}. FEAT-048 refreshed the
+# companion to the FEAT-015 human walkthrough. FEAT-048 refreshed the
 # content to the 1.33.0 verb set and added Raven as a third install
-# target (Claude + Raven share SKILL.md; opencode uses opencode.md),
-# per the rpk skill convention. Installed by the Makefile into
-# share/{claude,raven}/skills/ and share/opencode/commands/.
+# target, per the rpk skill convention. BUG-025: the source was
+# consolidated from the old split skills/bitcoin-wallet/{SKILL.md,
+# opencode.md} into a single canonical manifest at
+# .rpk/skills/bitcoin-wallet.md (master ad723c4), per the rpk
+# PACKAGING contract; these tests assert that manifest's content and
+# are installed by the Makefile into share/{claude,raven}/skills/ and
+# share/opencode/commands/.
 # ---------------------------------------------------------------------------
 
 @test "FEAT-019 — SKILL.md exists with the required frontmatter" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	[ -s "$skill" ]
 	# YAML frontmatter: --- ... name: bitcoin-wallet ... description: ... ---
 	head -1 "$skill" | grep -q '^---$'
@@ -1737,7 +1740,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-019 — SKILL.md opens with the four design principles" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# All four words must appear in the design-principles section.
 	for word in Educational Functional Decentralized Simple; do
 		grep -q -F "$word" "$skill"
@@ -1745,7 +1748,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-048 — SKILL.md references the canonical 1.33.0 verb set" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# Canonical verbs after the FEAT-035 streamline: PSBT ops live
 	# under `tx` (passing through to bip174), descriptor checksum
 	# moved to bip380, and tx/utxo/address/price/tax are first-class.
@@ -1768,7 +1771,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-048 — SKILL.md corrects the --mainnet guardrail (now shipped)" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# FEAT-014 shipped --mainnet; the old skill said it "isn't
 	# shipped". The refreshed guardrail must describe the live flag
 	# and must NOT claim it is unshipped.
@@ -1779,7 +1782,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-019 — SKILL.md spells out the guardrails an agent must hold" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# The core guardrails the skill spec enumerates.
 	grep -q -i 'never print.*mnemonic' "$skill"
 	grep -q -i 'never bypass .secret' "$skill"
@@ -1790,7 +1793,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-019 — SKILL.md cites the vendored BIPs by local path" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	grep -q 'share/doc/bitcoin/bips/' "$skill"
 	# At least one BIP from each major family the wallet implements.
 	for bip in "BIP-32" "BIP-39" "BIP-141" "BIP-143" "BIP-173" "BIP-174" "BIP-380"; do
@@ -1798,20 +1801,17 @@ wallet_set_network() {
 	done
 }
 
-@test "FEAT-019 — opencode entry exists with matching content" {
-	oc="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/opencode.md"
-	[ -s "$oc" ]
-	# YAML frontmatter for opencode commands.
-	head -1 "$oc" | grep -q '^---$'
-	grep -q '^description:' "$oc"
-	# Cross-references SKILL.md so users know where the full
-	# manifest lives.
-	grep -q 'SKILL.md' "$oc"
-	# Covers the same workflow recipes (subset is fine since opencode
-	# entries can be terser). Canonical 1.33.0 verbs.
-	for verb in "wallet new" "wallet send" "tx finalize" "tx extract"; do
-		grep -q -F "$verb" "$oc"
-	done
+@test "BUG-025 — .rpk/skills is the single canonical skill source (no stale split files)" {
+	# The migration (master ad723c4 "register bitcoin-wallet skill
+	# under .rpk/skills/") folded the old split source
+	# skills/bitcoin-wallet/{SKILL.md,opencode.md} into one manifest at
+	# .rpk/skills/bitcoin-wallet.md, per the rpk PACKAGING contract
+	# (CLAUDE.md §2). Guard against a regression that re-introduces the
+	# legacy split layout the SKILL.md tests above used to point at.
+	canonical="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
+	[ -s "$canonical" ]
+	[ ! -e "$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md" ]
+	[ ! -e "$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/opencode.md" ]
 }
 
 @test "FEAT-019 — Makefile install installs SKILL.md and opencode.md" {
@@ -2163,7 +2163,7 @@ alice_xpub_path() {
 	# sh(pkh(...)) is a valid BIP-380 descriptor; we just don't ship it.
 	run "$BITCOIN_BIN" bip380 derive "sh(pkh($body))" 0
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]] || true
+	[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]]
 }
 
 @test "FEAT-026 — pkh and sh(wpkh) round-trip through a verified checksum" {
@@ -2440,7 +2440,7 @@ BAD
 	chmod +x "$bad"
 	run "$BATS_TEST_DIRNAME/../../tools/lint-cmd-names" "$bad"
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"command:foo"* ]] || true
+	[[ "$output" == *"command:foo"* ]]
 }
 
 @test "FEAT-032 — lint-cmd-names passes on a fixture where the call is defined" {
