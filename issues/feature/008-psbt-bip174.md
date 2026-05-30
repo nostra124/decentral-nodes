@@ -3,7 +3,7 @@ id: FEAT-008
 type: feature
 priority: medium
 status: open
-milestone: 1.26.0
+milestone: 1.27.0
 ---
 
 ## Progress (1.7.0 shipped — decode only)

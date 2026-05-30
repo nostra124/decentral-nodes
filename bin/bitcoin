@@ -182,6 +182,8 @@ blockchain primitives:
    bip173                  Bech32 segwit address format (BIP-0173)
    bip350                  Bech32m v1+ witness addresses (BIP-0350)
    bip174                  Partially Signed Bitcoin Transactions (BIP-0174)
+   bip340                  Schnorr signatures over secp256k1 (BIP-0340)
+   bip341                  Taproot output-key tweak / P2TR address (BIP-0341)
 
 advanced:
    price                   BTC/EUR price oracle

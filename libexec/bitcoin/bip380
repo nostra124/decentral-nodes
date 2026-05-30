@@ -287,11 +287,8 @@ command:derive() {
 	fi
 
 	case "$fn" in
-		wpkh|pkh|sh) ;;
-		tr|combo)
-			error "descriptor derive: '$fn()' is not yet implemented (tracked as FEAT-026 follow-up)"
-			return 5
-			;;
+		wpkh|pkh|sh|tr) ;;
+		combo) ;;
 		*)
 			error "descriptor derive: unknown descriptor function '$fn'"
 			return 6
@@ -322,10 +319,27 @@ command:derive() {
 	fi
 
 	case "$fn" in
-		wpkh) descriptor:_p2wpkh_address "$pubkey" ;;
-		pkh)  descriptor:_pkh_address "$pubkey" ;;
-		sh)   descriptor:_p2sh_p2wpkh_address "$pubkey" ;;
+		wpkh)  descriptor:_p2wpkh_address      "$pubkey" ;;
+		pkh)   descriptor:_pkh_address         "$pubkey" ;;
+		sh)    descriptor:_p2sh_p2wpkh_address "$pubkey" ;;
+		tr)    descriptor:_tr_address          "$pubkey" ;;
+		combo)
+			descriptor:_pkh_address         "$pubkey"
+			descriptor:_p2wpkh_address      "$pubkey"
+			descriptor:_p2sh_p2wpkh_address "$pubkey"
+			descriptor:_tr_address          "$pubkey"
+			;;
 	esac
+}
+
+# tr() — BIP-341 P2TR address. The compressed pubkey's x-only half
+# (drop the 02/03 parity byte) becomes BIP-341's internal key. Defers
+# to libexec/bitcoin/bip341 for the TapTweak + bech32m address.
+descriptor:_tr_address() {
+	local pubkey="$1"
+	[[ "$pubkey" =~ ^0[23][[:xdigit:]]{64}$ ]] \
+		|| { error "descriptor derive tr: unexpected pubkey '$pubkey'"; return 1; }
+	"$BIP380_SIBLINGS/bip341" address "${pubkey:2}"
 }
 
 # Extract '<xpub>/<path>' from a function body like 'wpkh(<xpub>/...)
@@ -333,7 +347,7 @@ command:derive() {
 # malformed body or a missing '/'.
 descriptor:_parse_key_body() {
 	local body="$1"
-	if [[ ! "$body" =~ ^(wpkh|pkh)\((.*)\)$ ]]; then
+	if [[ ! "$body" =~ ^(wpkh|pkh|tr|combo)\((.*)\)$ ]]; then
 		return 1
 	fi
 	local inner="${BASH_REMATCH[2]}"

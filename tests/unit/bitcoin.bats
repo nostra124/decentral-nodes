@@ -1926,10 +1926,9 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# FEAT-026 (partial, 1.18.0) — descriptor derive + descriptor wallet.
-# Together these turn descriptors from checksum strings into actual
-# address generators. wpkh() only in this release; pkh / sh(wpkh) /
-# tr / combo return a clear "not yet implemented" error.
+# FEAT-026 — descriptor derive + descriptor wallet. wpkh() since 1.18.0;
+# pkh + sh(wpkh) since 1.20.0; tr + combo since 1.26.0 (FEAT-026 closed
+# alongside FEAT-007 Taproot). multi() / sortedmulti() remain deferred.
 # ---------------------------------------------------------------------------
 
 @test "FEAT-026 — descriptor wallet emits a checksummed wpkh() descriptor" {
@@ -1969,15 +1968,16 @@ EOF
 	done
 }
 
-@test "FEAT-026 — descriptor derive rejects still-unimplemented functions with a clear error" {
-	# 1.18.0 only shipped wpkh; 1.20.0 added pkh + sh(wpkh). tr and
-	# combo remain deferred (tr is blocked on FEAT-007 Taproot).
+@test "FEAT-026 — descriptor derive: tr() and combo() succeed (shipped in 1.26.0)" {
+	# Replaces the 1.18.0 'tr/combo not-yet-implemented' assertion.
+	# Positive coverage: bip-86 vector cross-checked in
+	# tests/unit/descriptor-tr.bats.
 	setup_wallet_derive_env
 	body="$(alice_xpub_path)"
 	for fn in tr combo; do
 		run "$BITCOIN_BIN" bip380 derive "${fn}($body)" 0
-		[ "$status" -ne 0 ]
-		[[ "$output" == *"not yet implemented"* ]] || [[ "$stderr" == *"not yet implemented"* ]] || true
+		[ "$status" -eq 0 ]
+		[ -n "$output" ]
 	done
 }
 

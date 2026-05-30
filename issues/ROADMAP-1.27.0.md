@@ -13,6 +13,7 @@ UTXO / address a durable label and index.
 | FEAT-011 `wallet push` / `pull` between accounts | planned | PSBT interchange over git |
 | FEAT-014 tx builder — P2PKH + P2SH-P2WPKH signing | planned | P2WPKH shipped; P2TR landed in 1.26.0; regtest validation in 1.28.0 |
 | FEAT-018 client-side tx index + labels | planned | the tax-label vocabulary (FEAT-038) already shipped |
+| FEAT-008 PSBT — BIP-371 Taproot fields | planned | moved here from 1.26.0; BIP-340/341 core shipped, this closes the Taproot strand |
 
 ## What lands
 

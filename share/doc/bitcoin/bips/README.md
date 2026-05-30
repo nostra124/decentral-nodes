@@ -50,6 +50,38 @@ Upstream:
 
 Implemented as part of the address-derivation pipeline.
 
+## BIP 340 — Schnorr signatures
+
+Schnorr signatures over secp256k1 with x-only public keys
+and deterministic nonces. Defines the `tagged_hash` helper
+used throughout the Taproot stack.
+
+Upstream:
+<https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki>.
+
+Implemented by `bitcoin bip340` / `libexec/bitcoin/bip340`.
+
+## BIP 341 — Taproot
+
+Output-key tweaking (`Q = P + tagged_hash("TapTweak", P) · G`)
+and the P2TR address format (bech32m, witness version 1).
+Key-path spends only here; script-path / tapscript is BIP 342
+(stub).
+
+Upstream:
+<https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki>.
+
+Implemented by `bitcoin bip341` / `libexec/bitcoin/bip341`.
+
+## BIP 342 — Tapscript
+
+Validation rules for Taproot script-path spends. Vendored for
+reference; script-path spending is not yet implemented (key-path
+spending via BIP-341 is).
+
+Upstream:
+<https://github.com/bitcoin/bips/blob/master/bip-0342.mediawiki>.
+
 ## WIF — Wallet Import Format
 
 Pre-BIP encoding of private keys (Base58Check).

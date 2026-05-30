@@ -1,0 +1,139 @@
+.\" Manpage for bitcoin-bip340(1) — Schnorr signatures (BIP-340).
+.TH BITCOIN-BIP340 1 "2026-05-28" "bitcoin 1.26.0" "User Commands"
+
+.SH NAME
+bitcoin\-bip340 \- Schnorr signatures over secp256k1 (BIP-340)
+
+.SH SYNOPSIS
+.B bitcoin bip340 pubkey
+.I sk-hex
+.br
+.B bitcoin bip340 sign
+.I sk-hex
+.I msg-hex
+.RI [ aux-hex ]
+.br
+.B bitcoin bip340 verify
+.I px-hex
+.I msg-hex
+.I sig-hex
+.br
+.B bitcoin bip340 tagged-hash
+.I tag
+.I msg-hex
+.br
+.B bitcoin bip340 help
+
+.SH DESCRIPTION
+.B bitcoin bip340
+implements BIP-340 Schnorr signatures over secp256k1: deterministic
+nonces (with optional auxiliary randomness), x-only public keys,
+64-byte signatures, and the
+.BR tagged_hash
+helper that BIP-340, BIP-341 and BIP-342 all depend on.
+
+The plugin is self-contained: it carries its own affine secp256k1
+arithmetic (modinv via Fermat's little theorem using
+.BR dc 's
+.B |
+operator) rather than sharing code with
+.BR bitcoin-bip32 (1).
+Per the repo's no-shared-library convention (CLAUDE.md \(sc 4 / \(sc 5)
+each BIP plugin owns its primitives so each is BIP-faithful in
+isolation.
+
+.SH OPTIONS
+This plugin takes no top-level options. Each subcommand consumes its
+arguments positionally; see
+.B SUBCOMMANDS
+below.
+
+.SH SUBCOMMANDS
+.TP
+.BI "pubkey " "sk-hex"
+Print the 32-byte x-only public key for the given 32-byte secret key.
+.TP
+.BI "sign " "sk-hex msg-hex " [ aux-hex ]
+Produce a 64-byte Schnorr signature over
+.I msg-hex
+with secret key
+.IR sk-hex .
+The optional
+.I aux-hex
+defaults to 32 zero bytes; the algorithm is deterministic given the
+same inputs.
+.TP
+.BI "verify " "px-hex msg-hex sig-hex"
+Verify a signature. Prints
+.B TRUE
+on success and exits 0; prints
+.B FALSE
+and exits 1 on any failure (out-of-range field elements, pubkey not
+on the curve, R = infinity, x mismatch, odd y on R).
+.TP
+.BI "tagged-hash " "tag msg-hex"
+Print
+.BR "sha256(sha256(tag) || sha256(tag) || msg)" ,
+the BIP-340 tagged hash primitive. Used by callers (e.g.
+.BR bitcoin-bip341 (1))
+for the
+.BR TapTweak ,
+.BR BIP0340/challenge
+and
+.BR BIP0340/nonce
+tags.
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Verify returned FALSE.
+.TP
+.B 2
+Missing argument or unknown subcommand.
+
+.SH PERFORMANCE
+The affine engine inverts a 256-bit field element at every step,
+which is correct but slow (each scalar mult \(ap 10 s, sign \(ap 22 s,
+verify \(ap 22 s). A Jacobian-coordinate fast-path that does one
+inversion per scalar mult is a tracked follow-up.
+
+.SH FILES
+.TP
+.IB share/doc/bitcoin/bips/bip-0340.mediawiki
+Local copy of BIP-340 (pinned commit recorded in
+.IB UPSTREAM.txt
+alongside).
+
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+If set, emit
+.B debug -
+trace lines to stderr.
+.TP
+.B SELF_QUIET
+If set, suppress informational
+.B info -
+lines.
+.TP
+.B SELF_LIBEXEC
+Inherited from
+.BR bitcoin (1);
+the parent dispatcher resolves this plugin via
+.IB $SELF_LIBEXEC /bitcoin/bip340 .
+
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip341 (1),
+.BR bitcoin-bip32 (1)
+
+.SH STANDARDS
+BIP-340 \(em Schnorr Signatures for secp256k1:
+<https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki>.
+
+.SH HISTORY
+Introduced in bitcoin 1.26.0 (FEAT-007). Affine engine; Jacobian
+fast-path follows.

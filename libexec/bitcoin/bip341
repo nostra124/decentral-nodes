@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+#
+# libexec/bitcoin/bip341 — Taproot output-key tweak and P2TR address.
+#
+# Self-contained per CLAUDE.md §4 / §5: this plugin owns its own
+# secp256k1 affine arithmetic (intentionally duplicated from
+# libexec/bitcoin/bip340 — each BIP plugin is BIP-faithful in
+# isolation). Bech32m encoding is delegated to libexec/bitcoin/bip350.
+#
+# Implements:
+#   tweak  <internal-x> [<merkle-root>]   →  tweaked output x-only key
+#   address <internal-x> [--testnet|--regtest]  →  bc1p… / tb1p… / bcrt1p…
+#
+# Key-path only (BIP-86 derivation): pass no merkle root and the tweak is
+# tagged_hash("TapTweak", internal_x).
+
+[ -n "$SELF_DEBUG" ] && set -vx
+SELF=$(basename "$0"); VERSION='0.1'
+die()   { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { [ -z "$SELF_QUIET" ] && echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+declare -r BIP341_P=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+declare -r BIP341_N=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+declare -r BIP341_GX=79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+declare -r BIP341_GY=483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+
+ec_double() {
+	dc -e "16o16i $BIP341_P sp $1 sX $2 sY [lp + lp %]sN
+		lX lX * lp % 3 * lp %                  sA
+		lY 2 * lp % lp 2 - lp |                sB
+		lA lB * lp %                           sL
+		lL lL * lp % lX 2 * lp % - lNx         sT
+		lX lT - lNx lL * lp % lY - lNx         sW
+		lT n 20aP lW p"
+}
+ec_add() {
+	dc -e "16o16i $BIP341_P sp $1 sX $2 sY $3 sU $4 sV [lp + lp %]sN
+		lV lY - lNx                            sA
+		lU lX - lNx lp 2 - lp |                sB
+		lA lB * lp %                           sL
+		lL lL * lp % lX - lNx lU - lNx         sT
+		lX lT - lNx lL * lp % lY - lNx         sS
+		lT n 20aP lS p"
+}
+pt_add() {
+	local x1=$1 y1=$2 x2=$3 y2=$4
+	[ "$x1" = INF ] && { echo "$x2 $y2"; return; }
+	[ "$x2" = INF ] && { echo "$x1 $y1"; return; }
+	if [ "$x1" = "$x2" ]; then
+		if [ "$y1" = "$y2" ]; then ec_double "$x1" "$y1"; else echo "INF "; fi
+	else ec_add "$x1" "$y1" "$x2" "$y2"; fi
+}
+ec_mul() {
+	local k="${1^^}" cx="${2^^}" cy="${3^^}" rx=INF ry="" bits i b
+	bits=$(dc -e "16i $k [d 2 % n 2 / d 0 <L] d sL x")
+	for ((i=0; i<${#bits}; i++)); do
+		b=${bits:i:1}
+		[ "$b" = 1 ] && read rx ry < <(pt_add "$rx" "$ry" "$cx" "$cy")
+		[ $((i+1)) -lt ${#bits} ] && read cx cy < <(ec_double "$cx" "$cy")
+	done
+	echo "$rx $ry"
+}
+lift_x() {
+	local x="${1^^}" yc par chk c
+	c=$(dc  -e "16o16i $BIP341_P sp $x sX lX lX * lp % lX * lp % 7 + lp % p")
+	yc=$(dc -e "16o16i $BIP341_P sp $c lp 1 + 4 / lp | p")
+	chk=$(dc -e "16o16i $BIP341_P sp $yc sY lY lY * lp % p")
+	[ "$chk" = "$c" ] || { echo ""; return; }
+	par=$(dc -e "16i $yc 2 % p")
+	[ "$par" = "1" ] && yc=$(dc -e "16o16i $BIP341_P $yc - p")
+	echo "$x $yc"
+}
+
+_pad64() { local h="${1^^}"; while [ ${#h} -lt 64 ]; do h="0$h"; done; echo "$h"; }
+_tagged_hash() {
+	local thb
+	thb=$(printf '%s' "$1" | openssl dgst -sha256 -binary | xxd -p -c64)
+	printf '%s%s%s' "$thb" "$thb" "$2" \
+		| xxd -r -p | openssl dgst -sha256 -binary | xxd -p -c64 | tr a-f A-F
+}
+
+# Convert a hex string (bytes) into space-separated 5-bit values
+# per the convert_bits(8, 5) algorithm in BIP-173 §Specification.
+_hex_to_5bit() {
+	local hex="${1^^}" acc=0 bits=0 out="" i b v
+	for ((i=0; i<${#hex}; i+=2)); do
+		b=$((16#${hex:i:2}))
+		acc=$(( (acc << 8) | b ))
+		bits=$((bits + 8))
+		while (( bits >= 5 )); do
+			bits=$((bits - 5))
+			v=$(( (acc >> bits) & 31 ))
+			out+=" $v"
+		done
+	done
+	if (( bits > 0 )); then
+		v=$(( (acc << (5 - bits)) & 31 ))
+		out+=" $v"
+	fi
+	echo "$out"
+}
+
+# Q = lift_x(internal_x) + t·G   where t = tagged_hash("TapTweak", internal_x || merkle).
+# Output: Q.x as 64 hex. For BIP-86 (no scripts) pass empty merkle.
+command:tweak() {
+	[ $# -ge 1 ] || { error "tweak: usage: tweak <internal-x-hex> [<merkle-root-hex>]"; return 2; }
+	local ix="${1^^}" merkle="${2:-}"
+	merkle="${merkle^^}"
+	[ ${#ix} -eq 64 ] || { error "tweak: internal-x must be 32 bytes (64 hex), got ${#ix}"; return 3; }
+	local t tG_x tG_y Px Py Qx Qy
+	t=$(_tagged_hash "TapTweak" "${ix}${merkle}")
+	# t mod n
+	t=$(dc -e "16o16i $BIP341_N sp $t lp % p")
+	read Px Py < <(lift_x "$ix")
+	[ -n "$Py" ] || { error "tweak: internal-x is not on the curve"; return 4; }
+	read tG_x tG_y < <(ec_mul "$t" "$BIP341_GX" "$BIP341_GY")
+	read Qx Qy    < <(pt_add  "$Px" "$Py" "$tG_x" "$tG_y")
+	[ "$Qx" = INF ] && { error "tweak: result is the point at infinity"; return 5; }
+	_pad64 "$Qx"
+}
+
+command:address() {
+	local hrp=bc ix=""
+	while (( $# )); do
+		case "$1" in
+			--testnet) hrp=tb; shift ;;
+			--regtest) hrp=bcrt; shift ;;
+			--mainnet) hrp=bc;  shift ;;
+			--*) error "address: unknown flag '$1'"; return 2 ;;
+			*) if [ -z "$ix" ]; then ix="$1"; else error "address: unexpected arg '$1'"; return 2; fi; shift ;;
+		esac
+	done
+	[ -n "$ix" ] || { error "address: usage: address <internal-x-hex> [--testnet|--regtest]"; return 2; }
+	local Qx vals libexec
+	Qx=$(command:tweak "$ix") || return $?
+	vals=$(_hex_to_5bit "$Qx")     # 52 five-bit values from 32 bytes
+	libexec="${SELF_LIBEXEC:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
+	"$libexec/bitcoin/bip350" encode-values "$hrp" 1 $vals
+}
+
+command:help() {
+	cat <<-ENDHELP
+	Usage: $SELF <subcommand> [args]
+
+	  tweak <internal-x-hex> [<merkle-root-hex>]
+	        Compute the BIP-341 tweaked output key: Q = P + t·G
+	        where t = tagged_hash("TapTweak", internal_x || merkle).
+	        Pass no <merkle-root> for the BIP-86 key-path-only case.
+	  address <internal-x-hex> [--testnet|--regtest|--mainnet]
+	        Render the P2TR address (bech32m, witness version 1).
+
+	Implements BIP-341 (Taproot output-key derivation). bech32m encoding
+	is delegated to libexec/bitcoin/bip350.
+	ENDHELP
+}
+command:version() { echo "$VERSION"; }
+
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+	tweak|address|help|version) "command:$cmd" "$@" ;;
+	*) error "unknown subcommand '$cmd' (expected: tweak, address, help)"; exit 2 ;;
+esac

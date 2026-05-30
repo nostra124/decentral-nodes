@@ -51,7 +51,7 @@ COMMAND_VERBS="wallet tx utxo tax price backend descriptor"
 # bip174 added in 1.23.0 (FEAT-035 Stream D).
 # mnemonic-to-seed shim removed in 1.24.0 (FEAT-035 alias-removal
 # sweep) — canonical is `bitcoin bip39 mnemonic-to-seed`.
-LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip350 bip380 daemon wif"
+LIBEXEC_VERBS="bip13 bip32 bip39 bip173 bip174 bip340 bip341 bip350 bip380 daemon wif"
 
 # Deprecated aliases that ship a `.so`-include man page pointing
 # at their canonical replacement (FEAT-041 alias convention).
@@ -117,6 +117,14 @@ assert_sections() {
 
 @test "bitcoin-bip174.1 has all required sections" {
 	assert_sections "$MAN_DIR/bitcoin-bip174.1"
+}
+
+@test "bitcoin-bip340.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-bip340.1"
+}
+
+@test "bitcoin-bip341.1 has all required sections" {
+	assert_sections "$MAN_DIR/bitcoin-bip341.1"
 }
 
 @test "bitcoin-bip380.1 has all required sections" {

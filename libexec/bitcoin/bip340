@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+#
+# libexec/bitcoin/bip340 — Schnorr signatures (BIP-340).
+#
+# Self-contained per CLAUDE.md §4 / §5: this plugin owns its own
+# secp256k1 affine arithmetic (modinv via Fermat using dc's `|`
+# modexp operator). The point arithmetic is intentionally NOT
+# shared with libexec/bitcoin/bip32 — each plugin reimplements its
+# primitives so each is BIP-faithful in isolation.
+#
+# Performance note: the affine engine inverts at every step, which
+# is correct but slow (each 256-bit scalar mult ≈ 10 s). A future
+# Jacobian-coordinate engine (one inversion per scalar mult) is a
+# tracked follow-up.
+
+[ -n "$SELF_DEBUG" ] && set -vx
+SELF=$(basename "$0"); VERSION='0.1'
+die()   { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { [ -z "$SELF_QUIET" ] && echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+# secp256k1 curve parameters (BIP-340 §Specification).
+declare -r BIP340_P=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+declare -r BIP340_N=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+declare -r BIP340_GX=79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+declare -r BIP340_GY=483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+
+# ---------------------------------------------------------------------------
+# Affine secp256k1: ec_double, ec_add, ec_mul, lift_x. Validated against
+# G-multiples produced by an independent reference and against the official
+# BIP-340 test vectors (see tests/vectors/bip-0340.t).
+# ---------------------------------------------------------------------------
+ec_double() {
+	dc -e "16o16i $BIP340_P sp $1 sX $2 sY [lp + lp %]sN
+		lX lX * lp % 3 * lp %                  sA
+		lY 2 * lp % lp 2 - lp |                sB
+		lA lB * lp %                           sL
+		lL lL * lp % lX 2 * lp % - lNx         sT
+		lX lT - lNx lL * lp % lY - lNx         sW
+		lT n 20aP lW p"
+}
+ec_add() {
+	dc -e "16o16i $BIP340_P sp $1 sX $2 sY $3 sU $4 sV [lp + lp %]sN
+		lV lY - lNx                            sA
+		lU lX - lNx lp 2 - lp |                sB
+		lA lB * lp %                           sL
+		lL lL * lp % lX - lNx lU - lNx         sT
+		lX lT - lNx lL * lp % lY - lNx         sS
+		lT n 20aP lS p"
+}
+pt_add() {  # infinity-aware. Either operand may be "INF".
+	local x1=$1 y1=$2 x2=$3 y2=$4
+	[ "$x1" = INF ] && { echo "$x2 $y2"; return; }
+	[ "$x2" = INF ] && { echo "$x1 $y1"; return; }
+	if [ "$x1" = "$x2" ]; then
+		if [ "$y1" = "$y2" ]; then ec_double "$x1" "$y1"; else echo "INF "; fi
+	else ec_add "$x1" "$y1" "$x2" "$y2"; fi
+}
+ec_mul() {  # k(hex) px py -> "Rx Ry" or "INF "
+	local k="${1^^}" cx="${2^^}" cy="${3^^}" rx=INF ry="" bits i b
+	bits=$(dc -e "16i $k [d 2 % n 2 / d 0 <L] d sL x")   # LSB-first 0/1 chars
+	for ((i=0; i<${#bits}; i++)); do
+		b=${bits:i:1}
+		[ "$b" = 1 ] && read rx ry < <(pt_add "$rx" "$ry" "$cx" "$cy")
+		[ $((i+1)) -lt ${#bits} ] && read cx cy < <(ec_double "$cx" "$cy")
+	done
+	echo "$rx $ry"
+}
+lift_x() {  # x(hex) -> "x y" with even y, or "" if x not on curve
+	local x="${1^^}" yc par chk c
+	c=$(dc  -e "16o16i $BIP340_P sp $x sX lX lX * lp % lX * lp % 7 + lp % p")
+	yc=$(dc -e "16o16i $BIP340_P sp $c lp 1 + 4 / lp | p")
+	chk=$(dc -e "16o16i $BIP340_P sp $yc sY lY lY * lp % p")
+	[ "$chk" = "$c" ] || { echo ""; return; }
+	par=$(dc -e "16i $yc 2 % p")
+	[ "$par" = "1" ] && yc=$(dc -e "16o16i $BIP340_P $yc - p")
+	echo "$x $yc"
+}
+
+# ---------------------------------------------------------------------------
+# BIP-340 helpers (tagged hashes, padding, XOR).
+# ---------------------------------------------------------------------------
+_pad64() { local h="${1^^}"; while [ ${#h} -lt 64 ]; do h="0$h"; done; echo "$h"; }
+_xor32() { local a="${1^^}" b="${2^^}" o="" i
+	for ((i=0; i<64; i+=2)); do o+=$(printf '%02X' $(( 0x${a:i:2} ^ 0x${b:i:2} ))); done
+	echo "$o"
+}
+# tagged_hash(tag, msg_hex) per BIP-340 §Specification:
+#   sha256( sha256(tag) || sha256(tag) || msg )
+_tagged_hash() {
+	local thb
+	thb=$(printf '%s' "$1" | openssl dgst -sha256 -binary | xxd -p -c64)
+	printf '%s%s%s' "$thb" "$thb" "$2" \
+		| xxd -r -p | openssl dgst -sha256 -binary | xxd -p -c64 | tr a-f A-F
+}
+
+# ---------------------------------------------------------------------------
+# BIP-340 sign / verify / pubkey.
+# ---------------------------------------------------------------------------
+_schnorr_pub() { ec_mul "$1" "$BIP340_GX" "$BIP340_GY"; }
+
+command:pubkey() {  # sk(hex) -> x-only pubkey (64 hex)
+	[ $# -ge 1 ] || { error "pubkey: usage: pubkey <sk-hex>"; return 2; }
+	local sk="${1^^}" Px Py
+	[ ${#sk} -le 64 ] || { error "pubkey: sk too long"; return 3; }
+	read Px Py < <(_schnorr_pub "$sk")
+	_pad64 "$Px"
+}
+
+command:tagged-hash() {  # tag msg-hex -> 64 hex
+	[ $# -ge 2 ] || { error "tagged-hash: usage: tagged-hash <tag> <msg-hex>"; return 2; }
+	_tagged_hash "$1" "$2"
+}
+
+command:sign() {  # sk msg [aux] -> 128-hex sig
+	[ $# -ge 2 ] || { error "sign: usage: sign <sk-hex> <msg-hex> [<aux-hex>]"; return 2; }
+	local sk="${1^^}" msg="${2^^}" aux="${3:-0000000000000000000000000000000000000000000000000000000000000000}"
+	aux="${aux^^}"
+	local Px Py d dpar t auxh rand kp Rx Ry rpar k e sval
+	read Px Py < <(_schnorr_pub "$sk")
+	[ -n "$Py" ] || { error "sign: scalar mult failed"; return 4; }
+	dpar=$(dc -e "16i $Py 2 % p")
+	if [ "$dpar" = 0 ]; then d="$sk"; else d=$(dc -e "16o16i $BIP340_N $sk - p"); fi
+	auxh=$(_tagged_hash "BIP0340/aux" "$aux")
+	t=$(_xor32 "$(_pad64 "$d")" "$auxh")
+	rand=$(_tagged_hash "BIP0340/nonce" "$t$(_pad64 "$Px")$msg")
+	kp=$(dc -e "16o16i $BIP340_N sp $rand lp % p")
+	read Rx Ry < <(_schnorr_pub "$kp")
+	rpar=$(dc -e "16i $Ry 2 % p")
+	if [ "$rpar" = 0 ]; then k="$kp"; else k=$(dc -e "16o16i $BIP340_N $kp - p"); fi
+	e=$(dc -e "16o16i $BIP340_N sp $(_tagged_hash "BIP0340/challenge" "$(_pad64 "$Rx")$(_pad64 "$Px")$msg") lp % p")
+	sval=$(dc -e "16o16i $BIP340_N sp $k $e $d * lp % + lp % p")
+	printf '%s%s\n' "$(_pad64 "$Rx")" "$(_pad64 "$sval")"
+}
+
+command:verify() {  # px msg sig -> prints "TRUE" or "FALSE" and sets exit 0/1
+	[ $# -ge 3 ] || { error "verify: usage: verify <px-hex> <msg-hex> <sig-hex>"; return 2; }
+	local px="${1^^}" msg="${2^^}" sig="${3^^}"
+	local out=FALSE
+	if [ ${#sig} -eq 128 ]; then
+		local r="${sig:0:64}" s="${sig:64:64}" Px Py c chk e ne SGx SGy EPx EPy Rx Ry ypar
+		if [[ "$r" < "$BIP340_P" ]] && [[ "$s" < "$BIP340_N" ]] && [[ "$px" < "$BIP340_P" ]]; then
+			read Px Py < <(lift_x "$px")
+			if [ -n "$Py" ]; then
+				e=$(dc -e "16o16i $BIP340_N sp $(_tagged_hash "BIP0340/challenge" "$r$(_pad64 "$px")$msg") lp % p")
+				ne=$(dc -e "16o16i $BIP340_N $e - p")
+				read SGx SGy < <(ec_mul "$s"  "$BIP340_GX" "$BIP340_GY")
+				read EPx EPy < <(ec_mul "$ne" "$Px"        "$Py")
+				read Rx Ry   < <(pt_add  "$SGx" "$SGy" "$EPx" "$EPy")
+				if [ "$Rx" != INF ]; then
+					ypar=$(dc -e "16i $Ry 2 % p")
+					[ "$ypar" = 0 ] && [ "$(_pad64 "$Rx")" = "$r" ] && out=TRUE
+				fi
+			fi
+		fi
+	fi
+	echo "$out"
+	[ "$out" = TRUE ]
+}
+
+command:help() {
+	cat <<-ENDHELP
+	Usage: $SELF <subcommand> [args]
+
+	  pubkey <sk-hex>                        x-only public key for <sk>
+	  sign <sk-hex> <msg-hex> [<aux-hex>]    64-byte Schnorr signature (BIP-340)
+	  verify <px-hex> <msg-hex> <sig-hex>    prints TRUE/FALSE, exit 0/1
+	  tagged-hash <tag> <msg-hex>            BIP-340 tagged hash
+
+	Implements BIP-340 Schnorr signatures over secp256k1. Vectors:
+	  share/doc/bitcoin/standards/bip-0340.mediawiki (if vendored)
+	  tests/vectors/bip-0340.t
+
+	Performance: the affine engine is unoptimized (~10s per scalar mult).
+	A Jacobian-coordinate fast-path is a tracked follow-up.
+	ENDHELP
+}
+
+command:version() { echo "$VERSION"; }
+
+# Dispatch
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+	sign|verify|pubkey|tagged-hash|help|version)
+		"command:$cmd" "$@" ;;
+	*)
+		error "unknown subcommand '$cmd' (expected: sign, verify, pubkey, tagged-hash, help)"
+		exit 2 ;;
+esac
