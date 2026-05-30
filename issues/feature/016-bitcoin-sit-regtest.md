@@ -3,7 +3,7 @@ id: FEAT-016
 type: feature
 priority: medium
 status: open
-milestone: 1.28.0
+milestone: 1.29.0
 ---
 
 # SIT: end-to-end receive→spend against regtest bitcoind
