@@ -141,7 +141,7 @@ check-vectors:
 
 check-sit:
 	@if command -v podman >/dev/null 2>&1; then \
-		echo "==> SIT: see tests/sit/README.md"; \
+		bats tests/sit/suites/; \
 	else echo "podman not installed; soft-skipping SIT"; fi
 
 check-pit:

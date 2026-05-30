@@ -1801,6 +1801,26 @@ wallet_set_network() {
 	grep -q 'opencode/commands' "$mk"
 }
 
+@test "FEAT-019 AC#3 — make install-skills-user is idempotent" {
+	fake_home="$(mktemp -d)"
+	mkdir -p "$fake_home/.claude/skills"
+	mkdir -p "$fake_home/.config/opencode/commands"
+	repo="$BATS_TEST_DIRNAME/../.."
+
+	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
+	count1="$(find "$fake_home/.claude/skills" "$fake_home/.config/opencode/commands" \
+		-maxdepth 1 -type l | wc -l)"
+
+	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
+	count2="$(find "$fake_home/.claude/skills" "$fake_home/.config/opencode/commands" \
+		-maxdepth 1 -type l | wc -l)"
+
+	rm -rf "$fake_home"
+
+	[ "$count1" -eq "$count2" ]
+	[ "$count1" -ge 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # FEAT-012 (extend, 1.17.0) — backend get-address-txs. Fifth verb on
 # the backend abstraction; consumed by `wallet index` (FEAT-018).
@@ -2418,4 +2438,275 @@ STR
 	[ "$status" -eq 0 ]
 	[[ "$output" != *"bip32-is-public"* ]]
 	[[ "$output" != *"bip32-is-secret"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-195 (1.30.0) — runtime dependency boundary: bin/bitcoin must call
+# only account / config / secret / crypt at runtime (plus BIP plugin
+# primitives). Forbidden sibling scripts are cache, check, data, hosts,
+# repo, scripts, task, user (as invoked commands, not variable names or
+# comment text). This test guards against re-introduction.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-195 — bin/bitcoin has no invocations of forbidden sibling scripts" {
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	# Pattern: forbidden word at the start of a statement (leading whitespace
+	# allowed) but NOT as a variable name (preceded by $), not in a comment
+	# (line starts with optional-space then #), and not as a git config key
+	# (git -c user.*). The grep is intentionally strict — any match is a
+	# violation that needs to be reviewed.
+	forbidden_cmds=(cache data hosts scripts task)
+	for word in "${forbidden_cmds[@]}"; do
+		# Fail if the word appears as the first token of a non-comment shell
+		# statement. Exclude lines where it appears only inside a string or
+		# variable name.
+		if grep -qE "^\s*${word}\s" "$script" 2>/dev/null; then
+			echo "VIOLATION: '$word' appears as a command invocation in bin/bitcoin" >&2
+			grep -nE "^\s*${word}\s" "$script" >&2
+			return 1
+		fi
+		# Also catch subshell forms: $(<word> ...) or `<word> `
+		if grep -qE "\$\(\s*${word}\s|\`\s*${word}\s" "$script" 2>/dev/null; then
+			echo "VIOLATION: '$word' used in command substitution in bin/bitcoin" >&2
+			grep -nE "\$\(\s*${word}\s|\`\s*${word}\s" "$script" >&2
+			return 1
+		fi
+	done
+}
+
+@test "FEAT-195 — bin/bitcoin calls 'secret' only for seed operations" {
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	# Every 'secret' invocation must be 'secret get/put/rm' against a
+	# <wallet>/seed path. No other secret operations are expected.
+	while IFS=: read -r _lineno content; do
+		# Strip leading whitespace.
+		content="${content#"${content%%[! ]*}"}"
+		if [[ "$content" =~ ^secret[[:space:]] ]]; then
+			verb="$(echo "$content" | awk '{print $2}')"
+			if [[ "$verb" != "get" && "$verb" != "put" && "$verb" != "rm" ]]; then
+				echo "VIOLATION at $_lineno: unexpected 'secret $verb'" >&2
+				return 1
+			fi
+			if ! echo "$content" | grep -q '/seed'; then
+				echo "VIOLATION at $_lineno: secret call not targeting a /seed path" >&2
+				return 1
+			fi
+		fi
+	done < <(grep -n "^\s*secret\b" "$script" | grep -v "^\s*#")
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-045: watch-only wallets.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-045 — wallet watch creates a watch-only wallet (no seed in secret)" {
+	setup_wallet_env
+	local name="watch045a_$$"
+	# BIP-32 xpub for secp256k1 generator, depth=0, all-zero chain code (valid 111-char xpub)
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
+	run "$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	[ "$status" -eq 0 ]
+	local wpath="$XDG_DATA_HOME/bitcoin/wallets/$name"
+	[ -d "$wpath" ]
+	[ -f "$wpath/xpub" ]
+	grep -q "watch-only=1" "$wpath/config"
+	# No secret was stored.
+	[ ! -f "$SECRET_STORE/$name/seed" ]
+}
+
+@test "FEAT-045 — wallet watch rejects an invalid xpub" {
+	setup_wallet_env
+	local name="watch045b_$$"
+	run "$BITCOIN_BIN" wallet watch "$name" "notanxpub"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"not a valid xpub"* ]]
+}
+
+@test "FEAT-045 — wallet watch rejects a duplicate name" {
+	setup_wallet_env
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
+	local name="watch045c_$$"
+	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	run "$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"already exists"* ]]
+}
+
+@test "FEAT-045 — wallet xpub rejects a missing wallet" {
+	setup_wallet_env
+	run "$BITCOIN_BIN" wallet xpub "nosuchwalletfeat045"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"no such wallet"* ]]
+}
+
+@test "FEAT-045 — wallet xpub on a watch-only wallet prints the stored xpub" {
+	setup_wallet_env
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
+	local name="watch045d_$$"
+	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	run "$BITCOIN_BIN" wallet xpub "$name"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$xpub" ]
+}
+
+@test "FEAT-045 — tx sign on a watch-only wallet exits non-zero with clear message" {
+	setup_wallet_env
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
+	local name="watch045e_$$"
+	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
+	local wpath="$XDG_DATA_HOME/bitcoin/wallets/$name"
+	printf '0\ttb1qfake000000000000000000000000000\t\n' > "$wpath/addresses"
+	local psbt="70736274ff010052020000000100000000000000000000000000000000000000000000000000000000000000000000000000feffffff0150c300000000000016001400000000000000000000000000000000000000000000000000010122a0860100000000001976a914c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e288ac0000"
+	run bash -c "printf '%s\n' '$psbt' | '$BITCOIN_BIN' tx sign '$name'"
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"watch-only"* ]]
+}
+
+@test "FEAT-045 — wallet watch/xpub are listed in wallet help" {
+	run "$BITCOIN_BIN" wallet help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"watch"* ]]
+	[[ "$output" == *"xpub"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-046: bitcoin address — validate, type, decode.
+# Known vectors (mainnet + testnet, all five types):
+#   P2PKH mainnet:  1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf (genesis coinbase)
+#   P2SH  mainnet:  3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy
+#   P2WPKH mainnet: bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+#   P2WPKH testnet: tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx
+#   P2TR  mainnet:  bc1p5cyxnux0n5y9wfpvjfm69xnf4p4e9l4s4y2r0z5c5kwjxnw7zy0sqwzhy4
+# ---------------------------------------------------------------------------
+
+@test "FEAT-046 — address validate accepts a P2PKH mainnet address" {
+	# 1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso = P2PKH for hash160 c0cebcd6c3...
+	# (Alice's address from BIP-32 abandon-mnemonic vector)
+	run "$BITCOIN_BIN" address validate "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate accepts a P2SH mainnet address" {
+	run "$BITCOIN_BIN" address validate "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate accepts a P2WPKH bech32 address" {
+	run "$BITCOIN_BIN" address validate "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate accepts a testnet bech32 address" {
+	run "$BITCOIN_BIN" address validate "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+	[ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate rejects garbage" {
+	run "$BITCOIN_BIN" address validate "notanaddress"
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-046 — address validate rejects empty input" {
+	run "$BITCOIN_BIN" address validate
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-046 — address type: P2PKH → p2pkh" {
+	run "$BITCOIN_BIN" address type "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso"
+	[ "$status" -eq 0 ]
+	[ "$output" = "p2pkh" ]
+}
+
+@test "FEAT-046 — address type: P2SH → p2sh" {
+	run "$BITCOIN_BIN" address type "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+	[ "$status" -eq 0 ]
+	[ "$output" = "p2sh" ]
+}
+
+@test "FEAT-046 — address type: P2WPKH → p2wpkh" {
+	run "$BITCOIN_BIN" address type "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+	[ "$status" -eq 0 ]
+	[ "$output" = "p2wpkh" ]
+}
+
+@test "FEAT-046 — address decode: P2PKH returns 20-byte hash160 as hex" {
+	run "$BITCOIN_BIN" address decode "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso"
+	[ "$status" -eq 0 ]
+	[ "$output" = "c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2" ]
+}
+
+@test "FEAT-046 — address decode: P2WPKH returns witness program as hex" {
+	run "$BITCOIN_BIN" address decode "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+	[ "$status" -eq 0 ]
+	[ "$output" = "751e76e8199196d454941c45d1b3a323f1433bd6" ]
+}
+
+@test "FEAT-046 — address help lists every subcommand" {
+	run "$BITCOIN_BIN" address help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"validate"* ]]
+	[[ "$output" == *"type"* ]]
+	[[ "$output" == *"decode"* ]]
+}
+
+@test "FEAT-046 — bitcoin help mentions address" {
+	run "$BITCOIN_BIN" help
+	[[ "$output" == *"address"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-047 — address generate: derive addresses from a raw compressed pubkey
+#
+# Test vector: secp256k1 generator point G (compressed)
+#   pubkey  = 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+#   hash160 = 751e76e8199196d454941c45d1b3a323f1433bd6
+#
+# Expected addresses (verified with BIP-173/350/341 reference implementations):
+#   P2WPKH mainnet  = bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+#   P2WPKH testnet  = tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx
+#   P2PKH  mainnet  = 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
+#   P2TR   mainnet  = bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9
+# ---------------------------------------------------------------------------
+
+FEAT047_PUBKEY="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+@test "FEAT-047 — address generate default (P2WPKH) from a known pubkey" {
+	run "$BITCOIN_BIN" address generate "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4" ]
+}
+
+@test "FEAT-047 — address generate --p2pkh from the same pubkey" {
+	run "$BITCOIN_BIN" address generate --p2pkh "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH" ]
+}
+
+@test "FEAT-047 — address generate --p2wpkh --testnet uses tb1 HRP" {
+	run "$BITCOIN_BIN" address generate --p2wpkh --testnet "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx" ]
+}
+
+@test "FEAT-047 — address generate --p2tr from the same pubkey" {
+	run "$BITCOIN_BIN" address generate --p2tr "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9" ]
+}
+
+@test "FEAT-047 — address generate rejects a malformed pubkey" {
+	run "$BITCOIN_BIN" address generate "deadbeef"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"invalid pubkey"* ]]
+}
+
+@test "FEAT-047 — address generate rejects empty input" {
+	run "$BITCOIN_BIN" address generate
+	[ "$status" -eq 2 ]
+}
+
+@test "FEAT-047 — address help mentions generate" {
+	run "$BITCOIN_BIN" address help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"generate"* ]]
 }

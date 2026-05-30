@@ -1,0 +1,77 @@
+# `bitcoin` — developer notes
+
+> Eight-section foundation template (FEAT-193 / FEAT-195).
+> Copy to `CLAUDE.md` when initialising a standalone `bitcoin` repo.
+> Fill in the `<...>` placeholders; delete this header line.
+
+## 1. Scope
+
+`bitcoin` is the educational Bitcoin frontend. Its scope is the BIP
+plugins (BIP 13/32/39/173, WIF, the daemon abstraction) plus a wallet
+surface.
+
+Out of scope: lightning (that's `lightning`); on-chain
+transaction-history indexing for the whole network (out of scope for
+an educational tool).
+
+## 2. Repo conventions
+
+Standard rpk per-package: `bin/bitcoin` dispatcher plus libexec lookup
+for BIP plugins. Each plugin under `libexec/bitcoin/<bip>` cites the
+BIP it implements.
+
+Educational package: vendors BIP source documents under
+`share/doc/bitcoin/standards/` and ships a walkthrough at
+`docs/bitcoin-walkthrough.md`.
+
+The wallet model: **seed phrase lives in `secret`, not in `bitcoin`**.
+Wallet verbs read the seed via `secret get <wallet>/seed` on demand.
+
+## 3. Issue authoring
+
+Bugs come before features at the same priority level.
+
+Bug workflow is test-driven: every fix lands with a regression test
+that demonstrably failed against the broken code first.
+
+Feature workflow is acceptance-criteria-driven: every feature lands
+with the tests its acceptance criteria imply.
+
+## 4. The no-shared-lib policy
+
+`bitcoin` calls only `account`, `config`, `secret`, and `crypt` at
+runtime. BIP plugins call only their primitives (openssl for hashing,
+awk for encoding, dc for arithmetic, xxd for hex I/O); never a shared
+crypto-helpers library.
+
+The dependency boundary is enforced by `tests/unit/bitcoin.bats`
+(FEAT-195); any re-introduction of forbidden sibling calls fails CI.
+
+## 5. What is intentionally duplicated
+
+- **Base58 / Bech32 encoding** could be shared with `crypt` but is
+  reimplemented per plugin so each is self-contained.
+- **HD-derivation logic** is in BIP-32 only; BIP-44/49/84 inherit by
+  composition, not by importing helpers.
+
+## 6. Consumers
+
+End users running personal wallets; `lightning` for on-chain channel
+opens; cluster integrations that need address derivation.
+
+## 7. Build / install
+
+`./configure && make install`. Stow-based.
+
+Runtime deps (declared in `.rpk/depends/`):
+`account`, `bash`, `config`, `crypt`, `dc`, `git`, `openssl`,
+`rpk`, `secret`, `stow`, `xxd`.
+
+## 8. Versioning
+
+Semver. The single semver string in `VERSION` at the repo root is the
+source of truth; `bin/bitcoin` reads it at runtime and `make install`
+copies it to `$DATADIR/bitcoin/version`.
+
+To bump the version (patch / minor / major release), follow
+`skills/version.md`.

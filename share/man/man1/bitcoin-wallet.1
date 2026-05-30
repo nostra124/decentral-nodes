@@ -60,6 +60,12 @@ bitcoin\-wallet \- create, derive, sign, send, and synchronise wallets
 .I name
 .RI [ remote ]
 .br
+.B bitcoin wallet watch
+.I name xpub
+.br
+.B bitcoin wallet xpub
+.I name
+.br
 .B bitcoin wallet help
 
 .SH OPTIONS
@@ -280,6 +286,24 @@ the wallet (default remote:
 .B git pull --rebase
 the wallet (default remote:
 .BR origin ).
+.TP
+.BI "watch " name " " xpub
+Create a watch-only wallet from an account-level extended public key
+(xpub, at
+.BR m/84h/0h/0h ).
+Derives receive addresses without requiring the seed phrase. Signing
+operations (
+.B tx sign
+,
+.BR wallet send )
+are not possible on watch-only wallets and will exit with a clear
+error (FEAT-045).
+.TP
+.BI "xpub " name
+Print the account-level xpub
+.RB ( m/84h/0h/0h )
+for a regular wallet, suitable for sharing with watch-only setups or
+cosigners (FEAT-045).
 
 .SH EXIT STATUS
 .TP

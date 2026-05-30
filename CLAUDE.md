@@ -22,7 +22,7 @@ plus libexec lookup for BIP plugins. Each plugin under
 Educational package: vendors BIP source documents
 under `share/doc/bitcoin/standards/` (FEAT-017) and
 ships a walkthrough at `docs/bitcoin-walkthrough.md`
-(FEAT-015 partial).
+(FEAT-015, closed 1.29.0).
 
 The wallet model: **seed phrase lives in `secret`,
 not in `bitcoin`**. Wallet verbs read the seed via
@@ -43,10 +43,15 @@ imply. See `skills/features.md`.
 
 ## 4. The no-shared-lib policy
 
-`bitcoin` calls only `account` and `secret` at
-runtime. BIP plugins call only their primitives
-(openssl for hashing, awk for encoding); never a
-shared crypto-helpers library.
+`bitcoin` calls only `account`, `config`, `secret`, and `crypt` at
+runtime. BIP plugins call only their own primitives
+(openssl for hashing, awk for encoding, dc for arithmetic,
+xxd for hex I/O); never a shared crypto-helpers library.
+
+The dependency boundary is enforced by two bats tests in
+`tests/unit/bitcoin.bats` (FEAT-195, closed 1.30.0).
+Forbidden sibling calls (`cache`, `data`, `hosts`, `scripts`, `task`)
+fail CI if re-introduced.
 
 ## 5. What is intentionally duplicated
 

@@ -1,0 +1,135 @@
+.TH BITCOIN-ADDRESS 1 "2026-05-30" "bitcoin 1.33.0" "Bitcoin Tools"
+.SH NAME
+bitcoin\-address \- validate Bitcoin addresses, detect their type, and generate them from a public key
+.SH SYNOPSIS
+.B bitcoin address validate
+.I addr
+.br
+.B bitcoin address type
+.I addr
+.br
+.B bitcoin address decode
+.I addr
+.br
+.B bitcoin address generate
+[\fB\-\-p2wpkh\fR|\fB\-\-p2pkh\fR|\fB\-\-p2tr\fR]
+[\fB\-\-testnet\fR]
+.I pubkey-hex
+.br
+.B bitcoin address help
+.SH OPTIONS
+.B bitcoin address
+takes no top-level flags. Per-subcommand semantics are documented
+under DESCRIPTION below. The dispatcher honors
+.B $SELF_DEBUG
+and
+.B $SELF_QUIET
+inherited from
+.BR bitcoin (1).
+.SH DESCRIPTION
+.B bitcoin address
+provides address validation and introspection across all five Bitcoin
+address types: P2PKH, P2SH, P2WPKH, P2WSH, and P2TR.
+.PP
+Both mainnet and testnet addresses are accepted. For bech32 and bech32m
+addresses the underlying BIP-173 and BIP-350 plugins are used; for
+base58check addresses the BIP-13 base58 decoder is used.
+.SS Subcommands
+.TP
+.BI "validate " addr
+Exit 0 if
+.I addr
+is a well-formed Bitcoin address of a recognised type; exit 1 with an
+error message otherwise. Prints the address on success.
+.TP
+.BI "type " addr
+Print the address type on stdout:
+.IP
+.B p2pkh
+\(em legacy Pay-to-PubKey-Hash (base58check, version byte 0x00 mainnet /
+0x6f testnet)
+.IP
+.B p2sh
+\(em Pay-to-Script-Hash (base58check, version byte 0x05 / 0xc4)
+.IP
+.B p2wpkh
+\(em native segwit v0, 20-byte witness program (bech32 BIP-173)
+.IP
+.B p2wsh
+\(em native segwit v0, 32-byte witness program (bech32 BIP-173)
+.IP
+.B p2tr
+\(em Taproot / segwit v1, 32-byte witness program (bech32m BIP-350)
+.TP
+.BI "decode " addr
+Print the underlying hash or witness program as lowercase hex. For
+P2PKH and P2SH this is the 20-byte hash160; for segwit types it is the
+witness program.
+.TP
+.BI "generate " "[--p2wpkh|--p2pkh|--p2tr] [--testnet] pubkey-hex"
+Derive a Bitcoin address from a 33-byte compressed public key (66 hex
+characters, with a
+.B 02
+or
+.B 03
+prefix byte).
+.IP
+The default address type is
+.B P2WPKH
+(native segwit v0, bech32, BIP-173). Use
+.B \-\-p2pkh
+for legacy base58check, or
+.B \-\-p2tr
+for Taproot (bech32m, BIP-350 / BIP-341).
+.IP
+.B \-\-testnet
+selects the testnet HRP
+.RB ( tb )
+or version byte
+.RB ( 0x6f ).
+.IP
+Exits 2 on usage error (missing or ambiguous argument); exits 1 if the
+public key is not a valid 33-byte compressed point.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Address is invalid or of an unrecognised type.
+.TP
+.B 2
+Usage error (missing argument or unknown subcommand).
+.SH FILES
+.B bitcoin address
+reads no files. The underlying bip173 and bip350 plugins read no
+persistent state.
+.SH ENVIRONMENT
+.TP
+.B SELF_DEBUG
+Enable shell tracing (inherited from
+.BR bitcoin (1)).
+.TP
+.B SELF_QUIET
+Suppress info-level log output (inherited from
+.BR bitcoin (1)).
+.SH STANDARDS
+.TP
+BIP-13
+\(em Base58Check address encoding.
+.TP
+BIP-141 / BIP-173
+\(em Segregated Witness; bech32 P2WPKH / P2WSH addresses.
+.TP
+BIP-341 / BIP-350
+\(em Taproot; bech32m P2TR addresses.
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR bitcoin-bip13 (1),
+.BR bitcoin-bip173 (1),
+.BR bitcoin-bip350 (1),
+.BR bitcoin-bip341 (1)
+.SH HISTORY
+Introduced in bitcoin 1.32.0 (FEAT-046).
+.B generate
+subcommand added in bitcoin 1.33.0 (FEAT-047).
