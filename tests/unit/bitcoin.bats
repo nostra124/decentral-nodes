@@ -1848,6 +1848,14 @@ wallet_set_network() {
 	mkdir -p "$fake_home/.config/opencode/commands"
 	repo="$BATS_TEST_DIRNAME/../.."
 
+	# install-skills-user lives in the *generated* Makefile (a build
+	# artefact, .gitignored). The unit-CI job runs bats against an
+	# unconfigured tree, so skip cleanly there — the same contract the
+	# `skip mandoc` and check-vectors paths use (skills/testing.md: a
+	# clean signal beats a noisy red). In any configured tree (local
+	# dev, or CI that runs ./configure) the full check below runs.
+	[ -f "$repo/Makefile" ] || skip "build not configured (no Makefile); run ./configure to exercise install-skills-user"
+
 	dirs="$fake_home/.claude/skills $fake_home/.raven/workspace/skills $fake_home/.config/opencode/commands"
 
 	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
