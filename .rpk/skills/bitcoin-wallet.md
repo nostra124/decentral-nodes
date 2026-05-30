@@ -1,16 +1,9 @@
 ---
 name: bitcoin-wallet
-description: |
-  Operate the `bitcoin(1)` educational Bitcoin wallet. Trigger
-  when the user wants to create or restore a wallet, derive a
-  receive address, check a balance, build / sign / send a
-  transaction, fee-bump a stuck tx (RBF / CPFP), do coin
-  control (freeze / select UTXOs), finalise or extract a PSBT,
-  push or pull a wallet between machines, set up a watch-only
-  wallet, validate / classify / generate an address, fetch a
-  BTC/EUR price or a German FIFO tax report, select a chain-data
-  backend, or reason about how a specific BIP maps onto the
-  wallet's design.
+description: Operate the bitcoin(1) educational Bitcoin wallet
+long_description: Operate the bitcoin(1) educational Bitcoin wallet. Trigger when the user wants to create or restore a wallet, derive a receive address, check a balance, build / sign / send a transaction, fee-bump a stuck tx (RBF / CPFP), do coin control (freeze / select UTXOs), finalise or extract a PSBT, push or pull a wallet between machines, set up a watch-only wallet, validate / classify / generate an address, fetch a BTC/EUR price or a German FIFO tax report, select a chain-data backend, or reason about how a specific BIP maps onto the wallet's design.
+role: [user]
+references: secret/secret-user
 ---
 
 # bitcoin-wallet
@@ -23,9 +16,9 @@ never lives in the wallet repo: it lives in `secret(1)`.
 
 This skill follows the rpk skill convention (see
 <https://github.com/nostra124/rpk>, `docs/PACKAGING.md`): one
-`SKILL.md` consumed by Claude and Raven, plus an `opencode.md`
-command entry. Read it before operating the wallet so you carry
-the model — and the guardrails — into the session.
+skill file consumed by Claude and Raven. Read it before
+operating the wallet so you carry the model — and the
+guardrails — into the session.
 
 ## When to use
 
@@ -347,12 +340,9 @@ bitcoin bip380 verify   "wpkh(<xpub>/0/*)#abcdefgh"
 
 ## Related skills
 
-- **rpk-author** — packaging this repo for the `rpk` package
-  manager (the `.rpk/` contract). See
-  <https://github.com/nostra124/rpk>.
-- **secret** — where the seed lives; `secret get/put <name>/seed`.
-- **account / config / crypt** — the only siblings `bitcoin`
-  calls at runtime (no shared crypto library; see `CLAUDE.md` §4).
+- **rpk/bugs** — file and fix bugs the rpk way.
+- **rpk/features** — design and ship new features.
+- **secret/secret-user** — where the seed lives; `secret get/put <name>/seed`.
 
 ## Where to read more
 
