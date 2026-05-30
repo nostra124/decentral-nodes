@@ -23,7 +23,14 @@ ALICE_HASH160="c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2"
 # output pays 50000 sats to a P2WPKH-zero address. Used for both
 # P2PKH and P2SH-P2WPKH PSBT wrappers below (only the input UTXO
 # record differs between them).
-UNSIGNED_TX="020000000100000000000000000000000000000000000000000000000000000000000000000000000000feffffff0150c300000000000016001400000000000000000000000000000000000000000000000000"
+#
+# Exactly 82 bytes (0x52) — the length the PSBT wrappers below declare
+# in their PSBT_GLOBAL_UNSIGNED_TX record (`010052`). It MUST match, or
+# psbt:_parse_structured reads `vallen` bytes and the leftover byte
+# desyncs the per-section walk (regression: a stray trailing 00 here
+# pushed the WITNESS_UTXO into the output section, so `sign` saw an
+# input with no UTXO and silently produced no PARTIAL_SIG).
+UNSIGNED_TX="020000000100000000000000000000000000000000000000000000000000000000000000000000000000feffffff0150c3000000000000160014000000000000000000000000000000000000000000000000"
 
 # P2PKH WITNESS_UTXO: 100000 sats + varint(25) + 76a914<hash>88ac.
 # Using WITNESS_UTXO (type 0x01) is the educational simplification
@@ -95,8 +102,13 @@ setup() {
     } | xxd -r -p > "$pubder"
     printf '%s' "$der_sig" | xxd -r -p > "$sigfile"
     printf '%s' "$sighash"  | xxd -r -p > "$hashfile"
+    # The sighash is already the final 32-byte digest the signer signed,
+    # so verify it as a pre-hashed digest — NOT with -rawin (which tells
+    # OpenSSL the input is an unhashed message and would re-hash it,
+    # guaranteeing a spurious "Signature Verification Failure"). Matches
+    # the proven FEAT-008 verify path in bitcoin.bats.
     openssl pkeyutl -verify -inkey "$pubder" -keyform DER -pubin \
-        -sigfile "$sigfile" -rawin -in "$hashfile" 2>/dev/null
+        -sigfile "$sigfile" -in "$hashfile" 2>/dev/null
 }
 
 @test "FEAT-014 — psbt finalize produces FINAL_SCRIPTSIG (no witness) for P2PKH" {
@@ -171,8 +183,13 @@ setup() {
     } | xxd -r -p > "$pubder"
     printf '%s' "$der_sig" | xxd -r -p > "$sigfile"
     printf '%s' "$sighash"  | xxd -r -p > "$hashfile"
+    # The sighash is already the final 32-byte digest the signer signed,
+    # so verify it as a pre-hashed digest — NOT with -rawin (which tells
+    # OpenSSL the input is an unhashed message and would re-hash it,
+    # guaranteeing a spurious "Signature Verification Failure"). Matches
+    # the proven FEAT-008 verify path in bitcoin.bats.
     openssl pkeyutl -verify -inkey "$pubder" -keyform DER -pubin \
-        -sigfile "$sigfile" -rawin -in "$hashfile" 2>/dev/null
+        -sigfile "$sigfile" -in "$hashfile" 2>/dev/null
 }
 
 @test "FEAT-014 — psbt finalize produces FINAL_SCRIPTSIG + FINAL_SCRIPTWITNESS for P2SH-P2WPKH" {
