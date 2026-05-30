@@ -2,7 +2,7 @@
 id: FEAT-011
 type: feature
 priority: medium
-status: open
+status: done
 milestone: 1.27.0
 ---
 
