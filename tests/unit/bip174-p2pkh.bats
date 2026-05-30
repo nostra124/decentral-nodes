@@ -203,3 +203,32 @@ setup() {
     ss="$(echo "$dec" | awk -F'\t' '/type=07/ {sub("^value=","",$4); print $4; exit}')"
     [[ "$ss" == "160014${ALICE_HASH160}" ]]
 }
+
+# ---------------------------------------------------------------------------
+# BUG-022 — psbt sign must WARN when it skips an input it cannot sign for
+# lack of a WITNESS_UTXO (CLAUDE.md §10: every failure branch emits a
+# warn). Previously silent: a malformed PSBT (e.g. BUG-021's desynced
+# fixture) produced an unsigned result with exit 0 and no diagnostic.
+# Signing with a non-matching key stays a quiet no-op (multi-party flows).
+# ---------------------------------------------------------------------------
+
+@test "BUG-022 — psbt sign warns when an input has no WITNESS_UTXO" {
+    # Well-formed 1-in/1-out PSBT, but input 0's map is empty (no UTXO).
+    no_utxo_psbt="70736274ff010052${UNSIGNED_TX}000000"
+    # Run with SELF_QUIET unset so warn() is not suppressed; capture stderr.
+    run --separate-stderr bash -c "SELF_QUIET= '$BIP174' sign '$ALICE_PRIV' <<< '$no_utxo_psbt'"
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"WITNESS_UTXO"* ]]
+    [[ "$stderr" == *"input 0"* ]]
+}
+
+@test "BUG-022 — psbt sign with a non-matching key stays a quiet no-op" {
+    # P2PKH_PSBT has a valid WITNESS_UTXO, but this key does not own it,
+    # so no script branch matches. Must NOT warn (normal no-op) and must
+    # leave the PSBT byte-identical.
+    other_key="1111111111111111111111111111111111111111111111111111111111111111"
+    run --separate-stderr bash -c "SELF_QUIET= '$BIP174' sign '$other_key' <<< '$P2PKH_PSBT'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$P2PKH_PSBT" ]
+    [ -z "$stderr" ]
+}
