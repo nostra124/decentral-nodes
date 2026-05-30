@@ -2502,7 +2502,8 @@ STR
 @test "FEAT-045 — wallet watch creates a watch-only wallet (no seed in secret)" {
 	setup_wallet_env
 	local name="watch045a_$$"
-	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
+	# BIP-32 xpub for secp256k1 generator, depth=0, all-zero chain code (valid 111-char xpub)
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
 	run "$BITCOIN_BIN" wallet watch "$name" "$xpub"
 	[ "$status" -eq 0 ]
 	local wpath="$XDG_DATA_HOME/bitcoin/wallets/$name"
@@ -2523,7 +2524,7 @@ STR
 
 @test "FEAT-045 — wallet watch rejects a duplicate name" {
 	setup_wallet_env
-	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
 	local name="watch045c_$$"
 	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
 	run "$BITCOIN_BIN" wallet watch "$name" "$xpub"
@@ -2540,7 +2541,7 @@ STR
 
 @test "FEAT-045 — wallet xpub on a watch-only wallet prints the stored xpub" {
 	setup_wallet_env
-	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
 	local name="watch045d_$$"
 	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
 	run "$BITCOIN_BIN" wallet xpub "$name"
@@ -2550,7 +2551,7 @@ STR
 
 @test "FEAT-045 — tx sign on a watch-only wallet exits non-zero with clear message" {
 	setup_wallet_env
-	local xpub="xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC3rLpDiiwhrker7PmPR45RburpqTs8WhyP1gGAzr6TBNzE6G2vhGCFJKWXPRg7Fqn7Me5oiSKtLKcK"
+	local xpub="xpub661MyMwAqRbcEYS8w7XLSVeEsBXy79zSzH1J8vCdxAZningWLdN3zgtU6QzvJsNBNF5QPBBBg1yVF2LKrcfGdJq86PeLWDMUCYatZPzQu8R"
 	local name="watch045e_$$"
 	"$BITCOIN_BIN" wallet watch "$name" "$xpub"
 	local wpath="$XDG_DATA_HOME/bitcoin/wallets/$name"
@@ -2579,7 +2580,9 @@ STR
 # ---------------------------------------------------------------------------
 
 @test "FEAT-046 — address validate accepts a P2PKH mainnet address" {
-	run "$BITCOIN_BIN" address validate "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+	# 1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso = P2PKH for hash160 c0cebcd6c3...
+	# (Alice's address from BIP-32 abandon-mnemonic vector)
+	run "$BITCOIN_BIN" address validate "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso"
 	[ "$status" -eq 0 ]
 }
 
@@ -2609,7 +2612,7 @@ STR
 }
 
 @test "FEAT-046 — address type: P2PKH → p2pkh" {
-	run "$BITCOIN_BIN" address type "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+	run "$BITCOIN_BIN" address type "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso"
 	[ "$status" -eq 0 ]
 	[ "$output" = "p2pkh" ]
 }
@@ -2627,15 +2630,15 @@ STR
 }
 
 @test "FEAT-046 — address decode: P2PKH returns 20-byte hash160 as hex" {
-	run "$BITCOIN_BIN" address decode "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+	run "$BITCOIN_BIN" address decode "1JaUQDVNRdhfNsVncGkXedaPSM5Gc54Hso"
 	[ "$status" -eq 0 ]
-	[ "$output" = "62e907b15cbf27d5425399ebf6f0fb50ebb88f18" ]
+	[ "$output" = "c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e2" ]
 }
 
 @test "FEAT-046 — address decode: P2WPKH returns witness program as hex" {
 	run "$BITCOIN_BIN" address decode "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
 	[ "$status" -eq 0 ]
-	[ "$output" = "751e76e8199196f454321e6cf37985a485c41dc7" ]
+	[ "$output" = "751e76e8199196d454941c45d1b3a323f1433bd6" ]
 }
 
 @test "FEAT-046 — address help lists every subcommand" {

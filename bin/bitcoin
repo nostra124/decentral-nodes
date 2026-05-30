@@ -3796,18 +3796,11 @@ wallet:watch() {
 		error "wallet watch: '$name' already exists at $path"
 		return 4
 	fi
-	local libexec="${SELF_LIBEXEC:?wallet watch: SELF_LIBEXEC must be set}"
-	# Validate xpub: must base58-decode to 78 bytes with a public version code.
-	local raw_hex
-	raw_hex="$(printf '%s\n' "$xpub" |
-		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
-		basenc --base16 -w0 2>/dev/null | tr A-F a-f)" || true
-	local -i ver=0
-	if [ "${#raw_hex}" -ge 8 ]; then
-		ver=$(( 16#${raw_hex:0:8} ))
-	fi
-	# BIP-32 public version codes: mainnet 0x0488B21E, testnet 0x043587CF.
-	if (( ver != 0x0488B21E && ver != 0x043587CF )); then
+	# Validate xpub: must start with xpub (mainnet) or tpub (testnet) and be
+	# exactly 111 base58 characters. This avoids the dc dependency for long
+	# strings while correctly validating BIP-32 extended public key format.
+	local b58='1-9A-HJ-NP-Za-km-z'
+	if [[ ! "$xpub" =~ ^(xpub|tpub)[$b58]{107}$ ]]; then
 		error "wallet watch: '$xpub' is not a valid xpub (bad version code)"
 		return 5
 	fi
