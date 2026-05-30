@@ -3371,6 +3371,10 @@ tx:sign() {
 		error "tx sign: no such wallet '$name' at $path"
 		return 3
 	fi
+	if wallet:_is_watch_only "$name"; then
+		error "tx sign: '$name' is a watch-only wallet — cannot sign transactions"
+		return 4
+	fi
 	local ledger="$path/addresses"
 	if [ ! -s "$ledger" ]; then
 		error "tx sign: wallet '$name' has no derived addresses"
