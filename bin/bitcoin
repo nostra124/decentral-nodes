@@ -854,6 +854,38 @@ address:decode() {
 	return 1
 }
 
+# Pure-bash base58 encoder: takes a hex string, emits the base58 string.
+# No dc/python required — uses bash integer arithmetic only.
+_base58_encode_hex() {
+	local hex="$1"
+	local b58_charset="123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+	local leading=0 i
+	for ((i=0; i<${#hex}; i+=2)); do
+		[[ "${hex:i:2}" == "00" ]] && (( leading++ )) || break
+	done
+	local -a bytes=()
+	for ((i=0; i<${#hex}; i+=2)); do
+		bytes+=( $(( 16#${hex:i:2} )) )
+	done
+	local -a result=()
+	while (( ${#bytes[@]} > 0 )); do
+		local -a new_bytes=()
+		local carry=0 b cur q
+		for b in "${bytes[@]}"; do
+			cur=$(( carry * 256 + b ))
+			q=$(( cur / 58 ))
+			carry=$(( cur % 58 ))
+			(( ${#new_bytes[@]} > 0 || q > 0 )) && new_bytes+=( $q )
+		done
+		result+=( "${b58_charset:carry:1}" )
+		bytes=( "${new_bytes[@]}" )
+	done
+	for ((i=0; i<leading; i++)); do result+=( "1" ); done
+	local out=""
+	for ((i=${#result[@]}-1; i>=0; i--)); do out+="${result[i]}"; done
+	echo "$out"
+}
+
 # FEAT-047: generate an address from a raw 33-byte compressed public key.
 #
 # Usage: address generate [--p2wpkh] [--p2pkh] [--p2tr] [--testnet] <pubkey-hex>
@@ -942,10 +974,8 @@ address:generate:p2pkh() {
 		tr A-F a-f |
 		cut -c1-8
 	)
-	# base58-encode the full payload + checksum
-	printf '%s' "${payload}${checksum}" |
-		while read -rn 2; do printf "\\x$REPLY"; done |
-		"$libexec/${SELF:-bitcoin}/bip13" base58-encode
+	# base58-encode the full payload + checksum (pure bash, no dc)
+	_base58_encode_hex "${payload}${checksum}"
 }
 
 # Internal: P2TR from compressed pubkey hex; args: pubkey testnet(0|1)
