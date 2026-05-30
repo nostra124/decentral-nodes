@@ -14,6 +14,8 @@ drive the wallet safely.
 | FEAT-016 SIT: end-to-end receive→spend on regtest | planned | unblocks regtest ACs parked in FEAT-008 / FEAT-014 |
 | FEAT-015 `bitcoin(1)` man page, bash completion, README walkthrough | planned | per-subcommand man pages (FEAT-041) already shipped |
 | FEAT-019 `bitcoin-wallet` agent skill | planned | |
+| FEAT-008 PSBT — BIP-371 Taproot fields + key-path signing | planned | moved here from 1.27.0; BIP-340/341 core shipped in 1.26.0; pairs with FEAT-016 for regtest acceptance (AC #2) |
+| FEAT-014 tx builder — P2PKH + P2SH-P2WPKH signing | planned | moved here from 1.27.0; pairs with FEAT-016 for the regtest spends (AC #4) |
 
 ## What lands
 
@@ -34,6 +36,17 @@ drive the wallet safely.
    AI agents on the wallet's verbs, the secret/seed boundary, and the
    testnet-by-default / `--mainnet`-guard safety model — so an agent
    can operate the wallet without footguns.
+
+4. **FEAT-008 — BIP-371 PSBT Taproot fields + key-path signing.**
+   Recognise the BIP-371 PSBT field types and sign Taproot key-path
+   inputs (TapSighash + tweaked Schnorr via BIP-341/340 from 1.26.0).
+   Closes the Taproot strand of the cold-signing flow; AC #2's regtest
+   acceptance closes here too once FEAT-016 lands.
+
+5. **FEAT-014 — P2PKH + P2SH-P2WPKH signing.** The legacy and nested-
+   segwit halves of `wallet sign` / `tx sign` — pair with FEAT-016 so
+   the regtest harness can validate one bats case per address type
+   (AC #4).
 
 ## Depends on
 
