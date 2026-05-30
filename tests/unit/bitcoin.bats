@@ -1718,10 +1718,13 @@ wallet_set_network() {
 }
 
 # ---------------------------------------------------------------------------
-# FEAT-019 (partial, 1.16.0) — bitcoin-wallet agent skill. The AI-
-# facing companion to the FEAT-015 human walkthrough. Lives at
-# skills/bitcoin-wallet/{SKILL.md,opencode.md} and is installed by
-# the Makefile into share/claude/skills/ and share/opencode/commands/.
+# FEAT-019 / FEAT-048 — bitcoin-wallet agent skill. The AI-facing
+# companion to the FEAT-015 human walkthrough. Lives at
+# skills/bitcoin-wallet/{SKILL.md,opencode.md}. FEAT-048 refreshed the
+# content to the 1.33.0 verb set and added Raven as a third install
+# target (Claude + Raven share SKILL.md; opencode uses opencode.md),
+# per the rpk skill convention. Installed by the Makefile into
+# share/{claude,raven}/skills/ and share/opencode/commands/.
 # ---------------------------------------------------------------------------
 
 @test "FEAT-019 — SKILL.md exists with the required frontmatter" {
@@ -1741,21 +1744,43 @@ wallet_set_network() {
 	done
 }
 
-@test "FEAT-019 — SKILL.md references every wallet verb shipped through 1.15.0" {
+@test "FEAT-048 — SKILL.md references the canonical 1.33.0 verb set" {
 	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	# Canonical verbs after the FEAT-035 streamline: PSBT ops live
+	# under `tx` (passing through to bip174), descriptor checksum
+	# moved to bip380, and tx/utxo/address/price/tax are first-class.
 	for recipe in "wallet new" "wallet derive" "wallet balance" \
-		"wallet label" "wallet build" "wallet sign" "wallet send" \
-		"wallet broadcast" "wallet push" "wallet pull" \
-		"psbt finalize" "psbt extract" "psbt decode" \
+		"wallet label" "wallet send" "wallet push" "wallet pull" \
+		"wallet watch" \
+		"tx build" "tx sign" "tx finalize" "tx extract" \
+		"tx broadcast" "tx bump" "tx decode" \
+		"utxo freeze" "utxo select" \
+		"address validate" "address generate" \
 		"backend set" "backend estimate-fee" \
-		"descriptor checksum"; do
+		"price fetch" "tax report-de" \
+		"bip380 checksum"; do
 		grep -q -F "$recipe" "$skill"
 	done
+	# The deprecated standalone `psbt` command must not be taught as
+	# a live recipe (removed in 1.24.0); it may only appear as a
+	# "use tx instead" failure-mode note.
+	! grep -qE '`?bitcoin psbt (decode|finalize|extract)' "$skill"
+}
+
+@test "FEAT-048 — SKILL.md corrects the --mainnet guardrail (now shipped)" {
+	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	# FEAT-014 shipped --mainnet; the old skill said it "isn't
+	# shipped". The refreshed guardrail must describe the live flag
+	# and must NOT claim it is unshipped.
+	grep -q -i -- '--mainnet' "$skill"
+	! grep -q -i "isn't shipped" "$skill"
+	! grep -q -i "not yet shipped" "$skill"
+	! grep -q -i "guard isn't" "$skill"
 }
 
 @test "FEAT-019 — SKILL.md spells out the guardrails an agent must hold" {
 	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
-	# The five guardrails the skill spec enumerates.
+	# The core guardrails the skill spec enumerates.
 	grep -q -i 'never print.*mnemonic' "$skill"
 	grep -q -i 'never bypass .secret' "$skill"
 	grep -q -i 'testnet\|regtest' "$skill"
@@ -1783,8 +1808,8 @@ wallet_set_network() {
 	# manifest lives.
 	grep -q 'SKILL.md' "$oc"
 	# Covers the same workflow recipes (subset is fine since opencode
-	# entries can be terser).
-	for verb in "wallet new" "wallet send" "psbt finalize" "psbt extract"; do
+	# entries can be terser). Canonical 1.33.0 verbs.
+	for verb in "wallet new" "wallet send" "tx finalize" "tx extract"; do
 		grep -q -F "$verb" "$oc"
 	done
 }
@@ -1801,24 +1826,51 @@ wallet_set_network() {
 	grep -q 'opencode/commands' "$mk"
 }
 
-@test "FEAT-019 AC#3 — make install-skills-user is idempotent" {
+@test "FEAT-048 — Makefile + .rpk/package install the Raven SKILL.md too" {
+	mk="$BATS_TEST_DIRNAME/../../Makefile.in"
+	pkg="$BATS_TEST_DIRNAME/../../.rpk/package"
+	# Raven reuses SKILL.md (no Raven-specific source file) and lands
+	# under share/raven/skills/<name>/, in both build paths.
+	grep -q 'raven/skills' "$mk"
+	grep -q 'raven/skills' "$pkg"
+	# install-skills-user must know the Raven user dir.
+	grep -q '.raven/workspace/skills' "$mk"
+	# And the opencode user symlink must be the .md command file, not
+	# a (non-existent) share/opencode/skills dir. Fixed-string match:
+	# the literal contains `$$`, which BRE mishandles.
+	grep -qF 'opencode/commands/$$name.md' "$mk"
+}
+
+@test "FEAT-019 AC#3 / FEAT-048 — make install-skills-user is idempotent across all three agents" {
 	fake_home="$(mktemp -d)"
 	mkdir -p "$fake_home/.claude/skills"
+	mkdir -p "$fake_home/.raven/workspace/skills"
 	mkdir -p "$fake_home/.config/opencode/commands"
 	repo="$BATS_TEST_DIRNAME/../.."
 
-	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
-	count1="$(find "$fake_home/.claude/skills" "$fake_home/.config/opencode/commands" \
-		-maxdepth 1 -type l | wc -l)"
+	dirs="$fake_home/.claude/skills $fake_home/.raven/workspace/skills $fake_home/.config/opencode/commands"
 
 	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
-	count2="$(find "$fake_home/.claude/skills" "$fake_home/.config/opencode/commands" \
-		-maxdepth 1 -type l | wc -l)"
+	count1="$(find $dirs -maxdepth 1 -type l | wc -l)"
+
+	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
+	count2="$(find $dirs -maxdepth 1 -type l | wc -l)"
+
+	# Each agent gets exactly one symlink for the bitcoin-wallet skill,
+	# named correctly per agent layout.
+	claude_link="$fake_home/.claude/skills/bitcoin-wallet"
+	raven_link="$fake_home/.raven/workspace/skills/bitcoin-wallet"
+	oc_link="$fake_home/.config/opencode/commands/bitcoin-wallet.md"
+	have_links=1
+	[ -L "$claude_link" ] || have_links=0
+	[ -L "$raven_link" ]  || have_links=0
+	[ -L "$oc_link" ]     || have_links=0
 
 	rm -rf "$fake_home"
 
 	[ "$count1" -eq "$count2" ]
-	[ "$count1" -ge 1 ]
+	[ "$count1" -eq 3 ]
+	[ "$have_links" -eq 1 ]
 }
 
 # ---------------------------------------------------------------------------

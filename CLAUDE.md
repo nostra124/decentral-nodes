@@ -18,9 +18,13 @@ transaction-history indexing for the whole network
 Standard rpk per-package: `bin/bitcoin` dispatcher
 plus libexec lookup for BIP plugins. Each plugin under
 `libexec/bitcoin/<bip>` cites the BIP it implements.
+The upstream packaging and skill conventions this repo
+mirrors live at <https://github.com/nostra124/rpk>
+(`docs/PACKAGING.md` is the authority for the `.rpk/`
+contract and the agent-skill install layout).
 
 Educational package: vendors BIP source documents
-under `share/doc/bitcoin/standards/` (FEAT-017) and
+under `share/doc/bitcoin/bips/` (FEAT-017) and
 ships a walkthrough at `docs/bitcoin-walkthrough.md`
 (FEAT-015, closed 1.29.0).
 

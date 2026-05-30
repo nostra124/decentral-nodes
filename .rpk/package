@@ -51,8 +51,12 @@ if ls -d "skills/$PACKAGE-"* >/dev/null 2>&1; then
     for skill in "skills/$PACKAGE-"*; do
         name=$(basename "$skill")
         if [ -f "$skill/SKILL.md" ]; then
+            # Claude and Raven consume the same SKILL.md (rpk skill
+            # convention: https://github.com/nostra124/rpk).
             mkdir -p "$TARGET/share/claude/skills/$name"
             install -m 644 "$skill/SKILL.md" "$TARGET/share/claude/skills/$name/SKILL.md"
+            mkdir -p "$TARGET/share/raven/skills/$name"
+            install -m 644 "$skill/SKILL.md" "$TARGET/share/raven/skills/$name/SKILL.md"
         fi
         if [ -f "$skill/opencode.md" ]; then
             mkdir -p "$TARGET/share/opencode/commands"
