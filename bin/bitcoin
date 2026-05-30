@@ -176,6 +176,7 @@ wallet & transactions:
    wallet                  create and manage wallets
    tx                      build, sign, broadcast transactions
    utxo                    list, freeze, select UTXOs
+   address                 validate addresses and detect their type
 
 blockchain primitives:
    descriptor              emit wallet descriptors
@@ -699,6 +700,178 @@ _emit_varint() {
 		return 1
 	fi
 }
+
+# FEAT-046 (1.32.0): address validation and type detection.
+#
+# Subcommands:
+#   validate <addr>   — exit 0 if valid, non-zero with message if not
+#   type     <addr>   — print: p2pkh | p2sh | p2wpkh | p2wsh | p2tr
+#   decode   <addr>   — print underlying hash/program as hex
+#   help              — this message
+
+# Internal: decode a base58check address and print "version_byte hex_payload"
+# Returns non-zero if the input is not valid base58check.
+address:_base58_decode() {
+	local addr="$1"
+	local libexec="${SELF_LIBEXEC:?address: SELF_LIBEXEC must be set}"
+	local raw
+	raw="$(printf '%s\n' "$addr" |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-decode 2>/dev/null |
+		basenc --base16 -w0 2>/dev/null | tr A-F a-f)" || return 1
+	# raw = version(2 hex chars) + 20-byte hash(40) + 4-byte checksum(8) = 50 chars
+	if [ "${#raw}" -ne 50 ]; then
+		return 2
+	fi
+	local ver="${raw:0:2}" hash="${raw:2:40}"
+	printf '%s %s\n' "$ver" "$hash"
+}
+
+# Internal: decode a bech32/bech32m address, print "type witness_program_hex"
+# Returns non-zero on failure. type: p2wpkh | p2wsh | p2tr
+address:_bech32_decode() {
+	local addr="$1"
+	local libexec="${SELF_LIBEXEC:?address: SELF_LIBEXEC must be set}"
+	local out version
+	# Try BIP-173 (bech32, witness v0).
+	if out="$("$libexec/${SELF:-bitcoin}/bip173" decode "$addr" 2>/dev/null)"; then
+		local -a lines; mapfile -t lines <<< "$out"
+		version="${lines[1]:-}"
+		if [[ "$version" == "0" ]]; then
+			local prog_decimals; prog_decimals="$(
+				for ((i=2; i<${#lines[@]}; i++)); do echo "${lines[i]}"; done |
+				convertbits 5 8 0 2>/dev/null
+			)" || return 3
+			local prog="" b
+			for b in $prog_decimals; do prog+="$(printf '%02x' "$b")"; done
+			local -i plen=$(( ${#prog} / 2 ))
+			if (( plen == 20 )); then printf 'p2wpkh %s\n' "$prog"; return 0; fi
+			if (( plen == 32 )); then printf 'p2wsh %s\n' "$prog"; return 0; fi
+		fi
+		return 4
+	fi
+	# Try BIP-350 (bech32m, witness v1+).
+	if out="$("$libexec/${SELF:-bitcoin}/bip350" decode "$addr" 2>/dev/null)"; then
+		local -a lines; mapfile -t lines <<< "$out"
+		version="${lines[1]:-}"
+		if [[ "$version" == "1" ]]; then
+			local prog_decimals; prog_decimals="$(
+				for ((i=2; i<${#lines[@]}; i++)); do echo "${lines[i]}"; done |
+				convertbits 5 8 0 2>/dev/null
+			)" || return 5
+			local prog="" b
+			for b in $prog_decimals; do prog+="$(printf '%02x' "$b")"; done
+			local -i plen=$(( ${#prog} / 2 ))
+			if (( plen == 32 )); then printf 'p2tr %s\n' "$prog"; return 0; fi
+		fi
+		return 6
+	fi
+	return 7
+}
+
+command:address() {
+	local sub="${1:-help}"
+	shift 2>/dev/null || true
+	case "$sub" in
+		validate|type|decode|help) address:"$sub" "$@" ;;
+		*)
+			error "unknown address subcommand: '$sub'"
+			address:help >&2
+			return 2
+			;;
+	esac
+}
+
+address:validate() {
+	local addr="${1:-}"
+	if [ -z "$addr" ]; then
+		error "address validate: usage: address validate <addr>"
+		return 2
+	fi
+	# Try base58check first.
+	local b58_out
+	if b58_out="$(address:_base58_decode "$addr")"; then
+		local ver="${b58_out%% *}"
+		case "$ver" in
+			00|6f|05|c4) printf '%s\n' "$addr"; return 0 ;;
+		esac
+		error "address validate: unknown base58 version byte 0x${ver^^}"
+		return 1
+	fi
+	# Try bech32/bech32m.
+	if address:_bech32_decode "$addr" >/dev/null 2>&1; then
+		printf '%s\n' "$addr"
+		return 0
+	fi
+	error "address validate: '$addr' is not a valid Bitcoin address"
+	return 1
+}
+
+address:type() {
+	local addr="${1:-}"
+	if [ -z "$addr" ]; then
+		error "address type: usage: address type <addr>"
+		return 2
+	fi
+	local b58_out
+	if b58_out="$(address:_base58_decode "$addr")"; then
+		local ver="${b58_out%% *}"
+		case "$ver" in
+			00|6f) printf 'p2pkh\n'; return 0 ;;
+			05|c4) printf 'p2sh\n';  return 0 ;;
+			*)
+				error "address type: unknown version byte 0x${ver^^} in '$addr'"
+				return 1 ;;
+		esac
+	fi
+	local seg_out
+	if seg_out="$(address:_bech32_decode "$addr")"; then
+		printf '%s\n' "${seg_out%% *}"
+		return 0
+	fi
+	error "address type: '$addr' is not a recognised Bitcoin address"
+	return 1
+}
+
+address:decode() {
+	local addr="${1:-}"
+	if [ -z "$addr" ]; then
+		error "address decode: usage: address decode <addr>"
+		return 2
+	fi
+	local b58_out
+	if b58_out="$(address:_base58_decode "$addr")"; then
+		printf '%s\n' "${b58_out#* }"
+		return 0
+	fi
+	local seg_out
+	if seg_out="$(address:_bech32_decode "$addr")"; then
+		printf '%s\n' "${seg_out#* }"
+		return 0
+	fi
+	error "address decode: '$addr' is not a recognised Bitcoin address"
+	return 1
+}
+
+address:help() {
+	cat <<-ENDHELP
+	Usage: $SELF address <subcommand> <addr>
+
+	  validate <addr>   exit 0 if <addr> is a valid Bitcoin address (any type);
+	                    non-zero with an error message if not
+	  type <addr>       print the address type:
+	                      p2pkh   — legacy Pay-to-PubKey-Hash (base58, version 0x00/0x6f)
+	                      p2sh    — Pay-to-Script-Hash (base58, version 0x05/0xc4)
+	                      p2wpkh  — native segwit v0, 20-byte program (bech32)
+	                      p2wsh   — native segwit v0, 32-byte program (bech32)
+	                      p2tr    — Taproot / segwit v1, 32-byte program (bech32m)
+	  decode <addr>     print the underlying hash or witness program as hex
+	  help              this message
+
+	Supports mainnet and testnet addresses (bc1/tb1 bech32/bech32m; 1/3/m/n/2 base58).
+	ENDHELP
+}
+
+help:address() { address:help; }
 
 command:psbt() {
 	error "'psbt' was removed in 1.24.0; use 'bitcoin bip174'"

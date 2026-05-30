@@ -44,7 +44,7 @@ setup() {
 # utxo verb added in 1.23.0 (FEAT-037); ships ls / freeze / unfreeze
 # in this release.
 # price verb added in 1.25.0 (FEAT-040); BTC/EUR oracle.
-COMMAND_VERBS="wallet tx utxo tax price backend descriptor"
+COMMAND_VERBS="wallet tx utxo tax price backend descriptor address"
 
 # Verbs implemented as standalone libexec/bitcoin/<name> executables.
 # bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).

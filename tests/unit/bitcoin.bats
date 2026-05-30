@@ -2576,3 +2576,88 @@ STR
 	[[ "$output" == *"watch"* ]]
 	[[ "$output" == *"xpub"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-046: bitcoin address — validate, type, decode.
+# Known vectors (mainnet + testnet, all five types):
+#   P2PKH mainnet:  1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf (genesis coinbase)
+#   P2SH  mainnet:  3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy
+#   P2WPKH mainnet: bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+#   P2WPKH testnet: tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx
+#   P2TR  mainnet:  bc1p5cyxnux0n5y9wfpvjfm69xnf4p4e9l4s4y2r0z5c5kwjxnw7zy0sqwzhy4
+# ---------------------------------------------------------------------------
+
+@test "FEAT-046 — address validate accepts a P2PKH mainnet address" {
+    run bitcoin address validate "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+    [ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate accepts a P2SH mainnet address" {
+    run bitcoin address validate "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    [ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate accepts a P2WPKH bech32 address" {
+    run bitcoin address validate "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    [ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate accepts a testnet bech32 address" {
+    run bitcoin address validate "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+    [ "$status" -eq 0 ]
+}
+
+@test "FEAT-046 — address validate rejects garbage" {
+    run bitcoin address validate "notanaddress"
+    [ "$status" -ne 0 ]
+}
+
+@test "FEAT-046 — address validate rejects empty input" {
+    run bitcoin address validate
+    [ "$status" -ne 0 ]
+}
+
+@test "FEAT-046 — address type: P2PKH → p2pkh" {
+    run bitcoin address type "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+    [ "$status" -eq 0 ]
+    [ "$output" = "p2pkh" ]
+}
+
+@test "FEAT-046 — address type: P2SH → p2sh" {
+    run bitcoin address type "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
+    [ "$status" -eq 0 ]
+    [ "$output" = "p2sh" ]
+}
+
+@test "FEAT-046 — address type: P2WPKH → p2wpkh" {
+    run bitcoin address type "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    [ "$status" -eq 0 ]
+    [ "$output" = "p2wpkh" ]
+}
+
+@test "FEAT-046 — address decode: P2PKH returns 20-byte hash160 as hex" {
+    run bitcoin address decode "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf"
+    [ "$status" -eq 0 ]
+    # genesis address hash = 62e907b15cbf27d5425399ebf6f0fb50ebb88f18
+    [ "$output" = "62e907b15cbf27d5425399ebf6f0fb50ebb88f18" ]
+}
+
+@test "FEAT-046 — address decode: P2WPKH returns witness program as hex" {
+    run bitcoin address decode "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    [ "$status" -eq 0 ]
+    # known witness program for that address
+    [ "$output" = "751e76e8199196f454321e6cf37985a485c41dc7" ]
+}
+
+@test "FEAT-046 — address help lists every subcommand" {
+    run bitcoin address help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"validate"* ]]
+    [[ "$output" == *"type"* ]]
+    [[ "$output" == *"decode"* ]]
+}
+
+@test "FEAT-046 — bitcoin help mentions address" {
+    run bitcoin help
+    [[ "$output" == *"address"* ]]
+}
