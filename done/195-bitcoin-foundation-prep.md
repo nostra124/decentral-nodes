@@ -2,8 +2,9 @@
 id: FEAT-195
 type: feature
 priority: high
-status: open
+status: done
 milestone: 1.30.0
+closed: 1.30.0
 ---
 
 # Bitcoin foundation prep — call only `account` + `config` + `secret` + `crypt` at runtime

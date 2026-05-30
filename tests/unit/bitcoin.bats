@@ -2439,3 +2439,58 @@ STR
 	[[ "$output" != *"bip32-is-public"* ]]
 	[[ "$output" != *"bip32-is-secret"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-195 (1.30.0) — runtime dependency boundary: bin/bitcoin must call
+# only account / config / secret / crypt at runtime (plus BIP plugin
+# primitives). Forbidden sibling scripts are cache, check, data, hosts,
+# repo, scripts, task, user (as invoked commands, not variable names or
+# comment text). This test guards against re-introduction.
+# ---------------------------------------------------------------------------
+
+@test "FEAT-195 — bin/bitcoin has no invocations of forbidden sibling scripts" {
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	# Pattern: forbidden word at the start of a statement (leading whitespace
+	# allowed) but NOT as a variable name (preceded by $), not in a comment
+	# (line starts with optional-space then #), and not as a git config key
+	# (git -c user.*). The grep is intentionally strict — any match is a
+	# violation that needs to be reviewed.
+	forbidden_cmds=(cache data hosts scripts task)
+	for word in "${forbidden_cmds[@]}"; do
+		# Fail if the word appears as the first token of a non-comment shell
+		# statement. Exclude lines where it appears only inside a string or
+		# variable name.
+		if grep -qE "^\s*${word}\s" "$script" 2>/dev/null; then
+			echo "VIOLATION: '$word' appears as a command invocation in bin/bitcoin" >&2
+			grep -nE "^\s*${word}\s" "$script" >&2
+			return 1
+		fi
+		# Also catch subshell forms: $(<word> ...) or `<word> `
+		if grep -qE "\$\(\s*${word}\s|\`\s*${word}\s" "$script" 2>/dev/null; then
+			echo "VIOLATION: '$word' used in command substitution in bin/bitcoin" >&2
+			grep -nE "\$\(\s*${word}\s|\`\s*${word}\s" "$script" >&2
+			return 1
+		fi
+	done
+}
+
+@test "FEAT-195 — bin/bitcoin calls 'secret' only for seed operations" {
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	# Every 'secret' invocation must be 'secret get/put/rm' against a
+	# <wallet>/seed path. No other secret operations are expected.
+	while IFS=: read -r _lineno content; do
+		# Strip leading whitespace.
+		content="${content#"${content%%[! ]*}"}"
+		if [[ "$content" =~ ^secret[[:space:]] ]]; then
+			verb="$(echo "$content" | awk '{print $2}')"
+			if [[ "$verb" != "get" && "$verb" != "put" && "$verb" != "rm" ]]; then
+				echo "VIOLATION at $_lineno: unexpected 'secret $verb'" >&2
+				return 1
+			fi
+			if ! echo "$content" | grep -q '/seed'; then
+				echo "VIOLATION at $_lineno: secret call not targeting a /seed path" >&2
+				return 1
+			fi
+		fi
+	done < <(grep -n "^\s*secret\b" "$script" | grep -v "^\s*#")
+}
