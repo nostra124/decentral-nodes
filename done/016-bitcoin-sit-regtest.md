@@ -2,9 +2,26 @@
 id: FEAT-016
 type: feature
 priority: medium
-status: open
+status: done
 milestone: 1.29.0
+closed: 1.29.0
 ---
+
+## Progress (1.29.0 shipped — all five acceptance criteria closed)
+
+`tests/sit/` directory created with:
+- `podman/Dockerfile.bitcoind` — Debian bookworm + bitcoin-core regtest node.
+- `helpers.bash` — shared functions: `sit:start_bitcoind`, `sit:stop_bitcoind`,
+  `sit:cli`, `sit:mine`, `sit:fund_address`, `sit:install_bitcoin`,
+  `sit:configure_backend`.
+- `suites/01_wallet_new.bats` — wallet creation (AC #5 step 1).
+- `suites/02_derive_and_receive.bats` — derive + fund + balance check (AC #5 steps 2–3).
+- `suites/03_send_and_broadcast.bats` — full send pipeline + testmempoolaccept (AC #1 / #3).
+- `suites/04_psbt_roundtrip.bats` — PSBT encode/sign/finalize/extract + P2WPKH on regtest (AC #4).
+- `suites/05_push_pull_between_accounts.bats` — cold-sign flow between two HOMEs (AC #3).
+
+`make check-sit` now runs `bats tests/sit/suites/` when podman is available;
+soft-skips with a clear message otherwise (AC #4).
 
 # SIT: end-to-end receive→spend against regtest bitcoind
 

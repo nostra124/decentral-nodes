@@ -1,0 +1,35 @@
+FROM debian:bookworm-slim
+
+ARG BITCOIN_VERSION=27.1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wget ca-certificates bats dc \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN arch="$(dpkg --print-architecture)" && \
+    case "$arch" in \
+        amd64) _arch="x86_64-linux-gnu" ;; \
+        arm64) _arch="aarch64-linux-gnu" ;; \
+        *) echo "Unsupported arch: $arch" >&2; exit 1 ;; \
+    esac && \
+    wget -q "https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-${_arch}.tar.gz" \
+         -O /tmp/bitcoin.tar.gz && \
+    tar -xzf /tmp/bitcoin.tar.gz -C /opt && \
+    ln -s "/opt/bitcoin-${BITCOIN_VERSION}/bin/bitcoind"    /usr/local/bin/bitcoind && \
+    ln -s "/opt/bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli" /usr/local/bin/bitcoin-cli && \
+    rm /tmp/bitcoin.tar.gz
+
+# bitcoin.conf for regtest daemon accessible from the host
+RUN mkdir -p /root/.bitcoin && printf '%s\n' \
+    regtest=1 \
+    server=1 \
+    rpcuser=regtest \
+    rpcpassword=regtest \
+    rpcbind=0.0.0.0 \
+    rpcallowip=0.0.0.0/0 \
+    fallbackfee=0.0001 \
+    > /root/.bitcoin/bitcoin.conf
+
+EXPOSE 18443
+
+CMD ["bitcoind", "-regtest", "-nodaemon", "-printtoconsole"]

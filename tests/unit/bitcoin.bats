@@ -1801,6 +1801,26 @@ wallet_set_network() {
 	grep -q 'opencode/commands' "$mk"
 }
 
+@test "FEAT-019 AC#3 — make install-skills-user is idempotent" {
+	fake_home="$(mktemp -d)"
+	mkdir -p "$fake_home/.claude/skills"
+	mkdir -p "$fake_home/.config/opencode/commands"
+	repo="$BATS_TEST_DIRNAME/../.."
+
+	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
+	count1="$(find "$fake_home/.claude/skills" "$fake_home/.config/opencode/commands" \
+		-maxdepth 1 -type l | wc -l)"
+
+	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
+	count2="$(find "$fake_home/.claude/skills" "$fake_home/.config/opencode/commands" \
+		-maxdepth 1 -type l | wc -l)"
+
+	rm -rf "$fake_home"
+
+	[ "$count1" -eq "$count2" ]
+	[ "$count1" -ge 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # FEAT-012 (extend, 1.17.0) — backend get-address-txs. Fifth verb on
 # the backend abstraction; consumed by `wallet index` (FEAT-018).

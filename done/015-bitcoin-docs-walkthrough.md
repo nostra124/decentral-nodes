@@ -2,8 +2,9 @@
 id: FEAT-015
 type: feature
 priority: medium
-status: open
+status: done
 milestone: 1.29.0
+closed: 1.29.0
 ---
 
 ## Progress (1.15.0 shipped — man page + bash completion + walkthrough)

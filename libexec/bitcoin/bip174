@@ -520,6 +520,92 @@ psbt:_bip143_sighash() {
 #   $4 all-inputs scriptpubkeys concat — varint(len)+scriptpubkey per input
 #   $5 sighash type byte (default 00 = SIGHASH_DEFAULT)
 # Output: 32-byte sighash hex (the tagged_hash("TapSighash", msg) result).
+
+# Compute the pre-segwit (legacy) sighash for a P2PKH input.
+# Implements the original Satoshi serialization: each input has its
+# scriptSig replaced by either the scriptCode (for the signing input)
+# or an empty script (for all other inputs), and SIGHASH_ALL is
+# appended as a 4-byte LE integer before the double-SHA256.
+#   $1 unsigned tx hex
+#   $2 input index (0-based)
+#   $3 script_code hex (the input's scriptPubKey, e.g. 76a914<hash>88ac)
+#   $4 sighash type byte (default "01" = SIGHASH_ALL)
+# Output: 32-byte sighash hex on stdout.
+psbt:_legacy_sighash() {
+	local tx="$1" idx="$2" script_code="$3" sighash_type="${4:-01}"
+
+	local saved_hex="${psbt_hex:-}" saved_pos="${psbt_pos:-0}" saved_len="${psbt_len:-0}"
+	psbt_hex="$tx"
+	local -gi psbt_len=${#psbt_hex} psbt_pos=0
+	PSBT_LAST_HEX=""
+	PSBT_LAST_VINT=0
+
+	psbt:_take 4 || { error "psbt sign (legacy): truncated version"; return 1; }
+	local nVersion_le="$PSBT_LAST_HEX"
+
+	psbt:_take_varint || { error "psbt sign (legacy): truncated input count"; return 1; }
+	local -i n_in=$PSBT_LAST_VINT
+
+	# Collect raw input fields; substitute scriptCode only for target.
+	local -a in_txid=() in_vout=() in_seq=()
+	local k
+	for ((k=0; k<n_in; k++)); do
+		psbt:_take 32 || { error "psbt sign (legacy): truncated prev_txid at input $k"; return 1; }
+		in_txid[k]="$PSBT_LAST_HEX"
+		psbt:_take 4 || { error "psbt sign (legacy): truncated prev_vout at input $k"; return 1; }
+		in_vout[k]="$PSBT_LAST_HEX"
+		psbt:_take_varint || { error "psbt sign (legacy): truncated scriptSig len at input $k"; return 1; }
+		local -i ss_len=$PSBT_LAST_VINT
+		psbt:_take "$ss_len" || { error "psbt sign (legacy): truncated scriptSig at input $k"; return 1; }
+		psbt:_take 4 || { error "psbt sign (legacy): truncated sequence at input $k"; return 1; }
+		in_seq[k]="$PSBT_LAST_HEX"
+	done
+
+	psbt:_take_varint || { error "psbt sign (legacy): truncated output count"; return 1; }
+	local -i n_out=$PSBT_LAST_VINT
+	local outputs=""
+	for ((k=0; k<n_out; k++)); do
+		psbt:_take 8 || { error "psbt sign (legacy): truncated output value at $k"; return 1; }
+		outputs+="$PSBT_LAST_HEX"
+		psbt:_take_varint || { error "psbt sign (legacy): truncated script len at output $k"; return 1; }
+		local -i sp_len=$PSBT_LAST_VINT
+		outputs+="$(psbt:_emit_varint "$sp_len")"
+		psbt:_take "$sp_len" || { error "psbt sign (legacy): truncated scriptPubKey at output $k"; return 1; }
+		outputs+="$PSBT_LAST_HEX"
+	done
+
+	psbt:_take 4 || { error "psbt sign (legacy): truncated locktime"; return 1; }
+	local nLocktime_le="$PSBT_LAST_HEX"
+
+	psbt_hex="$saved_hex"; psbt_pos=$saved_pos; psbt_len=$saved_len
+
+	if (( idx >= n_in )); then
+		error "psbt sign (legacy): input index $idx out of range (tx has $n_in inputs)"
+		return 1
+	fi
+
+	# Serialize: version || varint(n_in) || inputs (with substituted scripts) || outputs || locktime || sighash LE4
+	local preimage=""
+	preimage+="$nVersion_le"
+	preimage+="$(psbt:_emit_varint "$n_in")"
+	for ((k=0; k<n_in; k++)); do
+		preimage+="${in_txid[k]}${in_vout[k]}"
+		if (( k == idx )); then
+			preimage+="$(psbt:_emit_varint $(( ${#script_code} / 2 )))"
+			preimage+="$script_code"
+		else
+			preimage+="00"
+		fi
+		preimage+="${in_seq[k]}"
+	done
+	preimage+="$(psbt:_emit_varint "$n_out")"
+	preimage+="$outputs"
+	preimage+="$nLocktime_le"
+	preimage+="$(_le32 "$((16#$sighash_type))")"
+
+	printf '%s' "$preimage" | psbt:_sha256d_hex
+}
+
 psbt:_bip341_sighash() {
 	local tx="$1" idx="$2" all_amounts="$3" all_scripts="$4" hash_type="${5:-00}"
 
@@ -837,6 +923,56 @@ command:sign() {
 			PSBT_PARSE_INPUT_RECORDS[i]+="$new_record"
 			continue
 		fi
+		# P2PKH (legacy). scriptPubKey = 76a914<pubkey_hash>88ac.
+		# Uses the pre-segwit double-SHA256 sighash (FEAT-014).
+		local p2pkh_script="76a914${pubkey_hash}88ac"
+		if [[ "$script" = "$p2pkh_script" ]]; then
+			local legacy_sighash; legacy_sighash="$(psbt:_legacy_sighash "$tx" "$i" "$p2pkh_script" 01)" || return 8
+			local p2pkh_sig; p2pkh_sig="$(psbt:_sign_sighash "$key_hex" "$legacy_sighash")" || return 9
+			p2pkh_sig+="01"
+			local p2pkh_key="02${pubkey}"
+			local -i p2pkh_kl=$(( ${#p2pkh_key} / 2 )) p2pkh_vl=$(( ${#p2pkh_sig} / 2 ))
+			local p2pkh_rec=""
+			p2pkh_rec+="$(psbt:_emit_varint "$p2pkh_kl")$p2pkh_key"
+			p2pkh_rec+="$(psbt:_emit_varint "$p2pkh_vl")$p2pkh_sig"
+			PSBT_PARSE_INPUT_RECORDS[i]+="$p2pkh_rec"
+			continue
+		fi
+
+		# P2SH-P2WPKH. scriptPubKey = a914<hash160(redeemScript)>87.
+		# redeemScript = 0014<pubkey_hash>. Signing uses BIP-143 same as
+		# P2WPKH (the inner witness program is identical). FEAT-014.
+		local redeem_script="0014${pubkey_hash}"
+		local redeem_hash; redeem_hash="$(printf '%s' "$redeem_script" | psbt:_hash160_hex)"
+		local p2sh_p2wpkh_script="a914${redeem_hash}87"
+		if [[ "$script" = "$p2sh_p2wpkh_script" ]]; then
+			# Also accept if REDEEM_SCRIPT (type 0x04) is present and matches.
+			local redeem_record; redeem_record="$(psbt:_input_record_value "$blob" "04")"
+			if [ -n "$redeem_record" ] && [[ "$redeem_record" != "$redeem_script" ]]; then
+				# REDEEM_SCRIPT present but doesn't match this key — not our input.
+				: # fall through
+			else
+				local p2sh_sc="1976a914${pubkey_hash}88ac"
+				local p2sh_sighash; p2sh_sighash="$(psbt:_bip143_sighash "$tx" "$i" "$p2sh_sc" "$amount_le" 01)" || return 8
+				local p2sh_sig; p2sh_sig="$(psbt:_sign_sighash "$key_hex" "$p2sh_sighash")" || return 9
+				p2sh_sig+="01"
+				local p2sh_key="02${pubkey}"
+				local -i p2sh_kl=$(( ${#p2sh_key} / 2 )) p2sh_vl=$(( ${#p2sh_sig} / 2 ))
+				local p2sh_rec=""
+				p2sh_rec+="$(psbt:_emit_varint "$p2sh_kl")$p2sh_key"
+				p2sh_rec+="$(psbt:_emit_varint "$p2sh_vl")$p2sh_sig"
+				# Emit REDEEM_SCRIPT (type 0x04) if not already present.
+				if [ -z "$redeem_record" ]; then
+					local rs_key="04"
+					local -i rs_kl=1 rs_vl=$(( ${#redeem_script} / 2 ))
+					p2sh_rec+="$(psbt:_emit_varint "$rs_kl")$rs_key"
+					p2sh_rec+="$(psbt:_emit_varint "$rs_vl")$redeem_script"
+				fi
+				PSBT_PARSE_INPUT_RECORDS[i]+="$p2sh_rec"
+				continue
+			fi
+		fi
+
 		# BIP-371 Taproot key-path. Compute Qx lazily.
 		if [[ "$script" =~ ^5120[0-9a-f]{64}$ ]]; then
 			if [ -z "$expected_taproot_script" ]; then
@@ -940,6 +1076,7 @@ command:finalize() {
 		local witness_utxo="" partial_sig_value="" partial_sig_pubkey="" tap_key_sig=""
 		# Walk records, capturing what we need.
 		local tsv_line type_byte key_hex val_hex
+		local redeem_script_val=""
 		while IFS=$'\t' read -r type_byte key_hex val_hex; do
 			case "$type_byte" in
 				01) witness_utxo="$val_hex" ;;
@@ -951,6 +1088,7 @@ command:finalize() {
 						partial_sig_value="$val_hex"
 					fi
 					;;
+				04) redeem_script_val="$val_hex" ;;
 				13)
 					# BIP-371 PSBT_IN_TAP_KEY_SIG: key is just the 0x13 type
 					# byte; value is the 64-byte Schnorr sig (SIGHASH_DEFAULT)
@@ -963,38 +1101,79 @@ command:finalize() {
 			# No previous output info; can't finalize. Pass through.
 			continue
 		fi
+
+		# Extract scriptPubKey from WITNESS_UTXO (8-byte LE value + varint + script).
+		local wu_rest="${witness_utxo:16}"
+		local -i wu_v0=$((16#${wu_rest:0:2}))
+		local wu_script_start=2 wu_script_len_bytes
+		if (( wu_v0 < 0xfd )); then wu_script_len_bytes=$wu_v0
+		elif (( wu_v0 == 0xfd )); then
+			local wu_lo="${wu_rest:2:2}" wu_hi="${wu_rest:4:2}"
+			wu_script_len_bytes=$(( (16#$wu_hi << 8) | 16#$wu_lo ))
+			wu_script_start=6
+		else wu_script_len_bytes=0; fi
+		local wu_script="${wu_rest:wu_script_start:wu_script_len_bytes*2}"
+
 		local new_blob=""
-		# Re-emit WITNESS_UTXO with the same shape (keylen=1, key=01).
+		# Re-emit WITNESS_UTXO (keylen=1, key=01).
 		new_blob+="01"
 		new_blob+="01"
 		new_blob+="$(psbt:_emit_varint $(( ${#witness_utxo} / 2 )))"
 		new_blob+="$witness_utxo"
-		# Build the witness stack per script type.
-		local witness_stack=""
+
 		if [ -n "$tap_key_sig" ]; then
-			# BIP-341 key-path: a one-element stack [sig].
-			local -i sig_len_bytes=$(( ${#tap_key_sig} / 2 ))
-			witness_stack+="$(psbt:_emit_varint 1)"
-			witness_stack+="$(psbt:_emit_varint "$sig_len_bytes")"
-			witness_stack+="$tap_key_sig"
+			# BIP-341 Taproot key-path: one-element witness [sig].
+			local -i tks_len=$(( ${#tap_key_sig} / 2 ))
+			local tap_witness="$(psbt:_emit_varint 1)$(psbt:_emit_varint "$tks_len")$tap_key_sig"
+			new_blob+="01" "08"
+			new_blob+="$(psbt:_emit_varint $(( ${#tap_witness} / 2 )))"
+			new_blob+="$tap_witness"
 		elif [ -n "$partial_sig_value" ]; then
-			# P2WPKH: two-element stack [sig+sighash, pubkey].
-			local -i sig_len_bytes=$(( ${#partial_sig_value} / 2 ))
-			local -i pub_len_bytes=$(( ${#partial_sig_pubkey} / 2 ))
-			witness_stack+="$(psbt:_emit_varint 2)"
-			witness_stack+="$(psbt:_emit_varint "$sig_len_bytes")"
-			witness_stack+="$partial_sig_value"
-			witness_stack+="$(psbt:_emit_varint "$pub_len_bytes")"
-			witness_stack+="$partial_sig_pubkey"
+			# Determine script type from WITNESS_UTXO scriptPubKey.
+			if [[ "$wu_script" =~ ^76a914[0-9a-f]{40}88ac$ ]]; then
+				# P2PKH: FINAL_SCRIPTSIG = OP_DATA(sig) OP_DATA(pubkey).
+				# No witness stack.
+				local -i ps_sig_len=$(( ${#partial_sig_value} / 2 ))
+				local -i ps_pub_len=$(( ${#partial_sig_pubkey} / 2 ))
+				local p2pkh_ss=""
+				p2pkh_ss+="$(printf '%02x' "$ps_sig_len")$partial_sig_value"
+				p2pkh_ss+="$(printf '%02x' "$ps_pub_len")$partial_sig_pubkey"
+				new_blob+="01" "07"
+				new_blob+="$(psbt:_emit_varint $(( ${#p2pkh_ss} / 2 )))"
+				new_blob+="$p2pkh_ss"
+			elif [[ "$wu_script" =~ ^a914[0-9a-f]{40}87$ ]] && [ -n "$redeem_script_val" ]; then
+				# P2SH-P2WPKH: FINAL_SCRIPTSIG = push(redeemScript).
+				# FINAL_SCRIPTWITNESS = [sig, pubkey] (BIP-141).
+				local -i rs_len=$(( ${#redeem_script_val} / 2 ))
+				local p2sh_ss="$(printf '%02x' "$rs_len")$redeem_script_val"
+				new_blob+="01" "07"
+				new_blob+="$(psbt:_emit_varint $(( ${#p2sh_ss} / 2 )))"
+				new_blob+="$p2sh_ss"
+				local -i p2sh_sig_len=$(( ${#partial_sig_value} / 2 ))
+				local -i p2sh_pub_len=$(( ${#partial_sig_pubkey} / 2 ))
+				local p2sh_wit=""
+				p2sh_wit+="$(psbt:_emit_varint 2)"
+				p2sh_wit+="$(psbt:_emit_varint "$p2sh_sig_len")$partial_sig_value"
+				p2sh_wit+="$(psbt:_emit_varint "$p2sh_pub_len")$partial_sig_pubkey"
+				new_blob+="01" "08"
+				new_blob+="$(psbt:_emit_varint $(( ${#p2sh_wit} / 2 )))"
+				new_blob+="$p2sh_wit"
+			else
+				# P2WPKH: two-element witness [sig+sighash, pubkey].
+				local -i pw_sig_len=$(( ${#partial_sig_value} / 2 ))
+				local -i pw_pub_len=$(( ${#partial_sig_pubkey} / 2 ))
+				local p2wpkh_wit=""
+				p2wpkh_wit+="$(psbt:_emit_varint 2)"
+				p2wpkh_wit+="$(psbt:_emit_varint "$pw_sig_len")$partial_sig_value"
+				p2wpkh_wit+="$(psbt:_emit_varint "$pw_pub_len")$partial_sig_pubkey"
+				new_blob+="01" "08"
+				new_blob+="$(psbt:_emit_varint $(( ${#p2wpkh_wit} / 2 )))"
+				new_blob+="$p2wpkh_wit"
+			fi
 		else
 			# Nothing to finalize on this input; pass through unchanged.
 			continue
 		fi
-		# FINAL_SCRIPTWITNESS record (type 0x08).
-		new_blob+="01"
-		new_blob+="08"
-		new_blob+="$(psbt:_emit_varint $(( ${#witness_stack} / 2 )))"
-		new_blob+="$witness_stack"
 		PSBT_PARSE_INPUT_RECORDS[i]="$new_blob"
 	done
 
