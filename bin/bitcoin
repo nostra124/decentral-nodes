@@ -702,11 +702,13 @@ _emit_varint() {
 }
 
 # FEAT-046 (1.32.0): address validation and type detection.
+# FEAT-047 (1.33.0): address generate — derive an address from a raw pubkey.
 #
 # Subcommands:
 #   validate <addr>   — exit 0 if valid, non-zero with message if not
 #   type     <addr>   — print: p2pkh | p2sh | p2wpkh | p2wsh | p2tr
 #   decode   <addr>   — print underlying hash/program as hex
+#   generate <pubkey> — derive a Bitcoin address from a 33-byte compressed pubkey
 #   help              — this message
 
 # Internal: decode a base58check address and print "version_byte hex_payload"
@@ -772,7 +774,7 @@ command:address() {
 	local sub="${1:-help}"
 	shift 2>/dev/null || true
 	case "$sub" in
-		validate|type|decode|help) address:"$sub" "$@" ;;
+		validate|type|decode|generate|help) address:"$sub" "$@" ;;
 		*)
 			error "unknown address subcommand: '$sub'"
 			address:help >&2
@@ -852,20 +854,138 @@ address:decode() {
 	return 1
 }
 
+# FEAT-047: generate an address from a raw 33-byte compressed public key.
+#
+# Usage: address generate [--p2wpkh] [--p2pkh] [--p2tr] [--testnet] <pubkey-hex>
+#
+# Default type: P2WPKH.  Exit 2 on usage error, exit 1 on invalid pubkey.
+address:generate() {
+	local libexec="${SELF_LIBEXEC:?address generate: SELF_LIBEXEC must be set}"
+	local type=p2wpkh testnet=0 pubkey=""
+	while (( $# > 0 )); do
+		case "$1" in
+			--p2wpkh)  type=p2wpkh;  shift ;;
+			--p2pkh)   type=p2pkh;   shift ;;
+			--p2tr)    type=p2tr;    shift ;;
+			--testnet) testnet=1;    shift ;;
+			--*) error "address generate: unknown flag '$1'"; return 2 ;;
+			*)
+				if [ -z "$pubkey" ]; then pubkey="$1"
+				else error "address generate: unexpected argument '$1'"; return 2
+				fi
+				shift ;;
+		esac
+	done
+	if [ -z "$pubkey" ]; then
+		error "address generate: usage: address generate [--p2wpkh|--p2pkh|--p2tr] [--testnet] <pubkey-hex>"
+		return 2
+	fi
+	# Validate: must be a 33-byte compressed point (02|03 prefix + 32 bytes).
+	if [[ ! "$pubkey" =~ ^0[23][[:xdigit:]]{64}$ ]]; then
+		error "address generate: invalid pubkey '$pubkey' (expected 33-byte compressed hex)"
+		return 1
+	fi
+	case "$type" in
+		p2wpkh) address:generate:p2wpkh "$pubkey" "$testnet" ;;
+		p2pkh)  address:generate:p2pkh  "$pubkey" "$testnet" ;;
+		p2tr)   address:generate:p2tr   "$pubkey" "$testnet" ;;
+	esac
+}
+
+# Internal: P2WPKH from compressed pubkey hex; args: pubkey testnet(0|1)
+address:generate:p2wpkh() {
+	local libexec="${SELF_LIBEXEC:?address generate: SELF_LIBEXEC must be set}"
+	local pubkey="$1" testnet="$2"
+	local hrp; hrp=$([ "$testnet" = 1 ] && echo tb || echo bc)
+	# hash160 = RIPEMD-160(SHA-256(pubkey_bytes))
+	local hash160
+	hash160=$(
+		printf '%s' "$pubkey" |
+		while read -rn 2; do printf "\\x$REPLY"; done |
+		openssl dgst -sha256 -binary |
+		openssl dgst -rmd160 -binary |
+		basenc --base16 -w0 |
+		tr A-F a-f
+	)
+	# bech32 encode: witness version 0 + 5-bit groups of the 20-byte program
+	"$libexec/${SELF:-bitcoin}/bip173" encode-values "$hrp" 0 $(
+		echo -n "$hash160" |
+		while read -rn 2; do echo $((16#$REPLY)); done |
+		convertbits 8 5
+	)
+}
+
+# Internal: P2PKH from compressed pubkey hex; args: pubkey testnet(0|1)
+address:generate:p2pkh() {
+	local libexec="${SELF_LIBEXEC:?address generate: SELF_LIBEXEC must be set}"
+	local pubkey="$1" testnet="$2"
+	local ver; ver=$([ "$testnet" = 1 ] && echo 6f || echo 00)
+	# hash160
+	local hash160
+	hash160=$(
+		printf '%s' "$pubkey" |
+		while read -rn 2; do printf "\\x$REPLY"; done |
+		openssl dgst -sha256 -binary |
+		openssl dgst -rmd160 -binary |
+		basenc --base16 -w0 |
+		tr A-F a-f
+	)
+	# version + hash160, then double-SHA256 checksum (first 4 bytes)
+	local payload="${ver}${hash160}"
+	local checksum
+	checksum=$(
+		printf '%s' "$payload" |
+		while read -rn 2; do printf "\\x$REPLY"; done |
+		openssl dgst -sha256 -binary |
+		openssl dgst -sha256 -binary |
+		basenc --base16 -w0 |
+		tr A-F a-f |
+		cut -c1-8
+	)
+	# base58-encode the full payload + checksum
+	printf '%s' "${payload}${checksum}" |
+		while read -rn 2; do printf "\\x$REPLY"; done |
+		"$libexec/${SELF:-bitcoin}/bip13" base58-encode
+}
+
+# Internal: P2TR from compressed pubkey hex; args: pubkey testnet(0|1)
+address:generate:p2tr() {
+	local libexec="${SELF_LIBEXEC:?address generate: SELF_LIBEXEC must be set}"
+	local pubkey="$1" testnet="$2"
+	local hrp; hrp=$([ "$testnet" = 1 ] && echo tb || echo bc)
+	# x-only key: drop the 02/03 prefix byte (2 hex chars)
+	local xonly="${pubkey:2}"
+	# bip341 tweak → tweaked x-only output key (64 hex)
+	local tweaked
+	if ! tweaked=$(SELF_LIBEXEC="$libexec" "$libexec/${SELF:-bitcoin}/bip341" tweak "$xonly" 2>/dev/null); then
+		error "address generate: bip341 tweak failed for pubkey '$pubkey'"
+		return 1
+	fi
+	# bech32m encode: witness version 1 + 5-bit groups of the 32-byte tweaked key
+	"$libexec/${SELF:-bitcoin}/bip350" encode-values "$hrp" 1 $(
+		echo -n "$tweaked" |
+		while read -rn 2; do echo $((16#$REPLY)); done |
+		convertbits 8 5
+	)
+}
+
 address:help() {
 	cat <<-ENDHELP
 	Usage: $SELF address <subcommand> <addr>
 
-	  validate <addr>   exit 0 if <addr> is a valid Bitcoin address (any type);
-	                    non-zero with an error message if not
-	  type <addr>       print the address type:
-	                      p2pkh   — legacy Pay-to-PubKey-Hash (base58, version 0x00/0x6f)
-	                      p2sh    — Pay-to-Script-Hash (base58, version 0x05/0xc4)
-	                      p2wpkh  — native segwit v0, 20-byte program (bech32)
-	                      p2wsh   — native segwit v0, 32-byte program (bech32)
-	                      p2tr    — Taproot / segwit v1, 32-byte program (bech32m)
-	  decode <addr>     print the underlying hash or witness program as hex
-	  help              this message
+	  validate <addr>       exit 0 if <addr> is a valid Bitcoin address (any type);
+	                        non-zero with an error message if not
+	  type <addr>           print the address type:
+	                          p2pkh   — legacy Pay-to-PubKey-Hash (base58, version 0x00/0x6f)
+	                          p2sh    — Pay-to-Script-Hash (base58, version 0x05/0xc4)
+	                          p2wpkh  — native segwit v0, 20-byte program (bech32)
+	                          p2wsh   — native segwit v0, 32-byte program (bech32)
+	                          p2tr    — Taproot / segwit v1, 32-byte program (bech32m)
+	  decode <addr>         print the underlying hash or witness program as hex
+	  generate [--p2wpkh] [--p2pkh] [--p2tr] [--testnet] <pubkey-hex>
+	                        derive a Bitcoin address from a 33-byte compressed
+	                        public key (hex). Default type: P2WPKH (native segwit v0).
+	  help                  this message
 
 	Supports mainnet and testnet addresses (bc1/tb1 bech32/bech32m; 1/3/m/n/2 base58).
 	ENDHELP

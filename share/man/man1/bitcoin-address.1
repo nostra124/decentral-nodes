@@ -1,6 +1,6 @@
-.TH BITCOIN-ADDRESS 1 "2026-05-30" "bitcoin 1.32.0" "Bitcoin Tools"
+.TH BITCOIN-ADDRESS 1 "2026-05-30" "bitcoin 1.33.0" "Bitcoin Tools"
 .SH NAME
-bitcoin\-address \- validate Bitcoin addresses and detect their type
+bitcoin\-address \- validate Bitcoin addresses, detect their type, and generate them from a public key
 .SH SYNOPSIS
 .B bitcoin address validate
 .I addr
@@ -10,6 +10,11 @@ bitcoin\-address \- validate Bitcoin addresses and detect their type
 .br
 .B bitcoin address decode
 .I addr
+.br
+.B bitcoin address generate
+[\fB\-\-p2wpkh\fR|\fB\-\-p2pkh\fR|\fB\-\-p2tr\fR]
+[\fB\-\-testnet\fR]
+.I pubkey-hex
 .br
 .B bitcoin address help
 .SH OPTIONS
@@ -60,6 +65,31 @@ Print the address type on stdout:
 Print the underlying hash or witness program as lowercase hex. For
 P2PKH and P2SH this is the 20-byte hash160; for segwit types it is the
 witness program.
+.TP
+.BI "generate " "[--p2wpkh|--p2pkh|--p2tr] [--testnet] pubkey-hex"
+Derive a Bitcoin address from a 33-byte compressed public key (66 hex
+characters, with a
+.B 02
+or
+.B 03
+prefix byte).
+.IP
+The default address type is
+.B P2WPKH
+(native segwit v0, bech32, BIP-173). Use
+.B \-\-p2pkh
+for legacy base58check, or
+.B \-\-p2tr
+for Taproot (bech32m, BIP-350 / BIP-341).
+.IP
+.B \-\-testnet
+selects the testnet HRP
+.RB ( tb )
+or version byte
+.RB ( 0x6f ).
+.IP
+Exits 2 on usage error (missing or ambiguous argument); exits 1 if the
+public key is not a valid 33-byte compressed point.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -101,3 +131,5 @@ BIP-341 / BIP-350
 .BR bitcoin-bip341 (1)
 .SH HISTORY
 Introduced in bitcoin 1.32.0 (FEAT-046).
+.B generate
+subcommand added in bitcoin 1.33.0 (FEAT-047).

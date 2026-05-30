@@ -2653,3 +2653,60 @@ STR
 	run "$BITCOIN_BIN" help
 	[[ "$output" == *"address"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-047 — address generate: derive addresses from a raw compressed pubkey
+#
+# Test vector: secp256k1 generator point G (compressed)
+#   pubkey  = 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+#   hash160 = 751e76e8199196d454941c45d1b3a323f1433bd6
+#
+# Expected addresses (verified with BIP-173/350/341 reference implementations):
+#   P2WPKH mainnet  = bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+#   P2WPKH testnet  = tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx
+#   P2PKH  mainnet  = 1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH
+#   P2TR   mainnet  = bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9
+# ---------------------------------------------------------------------------
+
+FEAT047_PUBKEY="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+
+@test "FEAT-047 — address generate default (P2WPKH) from a known pubkey" {
+	run "$BITCOIN_BIN" address generate "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4" ]
+}
+
+@test "FEAT-047 — address generate --p2pkh from the same pubkey" {
+	run "$BITCOIN_BIN" address generate --p2pkh "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH" ]
+}
+
+@test "FEAT-047 — address generate --p2wpkh --testnet uses tb1 HRP" {
+	run "$BITCOIN_BIN" address generate --p2wpkh --testnet "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx" ]
+}
+
+@test "FEAT-047 — address generate --p2tr from the same pubkey" {
+	run "$BITCOIN_BIN" address generate --p2tr "$FEAT047_PUBKEY"
+	[ "$status" -eq 0 ]
+	[ "$output" = "bc1pmfr3p9j00pfxjh0zmgp99y8zftmd3s5pmedqhyptwy6lm87hf5sspknck9" ]
+}
+
+@test "FEAT-047 — address generate rejects a malformed pubkey" {
+	run "$BITCOIN_BIN" address generate "deadbeef"
+	[ "$status" -eq 1 ]
+	[[ "$output" == *"invalid pubkey"* ]]
+}
+
+@test "FEAT-047 — address generate rejects empty input" {
+	run "$BITCOIN_BIN" address generate
+	[ "$status" -eq 2 ]
+}
+
+@test "FEAT-047 — address help mentions generate" {
+	run "$BITCOIN_BIN" address help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"generate"* ]]
+}
