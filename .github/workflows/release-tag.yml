@@ -3,16 +3,20 @@ name: release-tag
 # Cloud Claude Code sessions push through a git proxy that rejects
 # refs/tags/* (HTTP 403), and the GitHub MCP toolset exposes no
 # create-tag / create-release call. So the tag for a release is cut
-# here, server-side, where the job token does not go through that
-# proxy. This fires once per version bump: on a push to master it
-# reads VERSION and, if no release/tag for that version exists yet,
-# creates tag vX.Y.Z (and a matching GitHub Release) at the pushed
-# commit. Idempotent — re-runs on later pushes are no-ops until
+# here, server-side, where the job token does not go through that proxy.
+#
+# BUG-023: this used to run on every push to master and cut the tag
+# REGARDLESS of the test suite, so a red suite still shipped a tag
+# (v1.34.0 was tagged on red; see BUG-020/021). It now triggers on the
+# `tests` workflow *completing* and only tags when that run (a) was a
+# push to master/main and (b) concluded success — so a release can no
+# longer outrun a green suite. Idempotent: re-runs are no-ops until
 # VERSION changes again.
 
 on:
-  push:
-    branches: [master, main]
+  workflow_run:
+    workflows: ["tests"]
+    types: [completed]
 
 permissions:
   contents: write
@@ -21,12 +25,23 @@ jobs:
   tag:
     name: tag VERSION if untagged
     runs-on: ubuntu-latest
+    # Gate: only a successful tests run, triggered by a push to master/main.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.head_branch == 'master' ||
+       github.event.workflow_run.head_branch == 'main')
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_run defaults to the default-branch tip; pin to the
+          # exact commit the green tests ran against so the tag lands there.
+          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Create tag + release for VERSION
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           version="$(tr -d '[:space:]' < VERSION)"
@@ -43,8 +58,8 @@ jobs:
             echo "tag $tag already exists on remote; nothing to do"
             exit 0
           fi
-          echo "cutting $tag at ${GITHUB_SHA}"
+          echo "cutting $tag at ${HEAD_SHA} (tests concluded success)"
           gh release create "$tag" \
-            --target "$GITHUB_SHA" \
+            --target "$HEAD_SHA" \
             --title "bitcoin ${version}" \
             --notes "Automated release for ${tag} (VERSION=${version}). See the package commit and issues/done/ for the milestone contents."
