@@ -3577,6 +3577,7 @@ wallet:new() {
 	fi
 
 	mkdir -p "$path" || { error "wallet new: mkdir $path failed"; return 10; }
+	local self_abs; self_abs="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 	(
 		cd "$path" || exit 1
 		git init -q -b main || git init -q
@@ -3586,7 +3587,24 @@ wallet:new() {
 		network=testnet
 		CFG
 		: > descriptors
-		git add config descriptors
+		# FEAT-011 / FEAT-018: custom merge resolvers. addresses union by
+		# row, labels last-writer-wins per row (theirs wins on conflict),
+		# descriptors hard-conflict. The driver invokes this very binary so
+		# the wallet repo stays portable across machines that have bitcoin
+		# in PATH (or have the absolute path here baked in).
+		cat > .gitattributes <<-GA
+		addresses     merge=bitcoin-addresses-union
+		labels/tx     merge=bitcoin-labels-lww
+		labels/utxo   merge=bitcoin-labels-lww
+		descriptors   merge=bitcoin-descriptors-conflict
+		GA
+		git config merge.bitcoin-addresses-union.driver      "$self_abs _merge addresses %A %O %B"
+		git config merge.bitcoin-addresses-union.name        "addresses union, sort by index (FEAT-011)"
+		git config merge.bitcoin-labels-lww.driver           "$self_abs _merge labels-lww %A %O %B"
+		git config merge.bitcoin-labels-lww.name             "labels last-writer-wins per row (FEAT-018 AC7)"
+		git config merge.bitcoin-descriptors-conflict.driver "$self_abs _merge descriptors-conflict %A %O %B"
+		git config merge.bitcoin-descriptors-conflict.name   "descriptors merge always conflicts (FEAT-011 AC4)"
+		git add config descriptors .gitattributes
 		# commit.gpgsign=false: wallet-internal commits run on the
 		# user's wallet repo, not on this project's repo. We don't
 		# assume the user has signing keys set up for their wallet.
@@ -3596,6 +3614,59 @@ wallet:new() {
 	) || { error "wallet new: failed to initialise repo at $path"; return 11; }
 
 	info "wallet '$name' created at $path"
+}
+
+# FEAT-011 / FEAT-018: custom merge driver invoked by git from a wallet
+# repo via the .gitattributes lines set up by `wallet new`. Three kinds:
+#   addresses             union the rows, sort by idx, drop no addresses
+#   labels-lww            last-writer-wins per row (theirs wins; warn)
+#   descriptors-conflict  always non-zero (FEAT-011 AC4)
+# Git invocation per the .gitattributes %A/%O/%B placeholders:
+#   bitcoin _merge <kind> <ours-path> <base-path> <theirs-path>
+# We WRITE the merged content back to <ours-path>; exit 0 = success.
+command:_merge() {
+	local kind="${1:-}" A="${2:-}" O="${3:-}" B="${4:-}"
+	if [ -z "$kind" ] || [ -z "$A" ] || [ -z "$B" ]; then
+		error "_merge: usage: _merge <kind> <ours> <base> <theirs>"
+		return 2
+	fi
+	case "$kind" in
+		addresses)
+			# Union of ours and theirs. `sort -u` dedupes identical rows;
+			# a stable second pass orders by idx (numeric, column 1).
+			LC_ALL=C sort -u -t$'\t' "$A" "$B" \
+				| LC_ALL=C sort -n -t$'\t' -k1,1 > "$A.merged"
+			mv "$A.merged" "$A"
+			;;
+		labels-lww)
+			# Last-writer-wins per row keyed by column 1. theirs wins
+			# whenever ours and theirs disagree; warn on each override.
+			awk -F'\t' -v ours="$A" -v theirs="$B" '
+				BEGIN { OFS="\t" }
+				FILENAME==theirs { tval[$1]=$0; thas[$1]=1; next }
+				FILENAME==ours {
+					if (thas[$1]) { ohas[$1]=$0; next }
+					print
+				}
+				END {
+					for (k in tval) print tval[k]
+					for (k in ohas)
+						if (ohas[k] != tval[k])
+							printf "wallet labels merge: %s — theirs wins over ours\n", k \
+								> "/dev/stderr"
+				}
+			' "$B" "$A" | LC_ALL=C sort > "$A.merged"
+			mv "$A.merged" "$A"
+			;;
+		descriptors-conflict)
+			error "wallet merge: descriptors diverged — manual resolution required"
+			return 1
+			;;
+		*)
+			error "_merge: unknown kind '$kind' (expected: addresses, labels-lww, descriptors-conflict)"
+			return 2
+			;;
+	esac
 }
 
 wallet:ls() {
