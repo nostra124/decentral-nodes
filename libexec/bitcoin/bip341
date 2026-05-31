@@ -55,7 +55,7 @@ pt_add() {
 }
 ec_mul() {
 	local k="${1^^}" cx="${2^^}" cy="${3^^}" rx=INF ry="" bits i b
-	bits=$(dc -e "16i $k [d 2 % n 2 / d 0 <L] d sL x" | tr -d '\\\n')
+	bits=$(dc -e "16i $k [d 2 % n 2 / d 0 <L] d sL x")
 	for ((i=0; i<${#bits}; i++)); do
 		b=${bits:i:1}
 		[ "$b" = 1 ] && read rx ry < <(pt_add "$rx" "$ry" "$cx" "$cy")

@@ -229,100 +229,6 @@ TESTNET_PRIVATE_VERSION_CODE=0x04358394
 command:is-secret() (( $1 == TESTNET_PRIVATE_VERSION_CODE || $1 == MAINNET_PRIVATE_VERSION_CODE ))
 command:is-public() (( $1 == TESTNET_PUBLIC_VERSION_CODE || $1 == MAINNET_PUBLIC_VERSION_CODE ))
 
-# ---------------------------------------------------------------------------
-# ECC fallbacks — used for private-key derivation paths instead of the dc
-# secp256k1 coproc, which is incompatible with Gavin Howard dc >= 7.0 (the
-# R command there is a no-op rather than a stack rotate).  These helpers
-# use Python3 for ECC (portable, no openssl curve-support assumptions) and
-# dc for 256-bit modular arithmetic (no secp256k1 program required).
-# ---------------------------------------------------------------------------
-# secp256k1 curve order n
-_SECP256K1_N="FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
-
-# privkey_hex (with or without leading 00) → compressed pubkey hex (66 chars)
-# Pure-Python secp256k1 scalar multiplication — no openssl curve dependency.
-# Uses -c to avoid any heredoc/stdin interaction inside subshells.
-_privkey_to_pubkey() {
-	local priv="${1#00}"
-	while (( ${#priv} < 64 )); do priv="0${priv}"; done
-	python3 -c '
-import sys
-p=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-GX=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
-GY=0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
-def add(P,Q):
-    if P is None:return Q
-    if Q is None:return P
-    x1,y1=P;x2,y2=Q
-    if x1==x2:
-        if y1!=y2:return None
-        l=3*x1*x1*pow(2*y1,p-2,p)%p
-    else:l=(y2-y1)*pow(x2-x1,p-2,p)%p
-    x3=(l*l-x1-x2)%p;y3=(l*(x1-x3)-y1)%p
-    return(x3,y3)
-def mul(k,P):
-    Q=None
-    while k:
-        if k&1:Q=add(Q,P)
-        P=add(P,P);k>>=1
-    return Q
-k=int(sys.argv[1],16)
-x,y=mul(k,(GX,GY))
-print(("02" if y%2==0 else "03")+format(x,"064x"))
-' "$priv"
-}
-
-# (IL_hex + privkey_hex) mod n → 64-char hex (no 00 prefix)
-# Pure-Python, using -c to avoid heredoc stdin interaction.
-_scalar_add_modn() {
-	local IL="$1" key="${2#00}"
-	while (( ${#key} < 64 )); do key="0${key}"; done
-	python3 -c '
-import sys
-n=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-print(format((int(sys.argv[1],16)+int(sys.argv[2],16))%n,"064x"))
-' "$IL" "$key"
-}
-
-# IL_hex, parent_pubkey_hex → child_pubkey_hex  (secp256k1 point addition: IL*G + parent)
-# Used for non-hardened public-key child derivation (watch-only wallets).
-# Pure-Python, using -c to avoid heredoc stdin interaction.
-_pubkey_tweak_add() {
-	local IL="$1" parent="$2"
-	python3 -c '
-import sys
-p=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-GX=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
-GY=0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
-def add(P,Q):
-    if P is None:return Q
-    if Q is None:return P
-    x1,y1=P;x2,y2=Q
-    if x1==x2:
-        if y1!=y2:return None
-        l=3*x1*x1*pow(2*y1,p-2,p)%p
-    else:l=(y2-y1)*pow(x2-x1,p-2,p)%p
-    x3=(l*l-x1-x2)%p;y3=(l*(x1-x3)-y1)%p
-    return(x3,y3)
-def mul(k,P):
-    Q=None
-    while k:
-        if k&1:Q=add(Q,P)
-        P=add(P,P);k>>=1
-    return Q
-def dec(h):
-    x=int(h[2:],16);y2=(pow(x,3,p)+7)%p;y=pow(y2,(p+1)//4,p)
-    if(y%2==0)!=(h[:2]=="02"):y=p-y
-    return(x,y)
-IL_hex,par_hex=sys.argv[1],sys.argv[2]
-IL_G=mul(int(IL_hex,16),(GX,GY))
-P3=add(IL_G,dec(par_hex))
-if P3 is None:sys.exit(1)
-x,y=P3
-print(("02" if y%2==0 else "03")+format(x,"064x"))
-' "$IL" "$parent"
-}
-
 command:create() {
 	while getopts "st" flag; do
 		if [ x"$1" = x'-t' ]; then
@@ -429,6 +335,8 @@ command:derive() {
 		
 		path="${path#[mM]}"
 		if test -n "$path"; then
+			coproc DC { dc -e "$secp256k1" -; }
+			trap 'echo q >&"${DC[1]}"' EXIT RETURN
 			while [[ "$path" =~ ^/(N|[[:digit:]]+h?) ]]; do
 				path="${path#/${BASH_REMATCH[1]}}"
 				local operator="${BASH_REMATCH[1]}"
@@ -442,9 +350,8 @@ command:derive() {
 							$((TESTNET_PRIVATE_VERSION_CODE)))
 								version=$TESTNET_PUBLIC_VERSION_CODE;;&
 							*)
-								key=$(_privkey_to_pubkey "${key}") ||
-									fatal "wallet derive: pubkey derivation failed" 6
-								while ((${#key} < 66)); do key="0$key"; done
+								echo "4d*doilgx${key^^}l;xlex" >&"${DC[1]}"
+								read key <&"${DC[0]}"
 						esac
 						;;
 					+([[:digit:]])h)
@@ -456,10 +363,9 @@ command:derive() {
 							child_number=operator
 						fi
 						if command:is-secret "$version"; then
-							parent_id=$(_privkey_to_pubkey "${key}") ||
-								fatal "wallet derive: parent pubkey derivation failed" 6
-							local hmac128 left right
-							hmac128=$(
+							echo "4d*doilgx${key^^}l;xlex" >&"${DC[1]}"
+							read parent_id <&"${DC[0]}"
+							{
 								{
 									if (( child_number >= (1 << 31) )); then
 										printf "\x00"
@@ -468,47 +374,47 @@ command:derive() {
 										basenc --base16 -d <<<"${parent_id^^[a-f]}"
 									fi
 									command:ser32 $child_number
-								} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary |
-								xxd -p | tr -d '\n'
-							)
-							left="${hmac128:0:64}"
-							right="${hmac128:64:64}"
-							local new_key
-							new_key=$(_scalar_add_modn "$left" "$key") ||
-								fatal "wallet derive: scalar arithmetic failed" 6
-							while ((${#new_key} < 64)); do new_key="0${new_key}"; done
-							key="00${new_key}"
-							chain_code="$right"
+								} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary | basenc --base16 -w64 | 
+								{
+									read left
+									read right
+									echo "4d*doi$right ${key^^} $left+ln%p"
+								}
+							} >&"${DC[1]}"
 						elif command:is-public "$version"; then
 							parent_id="$key"
 							if (( child_number >= (1 << 31) )); then
 								fatal "extented public key can't produce a hardened child" 4
 							else
-								local hmac128 left right
-								hmac128=$(
+								{
 									{
 										basenc --base16 -d <<<"${key^^[a-f]}"
 										command:ser32 $child_number
-									} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary |
-									xxd -p | tr -d '\n'
-								)
-								left="${hmac128:0:64}"
-								right="${hmac128:64:64}"
-								local new_pubkey
-								new_pubkey=$(_pubkey_tweak_add "${left}" "${key}") ||
-									fatal "wallet derive: public child derivation failed" 6
-								while ((${#new_pubkey} < 66)); do new_pubkey="0${new_pubkey}"; done
-								key="$new_pubkey"
-								chain_code="$right"
+									} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary | basenc --base16 -w64 |
+									{
+										read left
+										read right
+										echo "8d+doi$right lgx$left l;x ${key^^}l>x l<~rljx lPxlex 0"
+									}
+								} >&"${DC[1]}"
 							fi
 						else
 							fatal "version is neither private nor public?!" 111
 						fi
+						read key <&"${DC[0]}"
+						while ((${#key} < 66)); do
+							key="0$key"
+						done
+						echo rp >&"${DC[1]}"
+						read chain_code <&"${DC[0]}"
+						while ((${#chain_code} < 64)); do
+							chain_code="0$chain_code"
+						done
 						parent_fp="0x$(basenc --base16 -d <<<"${parent_id^^[a-f]}" | command:hash160 | head -c 4 | basenc --base16 -w0)"
 						;;
 				esac
 			done
-		fi
+		fi				
 		printf "$header_format%s%s" $version $depth $parent_fp $child_number "$chain_code" "$key" |
 		basenc --base16 -d | if [[ -t 1 ]]; then
 			$SELF bip13 base58-encode
