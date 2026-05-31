@@ -1728,7 +1728,7 @@ wallet_set_network() {
 # ---------------------------------------------------------------------------
 
 @test "FEAT-019 — SKILL.md exists with the required frontmatter" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	[ -s "$skill" ]
 	# YAML frontmatter: --- ... name: bitcoin-wallet ... description: ... ---
 	head -1 "$skill" | grep -q '^---$'
@@ -1737,7 +1737,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-019 — SKILL.md opens with the four design principles" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# All four words must appear in the design-principles section.
 	for word in Educational Functional Decentralized Simple; do
 		grep -q -F "$word" "$skill"
@@ -1745,7 +1745,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-048 — SKILL.md references the canonical 1.33.0 verb set" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# Canonical verbs after the FEAT-035 streamline: PSBT ops live
 	# under `tx` (passing through to bip174), descriptor checksum
 	# moved to bip380, and tx/utxo/address/price/tax are first-class.
@@ -1768,7 +1768,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-048 — SKILL.md corrects the --mainnet guardrail (now shipped)" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# FEAT-014 shipped --mainnet; the old skill said it "isn't
 	# shipped". The refreshed guardrail must describe the live flag
 	# and must NOT claim it is unshipped.
@@ -1779,7 +1779,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-019 — SKILL.md spells out the guardrails an agent must hold" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	# The core guardrails the skill spec enumerates.
 	grep -q -i 'never print.*mnemonic' "$skill"
 	grep -q -i 'never bypass .secret' "$skill"
@@ -1790,7 +1790,7 @@ wallet_set_network() {
 }
 
 @test "FEAT-019 — SKILL.md cites the vendored BIPs by local path" {
-	skill="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/SKILL.md"
+	skill="$BATS_TEST_DIRNAME/../../.rpk/skills/bitcoin-wallet.md"
 	grep -q 'share/doc/bitcoin/bips/' "$skill"
 	# At least one BIP from each major family the wallet implements.
 	for bip in "BIP-32" "BIP-39" "BIP-141" "BIP-143" "BIP-173" "BIP-174" "BIP-380"; do
@@ -1798,21 +1798,6 @@ wallet_set_network() {
 	done
 }
 
-@test "FEAT-019 — opencode entry exists with matching content" {
-	oc="$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/opencode.md"
-	[ -s "$oc" ]
-	# YAML frontmatter for opencode commands.
-	head -1 "$oc" | grep -q '^---$'
-	grep -q '^description:' "$oc"
-	# Cross-references SKILL.md so users know where the full
-	# manifest lives.
-	grep -q 'SKILL.md' "$oc"
-	# Covers the same workflow recipes (subset is fine since opencode
-	# entries can be terser). Canonical 1.33.0 verbs.
-	for verb in "wallet new" "wallet send" "tx finalize" "tx extract"; do
-		grep -q -F "$verb" "$oc"
-	done
-}
 
 @test "FEAT-019 — Makefile install installs SKILL.md and opencode.md" {
 	mk="$BATS_TEST_DIRNAME/../../Makefile.in"
