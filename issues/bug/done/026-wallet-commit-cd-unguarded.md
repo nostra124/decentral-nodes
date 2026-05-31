@@ -2,7 +2,7 @@
 id: BUG-026
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # wallet git-commit subshells `cd "$path"` without a guard — can commit into the wrong repo
