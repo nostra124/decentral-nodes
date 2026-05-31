@@ -241,10 +241,11 @@ _SECP256K1_N="FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
 
 # privkey_hex (with or without leading 00) → compressed pubkey hex (66 chars)
 # Pure-Python secp256k1 scalar multiplication — no openssl curve dependency.
+# Uses -c to avoid any heredoc/stdin interaction inside subshells.
 _privkey_to_pubkey() {
 	local priv="${1#00}"
 	while (( ${#priv} < 64 )); do priv="0${priv}"; done
-	python3 - "$priv" <<'PYEOF'
+	python3 -c '
 import sys
 p=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 GX=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
@@ -267,30 +268,28 @@ def mul(k,P):
     return Q
 k=int(sys.argv[1],16)
 x,y=mul(k,(GX,GY))
-print(('02' if y%2==0 else '03')+f'{x:064x}')
-PYEOF
+print(("02" if y%2==0 else "03")+format(x,"064x"))
+' "$priv"
 }
 
 # (IL_hex + privkey_hex) mod n → 64-char hex (no 00 prefix)
-# Pure-Python — avoids dc output-format variance across platforms (GNU dc
-# vs Gavin Howard dc differ in how they handle I/16o ordering and output
-# radix, producing inconsistent hex strings on some Ubuntu configurations).
+# Pure-Python, using -c to avoid heredoc stdin interaction.
 _scalar_add_modn() {
 	local IL="$1" key="${2#00}"
 	while (( ${#key} < 64 )); do key="0${key}"; done
-	python3 - "$IL" "$key" <<'PYEOF'
+	python3 -c '
 import sys
 n=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-print(f'{(int(sys.argv[1],16)+int(sys.argv[2],16))%n:064x}')
-PYEOF
+print(format((int(sys.argv[1],16)+int(sys.argv[2],16))%n,"064x"))
+' "$IL" "$key"
 }
 
 # IL_hex, parent_pubkey_hex → child_pubkey_hex  (secp256k1 point addition: IL*G + parent)
 # Used for non-hardened public-key child derivation (watch-only wallets).
-# Pure-Python — no openssl curve-support dependency.
+# Pure-Python, using -c to avoid heredoc stdin interaction.
 _pubkey_tweak_add() {
 	local IL="$1" parent="$2"
-	python3 - "$IL" "$parent" <<'PYEOF'
+	python3 -c '
 import sys
 p=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
 GX=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
@@ -313,16 +312,15 @@ def mul(k,P):
     return Q
 def dec(h):
     x=int(h[2:],16);y2=(pow(x,3,p)+7)%p;y=pow(y2,(p+1)//4,p)
-    if(y%2==0)!=(h[:2]=='02'):y=p-y
+    if(y%2==0)!=(h[:2]=="02"):y=p-y
     return(x,y)
-def enc(P):
-    x,y=P;return('02' if y%2==0 else '03')+f'{x:064x}'
 IL_hex,par_hex=sys.argv[1],sys.argv[2]
 IL_G=mul(int(IL_hex,16),(GX,GY))
 P3=add(IL_G,dec(par_hex))
 if P3 is None:sys.exit(1)
-print(enc(P3))
-PYEOF
+x,y=P3
+print(("02" if y%2==0 else "03")+format(x,"064x"))
+' "$IL" "$parent"
 }
 
 command:create() {
