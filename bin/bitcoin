@@ -1493,7 +1493,7 @@ utxo:freeze() {
 	printf '%s\t%s\t%s\n' "$outpoint" "$reason" "$ts" >> "$tmp"
 	mv "$tmp" "$file"
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		git add frozen.tsv
 		if ! git diff --cached --quiet 2>/dev/null; then
 			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
@@ -1532,7 +1532,7 @@ utxo:unfreeze() {
 	awk -F'\t' -v o="$outpoint" '$1 != o { print }' "$file" > "$tmp"
 	mv "$tmp" "$file"
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		git add frozen.tsv
 		if ! git diff --cached --quiet 2>/dev/null; then
 			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
@@ -2497,7 +2497,7 @@ wallet:derive() {
 	# Append as: <index><tab><address><tab><label>  (label initially empty)
 	printf '%d\t%s\t\n' "$idx" "$addr" >> "$ledger"
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		git add addresses
 		# commit.gpgsign=false: wallet-internal commits run on the
 		# user's wallet repo, not on this project's repo. We don't
@@ -2544,7 +2544,7 @@ wallet:_derive_walk() {
 	done
 	if (( found > 0 )); then
 		(
-			cd "$path"
+			cd "$path" || exit 1
 			git add addresses
 			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
 			    -c commit.gpgsign=false \
@@ -2780,7 +2780,7 @@ wallet:_label_addr() {
 		else        print $0;
 	}' "$ledger" > "$tmp" && mv "$tmp" "$ledger"
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		git add addresses
 		if ! git diff --cached --quiet 2>/dev/null; then
 			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
@@ -2818,7 +2818,7 @@ wallet:_label_kv() {
 	fi
 	mv "$tmp" "$file"
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		git add "labels/$kind"
 		if ! git diff --cached --quiet 2>/dev/null; then
 			local action
@@ -3640,7 +3640,7 @@ wallet:index() {
 
 	# Commit if anything changed.
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		git add transactions history 2>/dev/null
 		if ! git diff --cached --quiet 2>/dev/null; then
 			git -c user.email=wallet@bitcoin -c user.name=bitcoin \
@@ -3796,7 +3796,7 @@ wallet:remote() {
 		return 3
 	fi
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		# Replace existing remote with the new URL idempotently.
 		if git remote get-url "$rname" >/dev/null 2>&1; then
 			git remote set-url "$rname" "$url"
@@ -3823,7 +3823,7 @@ wallet:push() {
 		return 4
 	fi
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		local branch
 		branch="$(git symbolic-ref --short HEAD 2>/dev/null)" || branch=main
 		git push -q "$rname" "$branch"
@@ -3847,7 +3847,7 @@ wallet:pull() {
 		return 4
 	fi
 	(
-		cd "$path"
+		cd "$path" || exit 1
 		local branch
 		branch="$(git symbolic-ref --short HEAD 2>/dev/null)" || branch=main
 		git -c user.email=wallet@bitcoin -c user.name=bitcoin \
