@@ -272,12 +272,17 @@ PYEOF
 }
 
 # (IL_hex + privkey_hex) mod n → 64-char hex (no 00 prefix)
+# Pure-Python — avoids dc output-format variance across platforms (GNU dc
+# vs Gavin Howard dc differ in how they handle I/16o ordering and output
+# radix, producing inconsistent hex strings on some Ubuntu configurations).
 _scalar_add_modn() {
-	local IL="${1^^[a-f]}" key="${2#00}"
-	key="${key^^[a-f]}"
+	local IL="$1" key="${2#00}"
 	while (( ${#key} < 64 )); do key="0${key}"; done
-	# 16o must come before I16i: after I16i the literal "16" parses as hex 22.
-	printf '16o I16i %s %s + %s %% p\n' "$IL" "$key" "$_SECP256K1_N" | dc 2>/dev/null
+	python3 - "$IL" "$key" <<'PYEOF'
+import sys
+n=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+print(f'{(int(sys.argv[1],16)+int(sys.argv[2],16))%n:064x}')
+PYEOF
 }
 
 # IL_hex, parent_pubkey_hex → child_pubkey_hex  (secp256k1 point addition: IL*G + parent)
@@ -455,8 +460,8 @@ command:derive() {
 						if command:is-secret "$version"; then
 							parent_id=$(_privkey_to_pubkey "${key}") ||
 								fatal "wallet derive: parent pubkey derivation failed" 6
-							local hmac_hex left right
-							hmac_hex=$(
+							local hmac128 left right
+							hmac128=$(
 								{
 									if (( child_number >= (1 << 31) )); then
 										printf "\x00"
@@ -466,39 +471,37 @@ command:derive() {
 									fi
 									command:ser32 $child_number
 								} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary |
-								basenc --base16 -w64
+								xxd -p | tr -d '\n'
 							)
-							left="${hmac_hex%%$'\n'*}"
-							right="${hmac_hex##*$'\n'}"
+							left="${hmac128:0:64}"
+							right="${hmac128:64:64}"
 							local new_key
 							new_key=$(_scalar_add_modn "$left" "$key") ||
 								fatal "wallet derive: scalar arithmetic failed" 6
 							while ((${#new_key} < 64)); do new_key="0${new_key}"; done
 							key="00${new_key}"
 							chain_code="$right"
-							while ((${#chain_code} < 64)); do chain_code="0$chain_code"; done
 						elif command:is-public "$version"; then
 							parent_id="$key"
 							if (( child_number >= (1 << 31) )); then
 								fatal "extented public key can't produce a hardened child" 4
 							else
-								local hmac_hex left right
-								hmac_hex=$(
+								local hmac128 left right
+								hmac128=$(
 									{
 										basenc --base16 -d <<<"${key^^[a-f]}"
 										command:ser32 $child_number
 									} | openssl dgst -sha512 -mac hmac -macopt hexkey:"$chain_code" -binary |
-									basenc --base16 -w64
+									xxd -p | tr -d '\n'
 								)
-								left="${hmac_hex%%$'\n'*}"
-								right="${hmac_hex##*$'\n'}"
+								left="${hmac128:0:64}"
+								right="${hmac128:64:64}"
 								local new_pubkey
 								new_pubkey=$(_pubkey_tweak_add "${left}" "${key}") ||
 									fatal "wallet derive: public child derivation failed" 6
 								while ((${#new_pubkey} < 66)); do new_pubkey="0${new_pubkey}"; done
 								key="$new_pubkey"
 								chain_code="$right"
-								while ((${#chain_code} < 64)); do chain_code="0$chain_code"; done
 							fi
 						else
 							fatal "version is neither private nor public?!" 111
