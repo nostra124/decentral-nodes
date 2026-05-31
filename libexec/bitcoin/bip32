@@ -233,28 +233,42 @@ command:is-public() (( $1 == TESTNET_PUBLIC_VERSION_CODE || $1 == MAINNET_PUBLIC
 # ECC fallbacks — used for private-key derivation paths instead of the dc
 # secp256k1 coproc, which is incompatible with Gavin Howard dc >= 7.0 (the
 # R command there is a no-op rather than a stack rotate).  These helpers
-# require only openssl (for point multiply) and dc (for 256-bit modular
-# arithmetic, no secp256k1 program required).
+# use Python3 for ECC (portable, no openssl curve-support assumptions) and
+# dc for 256-bit modular arithmetic (no secp256k1 program required).
 # ---------------------------------------------------------------------------
 # secp256k1 curve order n
 _SECP256K1_N="FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"
 
 # privkey_hex (with or without leading 00) → compressed pubkey hex (66 chars)
+# Pure-Python secp256k1 scalar multiplication — no openssl curve dependency.
 _privkey_to_pubkey() {
 	local priv="${1#00}"
 	while (( ${#priv} < 64 )); do priv="0${priv}"; done
-	local der="302e0201010420${priv}a00706052b8104000a"
-	local raw
-	raw=$(printf '%s' "$der" | xxd -r -p |
-	      openssl pkey -inform DER -pubout -outform DER 2>/dev/null |
-	      tail -c 65 | basenc --base16 -w0 | tr A-F a-f) || return 1
-	[[ "$raw" =~ ^04[[:xdigit:]]{128}$ ]] || return 1
-	local x="${raw:2:64}" y="${raw:66:64}"
-	if (( 16#${y: -2} % 2 == 0 )); then
-		printf '02%s\n' "$x"
-	else
-		printf '03%s\n' "$x"
-	fi
+	python3 - "$priv" <<'PYEOF'
+import sys
+p=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+GX=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+GY=0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+def add(P,Q):
+    if P is None:return Q
+    if Q is None:return P
+    x1,y1=P;x2,y2=Q
+    if x1==x2:
+        if y1!=y2:return None
+        l=3*x1*x1*pow(2*y1,p-2,p)%p
+    else:l=(y2-y1)*pow(x2-x1,p-2,p)%p
+    x3=(l*l-x1-x2)%p;y3=(l*(x1-x3)-y1)%p
+    return(x3,y3)
+def mul(k,P):
+    Q=None
+    while k:
+        if k&1:Q=add(Q,P)
+        P=add(P,P);k>>=1
+    return Q
+k=int(sys.argv[1],16)
+x,y=mul(k,(GX,GY))
+print(('02' if y%2==0 else '03')+f'{x:064x}')
+PYEOF
 }
 
 # (IL_hex + privkey_hex) mod n → 64-char hex (no 00 prefix)
@@ -268,37 +282,40 @@ _scalar_add_modn() {
 
 # IL_hex, parent_pubkey_hex → child_pubkey_hex  (secp256k1 point addition: IL*G + parent)
 # Used for non-hardened public-key child derivation (watch-only wallets).
+# Pure-Python — no openssl curve-support dependency.
 _pubkey_tweak_add() {
 	local IL="$1" parent="$2"
 	python3 - "$IL" "$parent" <<'PYEOF'
-import sys, subprocess
-p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-def inv(a): return pow(a, p-2, p)
-def add(P, Q):
-    if P is None: return Q
-    if Q is None: return P
-    x1,y1=P; x2,y2=Q
+import sys
+p=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+GX=0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+GY=0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+def add(P,Q):
+    if P is None:return Q
+    if Q is None:return P
+    x1,y1=P;x2,y2=Q
     if x1==x2:
-        if y1!=y2: return None
-        l=3*x1*x1*inv(2*y1)%p
-    else: l=(y2-y1)*inv(x2-x1)%p
-    x3=(l*l-x1-x2)%p; y3=(l*(x1-x3)-y1)%p
-    return (x3,y3)
+        if y1!=y2:return None
+        l=3*x1*x1*pow(2*y1,p-2,p)%p
+    else:l=(y2-y1)*pow(x2-x1,p-2,p)%p
+    x3=(l*l-x1-x2)%p;y3=(l*(x1-x3)-y1)%p
+    return(x3,y3)
+def mul(k,P):
+    Q=None
+    while k:
+        if k&1:Q=add(Q,P)
+        P=add(P,P);k>>=1
+    return Q
 def dec(h):
-    x=int(h[2:],16); y2=(pow(x,3,p)+7)%p; y=pow(y2,(p+1)//4,p)
-    if (y%2==0)!=(h[:2]=='02'): y=p-y
-    return (x,y)
+    x=int(h[2:],16);y2=(pow(x,3,p)+7)%p;y=pow(y2,(p+1)//4,p)
+    if(y%2==0)!=(h[:2]=='02'):y=p-y
+    return(x,y)
 def enc(P):
-    x,y=P; return ('02' if y%2==0 else '03')+f'{x:064x}'
-IL_hex, par_hex = sys.argv[1], sys.argv[2]
-der='302e0201010420'+IL_hex.lower()+'a00706052b8104000a'
-proc=subprocess.run(['openssl','pkey','-inform','DER','-pubout','-outform','DER'],
-    input=bytes.fromhex(der),capture_output=True)
-if proc.returncode!=0: sys.exit(1)
-raw=proc.stdout[-65:].hex()
-px='02'+raw[2:66] if int(raw[128:130],16)%2==0 else '03'+raw[2:66]
-P3=add(dec(px),dec(par_hex))
-if P3 is None: sys.exit(1)
+    x,y=P;return('02' if y%2==0 else '03')+f'{x:064x}'
+IL_hex,par_hex=sys.argv[1],sys.argv[2]
+IL_G=mul(int(IL_hex,16),(GX,GY))
+P3=add(IL_G,dec(par_hex))
+if P3 is None:sys.exit(1)
 print(enc(P3))
 PYEOF
 }
