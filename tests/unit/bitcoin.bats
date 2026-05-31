@@ -2556,6 +2556,33 @@ STR
 }
 
 # ---------------------------------------------------------------------------
+# BUG-026 — wallet state-change verbs commit inside a subshell of the form
+#   ( cd "$path"; git add …; git -c user.email=wallet@bitcoin … commit … )
+# An UNGUARDED `cd "$path"` lets the subshell continue when cd fails (wallet
+# dir removed mid-run, racing test, unwritable), so the git commands run in
+# the INHERITED cwd — committing wallet state into whatever git repo the user
+# is standing in, under the wallet@bitcoin identity. (Observed live: rogue
+# commits 04d83d6 "wallet derive: …" / 08df1db "wallet index: …" landed in
+# this project's checkout.) Every such cd must abort the subshell on failure
+# (`cd "$path" || exit 1`). Structural guard, same category as the FEAT-195
+# dependency-boundary tests: a permission/TOCTOU behavioural repro is
+# non-deterministic under root (which ignores permission bits) and the real
+# dir-removed-mid-run trigger is an unstageable race.
+# ---------------------------------------------------------------------------
+@test "BUG-026 — every wallet commit subshell guards 'cd \$path'" {
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	# A standalone, unguarded `cd "$path"` (no `|| exit`/`|| return`/`|| {`
+	# on the same line) is the dangerous form. Safe forms are
+	# `cd "$path" || exit 1` and `( cd "$path" && … )`.
+	bad=0
+	while IFS= read -r line; do
+		bad=$((bad + 1))
+		echo "UNGUARDED cd in bin/bitcoin: $line" >&2
+	done < <(grep -nE '^[[:space:]]*cd "\$path"[[:space:]]*$' "$script")
+	[ "$bad" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
 # FEAT-045: watch-only wallets.
 # ---------------------------------------------------------------------------
 
