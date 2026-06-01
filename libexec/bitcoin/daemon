@@ -271,9 +271,11 @@ daemon:_units_dir() {
 
 # Data directory for the given mode.
 daemon:_datadir() {
-	local mode=$1 dir
+	local mode=$1
 	if [ "$mode" = system ]; then
 		printf '%s/var/lib/bitcoin\n' "$(daemon:_root)"
+	elif [ "$(daemon:_os)" = macos ]; then
+		printf '%s/Library/Application Support/Bitcoin\n' "$HOME"
 	else
 		printf '%s/.bitcoin\n' "$HOME"
 	fi
