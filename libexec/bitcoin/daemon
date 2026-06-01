@@ -275,9 +275,7 @@ daemon:_datadir() {
 	if [ "$mode" = system ]; then
 		printf '%s/var/lib/bitcoin\n' "$(daemon:_root)"
 	else
-		dir="${XDG_DATA_HOME:-$HOME/.local/share}"
-		dir="${dir/#\~/$HOME}"
-		printf '%s/bitcoin\n' "$dir"
+		printf '%s/.bitcoin\n' "$HOME"
 	fi
 }
 
