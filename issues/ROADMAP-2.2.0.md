@@ -1,12 +1,12 @@
-# Roadmap — 1.36.0 (minor)
+# Roadmap — 2.2.0 (minor)
 
 Fulcrum as a wallet backend. Wires the `bitcoin` side to the Fulcrum
-server stood up in 1.35.0: a `fulcrum` Electrum-protocol backend so
+server stood up in 2.1.0: a `fulcrum` Electrum-protocol backend so
 `wallet balance` / `wallet index` / `broadcast` query the operator's
 own node instead of the public mempool.space API.
 
-**Prerequisite:** 1.35.0 (a runnable Fulcrum server). This release is
-deliberately split from 1.35.0 because it touches a different surface
+**Prerequisite:** 2.1.0 (a runnable Fulcrum server). This release is
+deliberately split from 2.1.0 because it touches a different surface
 (the `backend` abstraction, FEAT-012) and is independently testable
 against a stubbed Electrum responder.
 
@@ -42,4 +42,4 @@ FEAT-059   single item
   adds no forbidden sibling call — FEAT-059 AC-7).
 - `wallet balance` wiring test passes with `fulcrum` as the active
   backend (FEAT-059 AC-6).
-- VERSION bumped to 1.36.0 per skills/version.md.
+- VERSION bumped to 2.2.0 per skills/version.md.

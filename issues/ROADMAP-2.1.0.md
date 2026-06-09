@@ -1,11 +1,11 @@
-# Roadmap — 1.35.0 (minor)
+# Roadmap — 2.1.0 (minor)
 
 Fulcrum server management. Ships a second top-level command,
 `fulcrum`, from the bitcoin package: standing up, configuring, and
 inspecting a Fulcrum Electrum server that indexes the local bitcoind.
 This release is the *server-management* half only — the wallet-side
 Electrum backend that queries Fulcrum is FEAT-059, scheduled for
-1.36.0 (which depends on this release).
+2.2.0 (which depends on this release).
 
 All four items are new, backward-compatible behaviour (new command,
 new plugins) — hence the minor bump. No existing `bitcoin` contract
@@ -66,4 +66,4 @@ FEAT-058   admin inspection — needs the admin port that config init sets up
   `fulcrum` binaries and both libexec trees (FEAT-055 AC-1).
 - The fulcrum dependency-boundary tests pass and reject a planted
   forbidden-sibling call (FEAT-055 AC-5).
-- VERSION bumped to 1.35.0 per skills/version.md.
+- VERSION bumped to 2.1.0 per skills/version.md.
