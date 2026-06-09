@@ -1225,7 +1225,10 @@ feat034_env() {
 @test "FEAT-034 — disable preserves the data directory" {
 	feat034_env linux
 	"$BITCOIN_BIN" daemon enable --user
-	local datadir="$XDG_DATA_HOME/bitcoin"
+	# BUG-027: assert on the datadir `enable` actually creates
+	# (daemon:_datadir → $HOME/.bitcoin since 0d2d7d1), not the XDG
+	# wallet store setup() pre-creates — otherwise the test is vacuous.
+	local datadir="$HOME/.bitcoin"
 	[ -d "$datadir" ]
 	"$BITCOIN_BIN" daemon disable --user
 	[ -d "$datadir" ]
