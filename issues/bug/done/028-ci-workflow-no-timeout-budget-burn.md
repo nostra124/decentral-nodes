@@ -49,8 +49,10 @@ rapid pushes multiply it.
 - Add a top-level `concurrency` block keyed on the ref with
   `cancel-in-progress: true`, so a new push cancels the previous run on
   the same PR/branch.
-- Add `timeout-minutes` to both jobs (`unit`: 15, `lint`: 10) so a
-  hang fails fast instead of running for 6 hours.
+- Add `timeout-minutes` to both jobs (`unit`: 30, `lint`: 10) so a
+  hang is bounded instead of running for 6 hours. The unit suite runs
+  ~9 min (measured; slower under runner throttling), so 30 is headroom,
+  not a tight SLA.
 - Set `BATS_TEST_TIMEOUT: 120` for the bats step so an individual
   hanging test is killed and named, rather than wedging the whole job.
 
