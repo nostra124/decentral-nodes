@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+
+############################################################################
+# fulcrum admin client (FEAT-058 inspection + FEAT-060 moderation).
+#
+# Inspection : info / sync / stats / clients / logs
+# Moderation : peers / addpeer / rmpeer / ban / unban / banlist /
+#              kick / loglevel
+#
+# A thin client over Fulcrum's line-based admin RPC (newline-delimited
+# JSON on a localhost port). The per-verb top-level entries
+# (libexec/fulcrum/info, …/sync, …) are symlinks to this file, so
+# `fulcrum sync` dispatches here by SELF. Tests stub the socket with a
+# canned-JSON fixture via $FULCRUM_ADMIN_FIXTURE (a dir of <method>.json,
+# or a single file used for getinfo). No shared library (§4/§5).
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+has() { type -t "$1:$2" | grep -q function; }
+
+admin:_os() {
+	local os="${FULCRUM_OS:-}"
+	[ -n "$os" ] && { printf '%s\n' "$os"; return; }
+	case "$(uname -s)" in Linux) echo linux ;; Darwin) echo macos ;; *) echo unknown ;; esac
+}
+
+admin:_addr() { printf '%s\n' "${FULCRUM_ADMIN_ADDR:-127.0.0.1:8000}"; }
+
+# The command's own VERSION (root VERSION in a dev tree, else the
+# installed share/fulcrum/version) — distinct from this plugin's VERSION.
+admin:_cmd_version() {
+	local d; d="$(cd "$(dirname "$0")" && pwd)"
+	cat "$d/../../VERSION" 2>/dev/null || cat "$d/../../share/fulcrum/version" 2>/dev/null || echo unknown
+}
+
+# admin:_call <method> [arg] — emit the JSON reply on stdout, non-zero on
+# an unreachable port. $FULCRUM_ADMIN_FIXTURE short-circuits the socket.
+admin:_call() {
+	local method="$1"
+	if [ -n "${FULCRUM_ADMIN_FIXTURE:-}" ]; then
+		local f
+		if [ -d "$FULCRUM_ADMIN_FIXTURE" ]; then f="$FULCRUM_ADMIN_FIXTURE/$method.json"
+		else f="$FULCRUM_ADMIN_FIXTURE"; fi
+		[ -f "$f" ] && { cat "$f"; return 0; }
+		return 1
+	fi
+	local addr host port req reply
+	addr="$(admin:_addr)"; host="${addr%:*}"; port="${addr##*:}"
+	req="{\"id\":1,\"method\":\"$method\"}"
+	# Group-redirect so a failed /dev/tcp connect is silent (the fd still
+	# lands in this shell, unlike a subshell).
+	{ exec 3<>"/dev/tcp/$host/$port"; } 2>/dev/null || return 1
+	printf '%s\n' "$req" >&3
+	IFS= read -r reply <&3
+	exec 3>&- 2>/dev/null
+	printf '%s\n' "$reply"
+}
+
+# Extract a field with jq when present, else a crude grep fallback.
+admin:_field() {
+	local json="$1" filter="$2"
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s' "$json" | jq -r "$filter" 2>/dev/null
+	else
+		# fallback: filter like '.height' -> grep "height"
+		local key="${filter#.}"
+		printf '%s' "$json" | sed -n -E "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"?([^\",}]*)\"?.*/\1/p" | head -1
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# Inspection (FEAT-058)
+# ---------------------------------------------------------------------------
+
+help:info() { echo "usage: fulcrum info   — server version, synced height, client count" >&2; }
+command:info() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:info; return 0 ;; esac; done
+	local j; j="$(admin:_call getinfo)" || { warn "info: admin port $(admin:_addr) unreachable"; return 1; }
+	echo "version: $(admin:_field "$j" '.version // "unknown"')"
+	echo "synced height: $(admin:_field "$j" '.height // 0')"
+	echo "clients: $(admin:_field "$j" '.clients // 0')"
+	echo "db size: $(admin:_field "$j" '.db_size // "?"')"
+	echo "command version: $(admin:_cmd_version)"
+}
+
+help:sync() { echo "usage: fulcrum sync   — sync progress vs the node tip" >&2; }
+command:sync() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:sync; return 0 ;; esac; done
+	local j; j="$(admin:_call getinfo)" || { warn "sync: admin port $(admin:_addr) unreachable"; return 1; }
+	local h tip behind pct
+	h="$(admin:_field "$j" '.height // 0')"
+	tip="$(admin:_field "$j" '.daemon_height // .height // 0')"
+	[ -n "$h" ] || h=0; [ -n "$tip" ] || tip=0
+	behind=$((tip - h))
+	if [ "$tip" -le 0 ]; then pct=0; else pct=$(( h * 100 / tip )); fi
+	if [ "$behind" -le 0 ]; then
+		echo "fully synced (100%)"
+	else
+		echo "$behind blocks behind"
+		echo "progress: ${pct}%"
+	fi
+}
+
+help:stats() { echo "usage: fulcrum stats   — raw server stats JSON" >&2; }
+command:stats() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:stats; return 0 ;; esac; done
+	local j; j="$(admin:_call stats)" || { warn "stats: admin port $(admin:_addr) unreachable"; return 1; }
+	if command -v jq >/dev/null 2>&1; then printf '%s' "$j" | jq . 2>/dev/null || printf '%s\n' "$j"
+	else printf '%s\n' "$j"; fi
+}
+
+help:clients() { echo "usage: fulcrum clients   — list connected clients" >&2; }
+command:clients() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:clients; return 0 ;; esac; done
+	local j; j="$(admin:_call clients)" || { warn "clients: admin port $(admin:_addr) unreachable"; return 1; }
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s' "$j" | jq -r '.[] | "\(.id // "?")\t\(.addr // .address // "?")"' 2>/dev/null \
+			|| printf '%s\n' "$j"
+	else
+		printf '%s\n' "$j"
+	fi
+}
+
+help:logs() { echo "usage: fulcrum logs [-f] [--user|--system]   — follow the Fulcrum journal" >&2; }
+command:logs() {
+	local follow=0 mode=user a os
+	for a in "$@"; do
+		case "$a" in
+			-f) follow=1 ;;
+			--system) mode=system ;;
+			--user) mode=user ;;
+			-h|--help|help) help:logs; return 0 ;;
+		esac
+	done
+	os="$(admin:_os)"
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then
+				if [ "$follow" = 1 ]; then journalctl -u fulcrumd -f; else journalctl -u fulcrumd; fi
+			else
+				if [ "$follow" = 1 ]; then journalctl --user -u fulcrumd -f; else journalctl --user -u fulcrumd; fi
+			fi ;;
+		macos)
+			log show --predicate 'process == "Fulcrum"' --last 1h ;;
+		*) error "logs: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+}
+
+# `fulcrum admin version` (not shadowed by the builtin `fulcrum version`):
+# server version from the fixture/socket alongside the command version.
+command:version() {
+	local j; j="$(admin:_call getinfo 2>/dev/null)"
+	if [ -n "$j" ]; then echo "server version: $(admin:_field "$j" '.version // "unknown"')"; fi
+	echo "command version: $(admin:_cmd_version)"
+}
+
+# ---------------------------------------------------------------------------
+# Moderation (FEAT-060)
+# ---------------------------------------------------------------------------
+
+# Generic reply-reporting wrapper for a one-arg admin method.
+admin:_report() {
+	local verb="$1" method="$2" j
+	j="$(admin:_call "$method")" || { warn "$verb: admin port $(admin:_addr) unreachable"; return 1; }
+	if command -v jq >/dev/null 2>&1; then printf '%s' "$j" | jq . 2>/dev/null || printf '%s\n' "$j"
+	else printf '%s\n' "$j"; fi
+}
+
+help:peers()   { echo "usage: fulcrum peers   — list peers" >&2; }
+command:peers() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:peers; return 0 ;; esac; done
+	local j; j="$(admin:_call peers)" || { warn "peers: admin port $(admin:_addr) unreachable"; return 1; }
+	if command -v jq >/dev/null 2>&1; then printf '%s' "$j" | jq . 2>/dev/null || printf '%s\n' "$j"
+	else printf '%s\n' "$j"; fi
+}
+
+help:addpeer() { echo "usage: fulcrum addpeer <host>" >&2; }
+command:addpeer() {
+	case "${1:-}" in ""|-h|--help|help) help:addpeer; [ -z "${1:-}" ] && return 1 || return 0 ;; esac
+	admin:_report addpeer addpeer "$1"
+}
+
+help:rmpeer() { echo "usage: fulcrum rmpeer <host>" >&2; }
+command:rmpeer() {
+	case "${1:-}" in ""|-h|--help|help) help:rmpeer; [ -z "${1:-}" ] && return 1 || return 0 ;; esac
+	admin:_report rmpeer rmpeer "$1"
+}
+
+help:ban() { echo "usage: fulcrum ban <id|ip>" >&2; }
+command:ban() {
+	case "${1:-}" in ""|-h|--help|help) help:ban; [ -z "${1:-}" ] && return 1 || return 0 ;; esac
+	admin:_report ban ban "$1"
+}
+
+help:unban() { echo "usage: fulcrum unban <ip>" >&2; }
+command:unban() {
+	case "${1:-}" in ""|-h|--help|help) help:unban; [ -z "${1:-}" ] && return 1 || return 0 ;; esac
+	admin:_report unban unban "$1"
+}
+
+help:banlist() { echo "usage: fulcrum banlist   — list banned clients/IPs" >&2; }
+command:banlist() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:banlist; return 0 ;; esac; done
+	local j; j="$(admin:_call listbanned)" || { warn "banlist: admin port $(admin:_addr) unreachable"; return 1; }
+	if command -v jq >/dev/null 2>&1; then printf '%s' "$j" | jq . 2>/dev/null || printf '%s\n' "$j"
+	else printf '%s\n' "$j"; fi
+}
+
+help:kick() { echo "usage: fulcrum kick <id|ip>" >&2; }
+command:kick() {
+	case "${1:-}" in ""|-h|--help|help) help:kick; [ -z "${1:-}" ] && return 1 || return 0 ;; esac
+	admin:_report kick kick "$1"
+}
+
+help:loglevel() { echo "usage: fulcrum loglevel <normal|debug|trace>" >&2; }
+command:loglevel() {
+	case "${1:-}" in -h|--help|help) help:loglevel; return 0 ;; esac
+	local lvl="${1:-}"
+	case "$lvl" in
+		normal|debug|trace) ;;
+		"") error "loglevel: a level is required (normal|debug|trace)"; return 1 ;;
+		*)  error "loglevel: invalid level '$lvl' (expected normal|debug|trace)"; return 1 ;;
+	esac
+	admin:_report loglevel loglevel "$lvl"
+}
+
+# ---------------------------------------------------------------------------
+# help / dispatch
+# ---------------------------------------------------------------------------
+
+command:help() {
+	cat >&2 <<-ENDHELP
+	usage: fulcrum <verb> [args]
+
+	  inspection : info  sync  stats  clients  logs [-f]
+	  moderation : peers  addpeer <host>  rmpeer <host>
+	               ban <id|ip>  unban <ip>  banlist  kick <id|ip>
+	               loglevel <normal|debug|trace>
+	ENDHELP
+}
+
+# Multi-call: real file 'admin' takes the verb from $1; a per-verb
+# symlink (info, sync, ban, …) takes the verb from SELF.
+if [ "$SELF" = admin ]; then
+	verb="${1:-help}"; [ $# -gt 0 ] && shift
+else
+	verb="$SELF"
+fi
+
+if has command "$verb"; then
+	command:"$verb" "$@"
+	exit $?
+else
+	error "unknown verb '$verb'"
+	command:help
+	exit 1
+fi

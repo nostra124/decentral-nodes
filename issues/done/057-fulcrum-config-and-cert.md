@@ -2,7 +2,7 @@
 id: FEAT-057
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # `fulcrum config` and `fulcrum cert` — render fulcrum.conf and TLS cert

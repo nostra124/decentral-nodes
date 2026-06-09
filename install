@@ -31,20 +31,25 @@ STAGING="$PKG_DIR/$PACKAGE-$VERSION.staging"
 TARGET="$PKG_DIR/$PACKAGE-$VERSION"
 
 mkdir -p "$STAGING/bin" \
-         "$STAGING/libexec/$PACKAGE" \
          "$STAGING/etc/bash_completion.d" \
-         "$STAGING/share/man/man1" \
-         "$STAGING/share/doc/$PACKAGE" \
-         "$STAGING/share/$PACKAGE"
+         "$STAGING/share/man/man1"
 
 cp -a bin/* "$STAGING/bin/"
-ln -sf "$PACKAGE" "$STAGING/bin/$PACKAGE.sh"
 
-[ -d "libexec/$PACKAGE" ]      && cp -a "libexec/$PACKAGE/"* "$STAGING/libexec/$PACKAGE/"
+# FEAT-055: this one package ships multiple commands (bitcoin, lightning,
+# fulcrum). Stage every libexec/<cmd> tree and its share/<cmd> +
+# share/doc/<cmd> payloads, not just $PACKAGE's.
+for d in libexec/*/; do
+    [ -d "$d" ] || continue
+    cmd=$(basename "$d")
+    mkdir -p "$STAGING/libexec/$cmd" "$STAGING/share/doc/$cmd" "$STAGING/share/$cmd"
+    cp -a "libexec/$cmd/"* "$STAGING/libexec/$cmd/" 2>/dev/null || true
+    [ -d "share/doc/$cmd" ] && cp -a "share/doc/$cmd/"* "$STAGING/share/doc/$cmd/" 2>/dev/null || true
+    [ -d "share/$cmd" ]     && cp -a "share/$cmd/"*     "$STAGING/share/$cmd/"     2>/dev/null || true
+done
+
 [ -d etc/bash_completion.d ]   && cp -a etc/bash_completion.d/* "$STAGING/etc/bash_completion.d/"
 [ -d share/man/man1 ]          && cp -a share/man/man1/* "$STAGING/share/man/man1/"
-[ -d "share/doc/$PACKAGE" ]    && cp -a "share/doc/$PACKAGE/"* "$STAGING/share/doc/$PACKAGE/"
-[ -d "share/$PACKAGE" ]        && cp -a "share/$PACKAGE/"* "$STAGING/share/$PACKAGE/"
 
 if ls -d "skills/$PACKAGE-"* >/dev/null 2>&1; then
     for skill in "skills/$PACKAGE-"*; do
@@ -62,7 +67,11 @@ if ls -d "skills/$PACKAGE-"* >/dev/null 2>&1; then
     done
 fi
 
-[ -f VERSION ] && install -m 644 VERSION "$STAGING/share/$PACKAGE/version"
+for d in libexec/*/; do
+    [ -d "$d" ] || continue
+    cmd=$(basename "$d")
+    [ -f VERSION ] && install -m 644 VERSION "$STAGING/share/$cmd/version"
+done
 
 mv "$STAGING" "$TARGET"
 

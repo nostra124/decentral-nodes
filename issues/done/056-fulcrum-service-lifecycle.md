@@ -2,7 +2,7 @@
 id: FEAT-056
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # `fulcrum` service lifecycle (install / enable / start / stop / …)

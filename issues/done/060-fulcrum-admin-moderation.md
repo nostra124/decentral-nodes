@@ -2,7 +2,7 @@
 id: FEAT-060
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # `fulcrum` advanced admin tier (peers / ban / unban / kick / loglevel)

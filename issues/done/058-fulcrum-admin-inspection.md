@@ -2,7 +2,7 @@
 id: FEAT-058
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # `fulcrum` admin inspection (info / sync / stats / clients / logs)

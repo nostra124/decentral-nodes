@@ -1,0 +1,16 @@
+[Unit]
+Description=Fulcrum Electrum server (managed by fulcrum enable)
+Documentation=man:fulcrum(1)
+After=network-online.target bitcoind.service
+Wants=network-online.target
+
+[Service]
+ExecStart=@FULCRUMD@ @CONFIG@
+Type=simple
+User=@USER@
+WorkingDirectory=@DATADIR@
+Restart=on-failure
+TimeoutStopSec=600
+
+[Install]
+WantedBy=default.target
