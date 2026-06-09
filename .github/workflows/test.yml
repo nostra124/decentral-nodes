@@ -10,10 +10,20 @@ permissions:
   contents: read
   pull-requests: write
 
+# Cancel a previous run on the same ref when a new push arrives, so
+# rapid pushes don't pile up concurrent (and potentially long-running)
+# runs that drain the Actions budget. See BUG-028.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     name: bats unit tests
     runs-on: ubuntu-latest
+    # BUG-028: without this, a hanging test runs to GitHub's 6-hour
+    # default and burns runner minutes. Fail fast instead.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +32,10 @@ jobs:
 
       - name: Run unit tests
         id: bats
+        # BATS_TEST_TIMEOUT (BUG-028): kill and name an individual
+        # hanging test rather than wedging the whole job.
+        env:
+          BATS_TEST_TIMEOUT: 120
         run: |
           set -o pipefail
           bats tests/unit/*.bats 2>&1 | tee bats.log
@@ -54,6 +68,7 @@ jobs:
   lint:
     name: shellcheck + cmd-names
     runs-on: ubuntu-latest
+    timeout-minutes: 10        # BUG-028: cap runtime; lint is seconds normally.
     steps:
       - uses: actions/checkout@v4
 

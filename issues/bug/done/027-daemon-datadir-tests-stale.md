@@ -2,7 +2,7 @@
 id: BUG-027
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # daemon datadir tests stale after the ~/.bitcoin refactor
