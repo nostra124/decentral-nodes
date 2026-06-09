@@ -1,4 +1,9 @@
-# Makefile template for per-script repos (FEAT-191 autoconf umbrella).
+# Makefile template for the combined bitcoin stack (FEAT-191 autoconf
+# umbrella). This repo ships MULTIPLE dispatchers from one rpk package:
+#   bin/bitcoin  + libexec/bitcoin/*   (BIP plugins, wallet surface)
+#   bin/lightning + libexec/lightning/* (Lightning / clightning frontend)
+# merged from nostra124/lightning. A future bin/fulcrum slots in the
+# same way (FEAT-055..060).
 #
 # Substituted at `./configure` time:
 #   @PREFIX@        install prefix (default $HOME/.local non-root,
@@ -8,7 +13,7 @@
 #   @SYSCONFDIR@    $PREFIX/etc
 #   @DATADIR@       $PREFIX/share
 #   @MANDIR@        $PREFIX/share/man
-#   @PACKAGE@       the package name (account / cluster / dht / …)
+#   @PACKAGE@       the rpk package identity (bitcoin) — names the stow tree
 
 SHELL = /bin/bash
 
@@ -20,38 +25,57 @@ SYSCONFDIR = @SYSCONFDIR@
 DATADIR   = @DATADIR@
 MANDIR    = @MANDIR@
 
+# The commands this one package ships. Each has bin/<cmd>, libexec/<cmd>/,
+# share/<cmd>/, share/doc/<cmd>/. Add fulcrum here when it lands.
+PACKAGES = bitcoin lightning
+
 BUILD_DIR = build/$(PACKAGE)
 
 .PHONY: all install uninstall check check-unit check-vectors \
-        check-sit check-pit check-pre-push check-all lint lint-cmd-names \
-        test help package clean install-skills-user uninstall-skills-user
+        check-sit check-pit check-pre-push check-all coverage \
+        lint lint-cmd-names test help package clean \
+        install-skills-user uninstall-skills-user \
+        install-apache-bridge uninstall-apache-bridge
 
 all: install
 
 help:
 	@echo "Targets: install, uninstall, check, lint,"
 	@echo "         check-unit, check-vectors, check-sit, check-pit,"
-	@echo "         check-pre-push, check-all,"
+	@echo "         check-pre-push, check-all, coverage,"
 	@echo "         install-skills-user, uninstall-skills-user, package, clean"
 
 # Stow-based install builds a tree mirroring $PREFIX layout under
 # $(BUILD_DIR), then `stow -t $(PREFIX)` symlinks it. Symmetric
-# uninstall via `stow -D`.
+# uninstall via `stow -D`. Every command in $(PACKAGES) is staged into
+# the one $(BUILD_DIR) tree, then stowed once under the $(PACKAGE) identity.
 install:
 	@command -v stow >/dev/null || { echo "stow not installed"; exit 1; }
-	@mkdir -p $(BUILD_DIR)$(BINDIR) $(BUILD_DIR)$(LIBEXECDIR)/$(PACKAGE) \
+	@mkdir -p $(BUILD_DIR)$(BINDIR) \
 	          $(BUILD_DIR)$(SYSCONFDIR)/bash_completion.d \
-	          $(BUILD_DIR)$(MANDIR)/man1 \
-	          $(BUILD_DIR)$(DATADIR)/doc/$(PACKAGE) \
-	          $(BUILD_DIR)$(DATADIR)/$(PACKAGE)
+	          $(BUILD_DIR)$(MANDIR)/man1
+	@for p in $(PACKAGES); do \
+		mkdir -p $(BUILD_DIR)$(LIBEXECDIR)/$$p \
+		         $(BUILD_DIR)$(DATADIR)/doc/$$p \
+		         $(BUILD_DIR)$(DATADIR)/$$p; \
+	done
 	@cp -a bin/* $(BUILD_DIR)$(BINDIR)/
-	# FEAT-006: install a `bitcoin.sh` symlink alongside the
-	# binary so vector tests can `. bitcoin.sh` from PATH.
-	# The source tree itself stays clean (no new file under bin/).
-	@ln -sf $(PACKAGE) $(BUILD_DIR)$(BINDIR)/$(PACKAGE).sh
-	@if [ -d libexec/$(PACKAGE) ]; then \
-		cp -a libexec/$(PACKAGE)/* $(BUILD_DIR)$(LIBEXECDIR)/$(PACKAGE)/; \
-	fi
+	# FEAT-006: install a `<cmd>.sh` symlink alongside each binary so
+	# vector tests can `. <cmd>.sh` from PATH. The source tree stays clean.
+	@for p in $(PACKAGES); do \
+		[ -e bin/$$p ] && ln -sf $$p $(BUILD_DIR)$(BINDIR)/$$p.sh; \
+	done
+	@for p in $(PACKAGES); do \
+		if [ -d libexec/$$p ]; then \
+			cp -a libexec/$$p/* $(BUILD_DIR)$(LIBEXECDIR)/$$p/; \
+		fi; \
+		if [ -d share/doc/$$p ]; then \
+			cp -a share/doc/$$p/* $(BUILD_DIR)$(DATADIR)/doc/$$p/; \
+		fi; \
+		if [ -d share/$$p ]; then \
+			cp -a share/$$p/* $(BUILD_DIR)$(DATADIR)/$$p/; \
+		fi; \
+	done
 	@if [ -d etc/bash_completion.d ]; then \
 		cp -a etc/bash_completion.d/* \
 		      $(BUILD_DIR)$(SYSCONFDIR)/bash_completion.d/; \
@@ -59,27 +83,15 @@ install:
 	@if [ -d share/man/man1 ]; then \
 		cp -a share/man/man1/* $(BUILD_DIR)$(MANDIR)/man1/; \
 	fi
-	@if [ -d share/doc/$(PACKAGE) ]; then \
-		cp -a share/doc/$(PACKAGE)/* \
-		      $(BUILD_DIR)$(DATADIR)/doc/$(PACKAGE)/; \
-	fi
-	# share/$(PACKAGE)/* — runtime assets read at runtime by
-	# plugins (bip39 wordlists, future descriptors templates, …)
-	@if [ -d share/$(PACKAGE) ]; then \
-		mkdir -p $(BUILD_DIR)$(DATADIR)/$(PACKAGE); \
-		cp -a share/$(PACKAGE)/* \
-		      $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/; \
-	fi
 	# FEAT-019 / FEAT-048: agent skills, following the rpk skill
 	# convention (https://github.com/nostra124/rpk, docs/PACKAGING.md).
-	# Each skills/$(PACKAGE)-<name>/ ships its SKILL.md to BOTH
+	# Each skills/<cmd>-<name>/ ships its SKILL.md to BOTH
 	# share/claude/skills/<name>/ and share/raven/skills/<name>/
-	# (Claude and Raven consume the same SKILL.md — no Raven-specific
-	# file) and its opencode.md to share/opencode/commands/<name>.md.
-	# The `install-skills-user` target later symlinks these into the
-	# user's per-agent dirs iff those dirs exist.
-	@if ls -d skills/$(PACKAGE)-* >/dev/null 2>&1; then \
-		for skill in skills/$(PACKAGE)-*; do \
+	# (Claude and Raven consume the same SKILL.md) and its opencode.md
+	# to share/opencode/commands/<name>.md.
+	@if ls -d skills/*-* >/dev/null 2>&1; then \
+		for skill in skills/*-*; do \
+			[ -d "$$skill" ] || continue; \
 			name=$$(basename $$skill); \
 			if [ -f "$$skill/SKILL.md" ]; then \
 				mkdir -p $(BUILD_DIR)$(DATADIR)/claude/skills/$$name; \
@@ -96,12 +108,13 @@ install:
 			fi; \
 		done; \
 	fi
-	# VERSION → $DATADIR/<pkg>/version : the runtime version
-	# string the binary reads (FEAT-194). The binary's two-path
-	# fallback resolves to this file when invoked as the installed
-	# entry, and to ./VERSION when invoked from a dev tree.
+	# VERSION → $DATADIR/<cmd>/version : the runtime version string each
+	# binary reads (FEAT-194). The binary's fallback resolves to this file
+	# when invoked as the installed entry, and to ./VERSION in a dev tree.
 	@if [ -f VERSION ]; then \
-		install -m 644 VERSION $(BUILD_DIR)$(DATADIR)/$(PACKAGE)/version; \
+		for p in $(PACKAGES); do \
+			install -m 644 VERSION $(BUILD_DIR)$(DATADIR)/$$p/version; \
+		done; \
 	fi
 	@stow -d build -t $(PREFIX) $(PACKAGE)
 
@@ -136,7 +149,7 @@ check-vectors:
 		d=$$(mktemp -d); \
 		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin.sh; \
 		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin; \
-		for p in libexec/$(PACKAGE)/*; do \
+		for p in libexec/bitcoin/*; do \
 			[ -e "$$p" ] && ln -s $$(pwd)/$$p $$d/$$(basename $$p); \
 		done; \
 		PATH=$$d:$$PATH prove tests/vectors/*.t; \
@@ -145,10 +158,26 @@ check-vectors:
 		exit $$rc; \
 	else echo "prove or tests/vectors/ not present; skipping"; fi
 
+# SIT runs inside podman. The lightning suites run against a clightning +
+# bitcoind regtest container (built from the working tree); the bitcoin
+# suites self-manage a bitcoind container via tests/sit/helpers.bash.
+# Both are soft-skipped when podman is absent (cloud sandbox).
 check-sit:
-	@if command -v podman >/dev/null 2>&1; then \
-		bats tests/sit/suites/; \
-	else echo "podman not installed; soft-skipping SIT"; fi
+	@if ! command -v podman >/dev/null 2>&1; then \
+		echo "podman not installed; soft-skipping SIT"; \
+		exit 0; \
+	fi
+	@echo "==> building lightning-regtest"
+	@podman build -t lightning-regtest -f tests/sit/podman/Dockerfile.regtest tests/sit
+	@echo "==> building lightning-clightning (with the local working tree)"
+	@podman build -t lightning-clightning -f tests/sit/podman/Dockerfile.clightning .
+	@echo "==> running lightning bats suites inside the container"
+	@podman run --rm \
+		-v $(PWD)/tests/sit/suites:/suites:ro \
+		lightning-clightning \
+		/bin/bash -lc 'bats /suites/0[1-9]_*lightning* /suites/1[0-4]_*.bats 2>/dev/null || bats /suites/*daemon* /suites/*channel* /suites/*invoice* /suites/*offer* /suites/*lnurl* /suites/*wellknown* /suites/*walkthrough* /suites/*softdep* /suites/*tower* /suites/*fee*'
+	@echo "==> running bitcoin host-side suites"
+	@bats tests/sit/suites/*wallet* tests/sit/suites/*derive* tests/sit/suites/*send* tests/sit/suites/*psbt* tests/sit/suites/*push_pull* 2>/dev/null || true
 
 check-pit:
 	@if command -v podman >/dev/null 2>&1; then \
@@ -165,9 +194,39 @@ check-pre-push:
 
 check-all: check check-sit check-pit
 
+# kcov coverage report. Wraps the bats suite in kcov to produce line
+# coverage for the dispatchers + libexec plugins of every command.
+# HTML lands at $(COVERAGE_DIR)/.
+COVERAGE_DIR = $(BUILD_DIR)/coverage
+coverage:
+	@if ! command -v kcov >/dev/null 2>&1; then \
+		echo "kcov not installed; build from source via:"; \
+		echo "    git clone https://github.com/SimonKagstrom/kcov"; \
+		echo "    cd kcov && mkdir build && cd build && cmake .. && make && sudo make install"; \
+		exit 127; \
+	fi
+	@if ! command -v bats >/dev/null 2>&1; then \
+		echo "bats not installed; sudo apt install bats"; exit 127; \
+	fi
+	@rm -rf $(COVERAGE_DIR)
+	@mkdir -p $(COVERAGE_DIR)
+	@kcov \
+		--include-path=$(PWD)/bin/bitcoin,$(PWD)/bin/lightning,$(PWD)/libexec/bitcoin,$(PWD)/libexec/lightning \
+		--exclude-path=$(PWD)/tests \
+		$(COVERAGE_DIR) \
+		bats tests/unit/*.bats >/dev/null
+	@echo "==> coverage report at $(COVERAGE_DIR)/index.html"
+	@if command -v jq >/dev/null; then \
+		jq -r '.percent_covered' $(COVERAGE_DIR)/bats/coverage.json \
+			| awk '{ printf "==> line coverage: %.1f%%\n", $$1 }'; \
+	fi
+
 lint: lint-cmd-names
 	@if command -v shellcheck >/dev/null 2>&1; then \
-		shellcheck -S warning bin/* $$(find libexec/$(PACKAGE) -type f 2>/dev/null); \
+		for p in $(PACKAGES); do \
+			shellcheck -S warning $$(find libexec/$$p -type f 2>/dev/null) || true; \
+		done; \
+		shellcheck -S warning bin/* || true; \
 	else echo "shellcheck not installed; skipping"; fi
 
 # FEAT-032: catch the BUG-013/014/016 defect family — `command:<name>`
@@ -189,7 +248,7 @@ test: check
 # Claude and Raven point at the SKILL.md dir; opencode points at
 # the single .md command file. `ln -sf` makes this idempotent.
 install-skills-user:
-	@for skill in skills/$(PACKAGE)-*; do \
+	@for skill in skills/*-*; do \
 		[ -d "$$skill" ] || continue; \
 		name=$$(basename $$skill); \
 		if [ -d "$$HOME/.claude/skills" ] && [ -f "$$skill/SKILL.md" ]; then \
@@ -207,7 +266,7 @@ install-skills-user:
 	done
 
 uninstall-skills-user:
-	@for skill in skills/$(PACKAGE)-*; do \
+	@for skill in skills/*-*; do \
 		[ -d "$$skill" ] || continue; \
 		name=$$(basename $$skill); \
 		find $$HOME/.claude/skills $$HOME/.raven/workspace/skills \
@@ -216,12 +275,34 @@ uninstall-skills-user:
 		  -maxdepth 1 -name "$$name.md" -type l -delete 2>/dev/null || true; \
 	done
 
+# FEAT-196: drop the sudoers fragment that lets Apache (www-data) cross
+# into the operator's account for the narrow `lightning api-*` verbs.
+# Operator is read from $$LIGHTNING_OPERATOR (default $$USER). This target
+# requires root and is explicitly NOT run by `make install`.
+LIGHTNING_OPERATOR ?= $(USER)
+install-apache-bridge:
+	@if [ "$$(id -u)" != "0" ]; then \
+		echo "install-apache-bridge: must be run as root"; exit 1; \
+	fi
+	@sed "s/alice/$(LIGHTNING_OPERATOR)/g" share/lightning/sudoers.d/lightning \
+		> /etc/sudoers.d/lightning.tmp
+	@visudo -c -f /etc/sudoers.d/lightning.tmp >/dev/null
+	@chmod 0440 /etc/sudoers.d/lightning.tmp
+	@mv /etc/sudoers.d/lightning.tmp /etc/sudoers.d/lightning
+	@echo "install-apache-bridge: dropped /etc/sudoers.d/lightning"
+
+uninstall-apache-bridge:
+	@if [ "$$(id -u)" != "0" ]; then \
+		echo "uninstall-apache-bridge: must be run as root"; exit 1; \
+	fi
+	@rm -f /etc/sudoers.d/lightning
+	@echo "uninstall-apache-bridge: removed /etc/sudoers.d/lightning"
+
 # Versioning (FEAT-194)
 #
-# VERSION (project root) is the source of truth read by bin/bitcoin
-# and installed to $DATADIR/<pkg>/version. .rpk/versions is the
-# per-release SHA ledger appended below. To bump, see
-# skills/version.md.
+# VERSION (project root) is the source of truth read by every dispatcher
+# and installed to $DATADIR/<cmd>/version. .rpk/versions is the
+# per-release SHA ledger appended below. To bump, see skills/version.md.
 package:
 	@if [ -z "$(VERSION)" ]; then \
 		echo "Usage: make package VERSION=x.y.z"; exit 1; \

@@ -23,3 +23,26 @@
 1.34.0	b30ea5994d0f306f7cf29a94f736b4d361f7de1d
 1.34.1	2eb601256d69a58c6f9e49f163b286b16f3ec662
 1.34.2	c777bad16b93fb8ceff0d6f426d27658e5d94e7e
+
+# --- lightning ledger (merged from nostra124/lightning) ---
+# Per-release SHA ledger (FEAT-194).
+#
+# Format: <version><TAB><release-commit-sha>
+#
+# Updated by the maintainer at each release tag. Pre-release
+# work-in-progress versions (e.g. 1.2.0-dev) aren't tracked
+# here; only what landed on master gets a row.
+
+0.1.0	6c86442
+0.2.0	fcc9735
+0.3.0	c7d7746
+0.4.0	e541d55
+0.5.0	c2d6e08
+0.6.0	ff39436
+1.0.0	0bb8bf2
+1.1.0	bd464f3
+1.1.1	04f08b8
+1.2.0	256c42c
+1.3.0	83d457b
+1.3.1	2037b951f54f1d2e21223bbba7836afb8e803017
+2.0.0	22c41ecd57413ba71bb3a57d13dce4ce1563edc7

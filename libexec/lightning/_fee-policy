@@ -1,0 +1,419 @@
+#!/bin/bash
+# lightning fee-policy — operator-fee visibility (FEAT-214).
+#
+# Subcommands:
+#   status [--since YYYY-MM-DD]    revenue summary, broken down by
+#                                  operation and time window
+#   show-rates                     dump the current fees.recfile
+#                                  (canonical operator-readable
+#                                  view, no parsing surprises)
+#
+# Reads $wallet/state.db (house account's ledger) and
+# $wallet/fees.recfile.  Runs as the operator user; no HTTP
+# involvement at this layer — that lands in a future PR if/when
+# the PWA admin view actually needs it.
+#
+# The house account is populated by FEAT-213's skim verbs.
+# Operation tagging is via `message` field prefixes
+# (`fee:pay`, `fee:withdraw`, `fee:topup-onchain`); ledger
+# entries without a `fee:` prefix are aggregated as "other"
+# — useful for spotting if a new operation grew skim logic
+# without updating its message tag.
+
+set -e
+
+command -v sqlite3 >/dev/null || { echo "lightning: sqlite3 not installed" >&2; exit 127; }
+
+WALLETS_ROOT="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning/wallet}"
+ACTIVE_LINK="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning}/active"
+
+active_wallet_name() {
+	local name="default"
+	[ -f "$ACTIVE_LINK" ] && name=$(cat "$ACTIVE_LINK")
+	echo "$name"
+}
+
+active_db() {
+	local name; name=$(active_wallet_name)
+	local db="$WALLETS_ROOT/$name/state.db"
+	[ -f "$db" ] || { echo "lightning fee-policy: no active wallet (try \`lightning wallet new\`)" >&2; exit 2; }
+	echo "$db"
+}
+
+sql_quote() { printf "'%s'" "${1//\'/\'\'}"; }
+
+usage() {
+	cat >&2 <<EOF
+usage: lightning fee-policy <subcommand>
+
+   status [--since YYYY-MM-DD]   revenue + breakdown + top accounts
+   show-rates                    current fees.recfile (formatted)
+   autotune {run|dry-run|status} nudge rate_ppm based on observed
+                                 revenue vs. operator target
+EOF
+}
+
+cmd_status() {
+	local since=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--since)
+				since="$2"; shift 2
+				[[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+					echo "lightning fee-policy: --since needs YYYY-MM-DD" >&2; exit 1; }
+				;;
+			*) echo "lightning fee-policy status: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+
+	local db; db=$(active_db)
+
+	# Window predicate for SQL.  ts is stored as 'YYYY-MM-DD HH:MM:SS'
+	# from datetime('now'); a date string sorts correctly under TEXT
+	# comparison, so we can compare lexicographically.
+	local ts_pred="1=1"
+	[ -n "$since" ] && ts_pred="ts >= '$since 00:00:00'"
+
+	# FEAT-216 — interest-mode summary: which ops pay a yield + the
+	# cumulative subsidy debited from house (interest:* tagged 'out's).
+	local fees_file; fees_file="$WALLETS_ROOT/$(active_wallet_name)/fees.recfile"
+	local interest_ops=""
+	if [ -f "$fees_file" ]; then
+		interest_ops=$(awk '
+			BEGIN { RS=""; FS="\n" }
+			{
+				op=""; m="off"
+				for (i=1; i<=NF; i++) {
+					if ($i ~ /^operation: /)     { op=$i; sub(/^operation: */, "", op) }
+					if ($i ~ /^interest_mode: */) { m=$i;  sub(/^interest_mode: */, "", m) }
+				}
+				if (m == "on" && op != "") printf "%s ", op
+			}' "$fees_file")
+	fi
+	local subsidy_msat
+	subsidy_msat=$(sqlite3 "$db" "SELECT COALESCE(-SUM(amount_msat),0) FROM ledger \
+		WHERE account = 'house' AND direction = 'out' AND message LIKE 'interest:%' AND $ts_pred;")
+	echo "interest_mode_ops:         ${interest_ops:-(none)}"
+	echo "interest_subsidy_paid_sat: $(( subsidy_msat / 1000 ))"
+	echo ""
+
+	# Empty-state check — house is pre-seeded by FEAT-218's schema
+	# (so the referrer FK has a target from wallet new onward).  We
+	# detect "no skim has fired" via the absence of in-credit rows
+	# rather than the absence of the row.
+	local house_in_rows
+	house_in_rows=$(sqlite3 "$db" "SELECT COUNT(*) FROM ledger \
+		WHERE account = 'house' AND direction = 'in' AND $ts_pred;")
+	if [ "$house_in_rows" = "0" ]; then
+		echo "lightning fee-policy: no revenue yet"
+		echo "  (no operator-fee skim has been booked into house yet)"
+		return 0
+	fi
+
+	# Total revenue (msat → sat).
+	local total_msat
+	total_msat=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat),0) FROM ledger WHERE account = 'house' AND direction = 'in' AND $ts_pred;")
+	local total_sat=$(( total_msat / 1000 ))
+
+	# Per-operation breakdown.  Bucket by the message-prefix tag
+	# FEAT-214 introduced — fee:pay / fee:withdraw / fee:topup-onchain.
+	# Entries without a tag fall into "other".
+	echo "total_revenue_sat: $total_sat"
+	if [ -n "$since" ]; then
+		echo "window:            since $since"
+	else
+		echo "window:            all time"
+	fi
+	echo ""
+	echo "per-operation revenue:"
+	sqlite3 -separator $'\t' "$db" "
+		SELECT
+			CASE
+				WHEN message LIKE 'fee:pay%'           THEN 'pay'
+				WHEN message LIKE 'fee:withdraw%'      THEN 'withdraw'
+				WHEN message LIKE 'fee:topup-onchain%' THEN 'topup-onchain'
+				WHEN message LIKE 'fee:topup-ln%'      THEN 'topup-ln'
+				WHEN message LIKE 'fee:recv%'          THEN 'recv'
+				ELSE 'other'
+			END AS op,
+			COUNT(*)                 AS n,
+			SUM(amount_msat) / 1000  AS revenue_sat
+		FROM ledger
+		WHERE account = 'house' AND direction = 'in' AND $ts_pred
+		GROUP BY op
+		ORDER BY revenue_sat DESC;" | awk 'BEGIN{printf "  %-15s %10s %15s\n", "op", "count", "revenue_sat"}
+		{printf "  %-15s %10d %15d\n", $1, $2, $3}'
+
+	echo ""
+	echo "daily revenue (last 30 days):"
+	sqlite3 -separator $'\t' "$db" "
+		SELECT date(ts) AS day, SUM(amount_msat) / 1000 AS revenue_sat
+		FROM ledger
+		WHERE account = 'house' AND direction = 'in' AND date(ts) >= date('now', '-30 days') AND $ts_pred
+		GROUP BY day
+		ORDER BY day DESC
+		LIMIT 30;" | awk 'BEGIN{printf "  %-12s %15s\n", "day", "revenue_sat"}
+		{printf "  %-12s %15d\n", $1, $2}'
+
+	echo ""
+	echo "top contributing accounts (last 30 days):"
+	# Anonymise — show only first 8 chars of the address column.
+	# We extract the contributing account name from the message field
+	# (`fee:<op> from <name>`); JOIN against accounts for the address.
+	sqlite3 -separator $'\t' "$db" "
+		SELECT
+			substr(COALESCE(a.address, l.account_from), 1, 8) || '...' AS anon_id,
+			COUNT(*)                  AS n,
+			SUM(l.amount_msat) / 1000 AS revenue_sat
+		FROM (
+			SELECT
+				amount_msat,
+				ts,
+				CASE
+					WHEN message LIKE 'fee:% from %' THEN substr(message, instr(message, 'from ') + 5)
+					ELSE NULL
+				END AS account_from
+			FROM ledger
+			WHERE account = 'house' AND direction = 'in' AND date(ts) >= date('now', '-30 days') AND $ts_pred
+		) l
+		LEFT JOIN accounts a ON a.name = l.account_from
+		WHERE l.account_from IS NOT NULL
+		GROUP BY l.account_from
+		ORDER BY revenue_sat DESC
+		LIMIT 10;" | awk 'BEGIN{printf "  %-12s %10s %15s\n", "account", "count", "revenue_sat"}
+		{printf "  %-12s %10d %15d\n", $1, $2, $3}'
+}
+
+cmd_show_rates() {
+	local wname; wname=$(active_wallet_name)
+	local fees_file="$WALLETS_ROOT/$wname/fees.recfile"
+	if [ ! -f "$fees_file" ]; then
+		echo "lightning fee-policy: no fees.recfile in $wname (no skim active)"
+		return 0
+	fi
+	# Print operation:base:rate rows from the recfile, formatted as
+	# a table.  Skip comment lines + blank lines.
+	awk '
+		BEGIN { RS=""; FS="\n"; printf "  %-18s %12s %12s\n", "operation", "base_sat", "rate_ppm" }
+		{
+			op=""; base=""; rate=""
+			for (i=1; i<=NF; i++) {
+				if ($i ~ /^operation: /) { op=$i; sub(/^operation: */, "", op) }
+				if ($i ~ /^base_sat: /)  { base=$i; sub(/^base_sat: */, "", base) }
+				if ($i ~ /^rate_ppm: /)  { rate=$i; sub(/^rate_ppm: */, "", rate) }
+			}
+			if (op != "") printf "  %-18s %12s %12s\n", op, base, rate
+		}
+	' "$fees_file"
+}
+
+# FEAT-215 — daily auto-tuner.  Nudges fees.recfile's rate_ppm
+# values based on observed economics: routing income from
+# `lightning-cli listforwards` + operator skim revenue from the
+# house account.  Driven by `daemon enable --fee-autotune`.
+#
+# Settings (env vars; no default for the target so a misconfigured
+# install errors loudly instead of silently nudging rates):
+#
+#   LIGHTNING_FEE_AUTOTUNE_TARGET_MSAT_PER_DAY  required.  Operator's
+#                                               net-revenue target per
+#                                               day.  Monthly / 30 is
+#                                               the simple conversion.
+#   LIGHTNING_FEE_AUTOTUNE_MAX_STEP_PPM         default 500 (0.05%).
+#                                               Cap on per-day rate
+#                                               adjustments — prevents
+#                                               oscillation.
+#   LIGHTNING_FEE_AUTOTUNE_FLOOR_PPM            default 0.  Per-op
+#                                               minimum.  Negative
+#                                               values are only
+#                                               honoured when FEAT-216
+#                                               (interest mode) lands.
+#   LIGHTNING_FEE_AUTOTUNE_CEILING_PPM          default 100000 (10%).
+#                                               Per-op maximum.
+#   LIGHTNING_FEE_AUTOTUNE_HYSTERESIS_PCT       default 20.  Don't
+#                                               nudge unless observed
+#                                               revenue is at least
+#                                               this % off target.
+cmd_autotune() {
+	local op="${1:-run}"
+	local dry=0
+	case "$op" in
+		run)               dry=0 ;;
+		dry-run|--dry-run) dry=1 ;;
+		status)            _autotune_status; return ;;
+		*) echo "usage: lightning fee-policy autotune {run|dry-run|status}" >&2; exit 1 ;;
+	esac
+
+	local target="${LIGHTNING_FEE_AUTOTUNE_TARGET_MSAT_PER_DAY:-}"
+	if [ -z "$target" ]; then
+		echo "lightning fee-policy autotune: LIGHTNING_FEE_AUTOTUNE_TARGET_MSAT_PER_DAY not set" >&2
+		echo "  (no default — operator must declare a target before the tuner can run)" >&2
+		exit 1
+	fi
+	case "$target" in ''|*[!0-9]*)
+		echo "lightning fee-policy autotune: target must be a positive integer (msat/day)" >&2
+		exit 1 ;;
+	esac
+
+	local max_step="${LIGHTNING_FEE_AUTOTUNE_MAX_STEP_PPM:-500}"
+	local floor="${LIGHTNING_FEE_AUTOTUNE_FLOOR_PPM:-0}"
+	local ceiling="${LIGHTNING_FEE_AUTOTUNE_CEILING_PPM:-100000}"
+	local hyst_pct="${LIGHTNING_FEE_AUTOTUNE_HYSTERESIS_PCT:-20}"
+
+	local wname; wname=$(active_wallet_name)
+	local fees_file="$WALLETS_ROOT/$wname/fees.recfile"
+	[ -f "$fees_file" ] || {
+		echo "lightning fee-policy autotune: no fees.recfile in $wname" >&2
+		exit 2
+	}
+	local db; db=$(active_db)
+	local lightning_dir="${LIGHTNING_DIR:-$HOME/.lightning}"
+	local state_file="$lightning_dir/fee-autotune.state.recfile"
+	mkdir -p "$lightning_dir"
+
+	# FEAT-216 — interest mode.  An op with interest_mode: on may be
+	# tuned to a NEGATIVE rate (a yield paid to users) down to the
+	# interest floor; an op with interest_mode off must stay >= the
+	# normal floor.  Validate up front: a negative rate with interest
+	# mode off is a misconfiguration the tuner refuses to run against.
+	local interest_floor="${LIGHTNING_FEE_AUTOTUNE_INTEREST_FLOOR_PPM:--2000}"
+	local _vop _vrate _vim
+	while read -r _vop _vrate _vim; do
+		[ -n "$_vop" ] || continue
+		if [ "$_vrate" -lt 0 ] 2>/dev/null && [ "$_vim" != "on" ]; then
+			echo "lightning fee-policy autotune: '$_vop' has a negative rate_ppm ($_vrate) but interest_mode is off" >&2
+			echo "  enable 'interest_mode: on' for $_vop (see the legal CAUTION in fees.recfile) or set rate_ppm >= 0" >&2
+			exit 3
+		fi
+	done < <(awk '
+		BEGIN { RS=""; FS="\n" }
+		{
+			op=""; r=""; m="off"
+			for (i=1; i<=NF; i++) {
+				if ($i ~ /^operation: /)     { op=$i; sub(/^operation: */, "", op) }
+				if ($i ~ /^rate_ppm: */)     { r=$i;  sub(/^rate_ppm: */, "", r) }
+				if ($i ~ /^interest_mode: */) { m=$i;  sub(/^interest_mode: */, "", m) }
+			}
+			if (op != "" && r != "") print op, r, m
+		}' "$fees_file")
+
+	# --- read 30-day skim revenue ---
+	local skim_msat
+	skim_msat=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat), 0) FROM ledger \
+		WHERE account = 'house' AND direction = 'in' AND date(ts) >= date('now', '-30 days');")
+
+	# --- read 30-day routing income ---
+	local routing_msat=0
+	if command -v lightning-cli >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+		local cutoff_ts; cutoff_ts=$(( $(date -u +%s) - 30 * 86400 ))
+		# `listforwards` returns settled forwards with fee_msat and
+		# received_time (float unix seconds).  Sum settled fees in
+		# the last 30 days.  Older clightning versions can return
+		# fee_msat as either an integer or "Nmsat" string.
+		routing_msat=$(lightning-cli \
+			--lightning-dir="$lightning_dir" \
+			--network="${LIGHTNING_NETWORK:-bitcoin}" \
+			listforwards 2>/dev/null | jq --argjson cutoff "$cutoff_ts" '
+				[ .forwards[]?
+				  | select(.status == "settled")
+				  | select((.received_time // 0) >= $cutoff)
+				  | ( .fee_msat // 0
+				      | if type == "string"
+				        then sub("msat$"; "") | tonumber
+				        else . end ) ] | add // 0' 2>/dev/null || echo 0)
+		case "$routing_msat" in ''|*[!0-9]*) routing_msat=0 ;; esac
+	fi
+
+	local total_30d_msat=$(( skim_msat + routing_msat ))
+	local observed_msat_per_day=$(( total_30d_msat / 30 ))
+
+	# --- decide direction ---
+	local low_threshold=$(( target * (100 - hyst_pct) / 100 ))
+	local high_threshold=$(( target * (100 + hyst_pct) / 100 ))
+	local direction="hold"
+	local delta_ppm=0
+	if [ "$observed_msat_per_day" -lt "$low_threshold" ]; then
+		direction="up"
+		delta_ppm="$max_step"
+	elif [ "$observed_msat_per_day" -gt "$high_threshold" ]; then
+		direction="down"
+		delta_ppm="-$max_step"
+	fi
+
+	# --- apply per-op ---
+	local ops=("pay" "withdraw" "topup-onchain" "topup-ln" "recv")
+	local changes=""
+	for o in "${ops[@]}"; do
+		local cur im
+		read -r cur im < <(awk -v op="$o" '
+			BEGIN { RS=""; FS="\n" }
+			{
+				in_op=0; r=""; m="off"
+				for (i=1; i<=NF; i++) {
+					if ($i == "operation: " op) in_op=1
+					if ($i ~ /^rate_ppm: */)     { r=$i; sub(/^rate_ppm: */, "", r) }
+					if ($i ~ /^interest_mode: */) { m=$i; sub(/^interest_mode: */, "", m) }
+				}
+				if (in_op && r != "") { print r, m; exit }
+			}
+		' "$fees_file")
+		[ -n "$cur" ] || continue
+		# FEAT-216 — interest-mode ops floor at the (negative) interest
+		# floor; everything else at the normal floor.
+		local op_floor="$floor"
+		[ "$im" = "on" ] && op_floor="$interest_floor"
+		local new=$(( cur + delta_ppm ))
+		[ "$new" -lt "$op_floor" ] && new="$op_floor"
+		[ "$new" -gt "$ceiling" ]  && new="$ceiling"
+		if [ "$new" != "$cur" ]; then
+			changes+="$o $cur->$new "
+			if [ $dry -eq 0 ]; then
+				# Replace rate_ppm inside the [operation:...; next blank]
+				# range.  Two spaces of alignment match the seeded file
+				# format from share/lightning/defaults/fees.recfile.
+				sed -i "/^operation: $o\$/,/^\$/ s|^rate_ppm:.*|rate_ppm:  $new|" "$fees_file"
+			fi
+		fi
+	done
+
+	# --- write state recfile ---
+	local now; now=$(date -u +%s)
+	if [ $dry -eq 0 ]; then
+		cat > "$state_file" <<EOF
+last_run:                 $now
+last_direction:           $direction
+last_delta_ppm:           $delta_ppm
+observed_msat_per_day:    $observed_msat_per_day
+skim_msat_30d:            $skim_msat
+routing_msat_30d:         $routing_msat
+target_msat_per_day:      $target
+hysteresis_pct:           $hyst_pct
+max_step_ppm:             $max_step
+changes:                  ${changes:-(none)}
+EOF
+	fi
+
+	# --- one-line summary to stderr (journal-friendly) ---
+	if [ $dry -eq 1 ]; then
+		echo "fee-policy autotune dry-run: direction=$direction observed=${observed_msat_per_day}msat/day target=${target}msat/day changes=${changes:-(none)}" >&2
+	else
+		echo "fee-policy autotune: direction=$direction observed=${observed_msat_per_day}msat/day target=${target}msat/day changes=${changes:-(none)}" >&2
+	fi
+}
+
+_autotune_status() {
+	local state_file="${LIGHTNING_DIR:-$HOME/.lightning}/fee-autotune.state.recfile"
+	if [ ! -f "$state_file" ]; then
+		echo "fee-policy autotune: never run (no state file)"
+		return 0
+	fi
+	cat "$state_file"
+}
+
+case "${1:-}" in
+	status)     shift; cmd_status "$@" ;;
+	show-rates) shift; cmd_show_rates "$@" ;;
+	autotune)   shift; cmd_autotune "$@" ;;
+	"")         usage; exit 1 ;;
+	*)          echo "lightning fee-policy: unknown subcommand '$1'" >&2; usage; exit 1 ;;
+esac

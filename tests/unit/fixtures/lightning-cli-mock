@@ -1,0 +1,289 @@
+#!/bin/bash
+# Mock lightning-cli for bats unit tests.
+#
+# Reads MOCK_STATE (path to a state file) to track whether the
+# daemon is "up" (RPC reachable) or "down". Returns canned JSON
+# for known commands; exits non-zero with a clear message on
+# unknown ones.
+
+state_file="${MOCK_STATE:-/tmp/lightning-mock-state}"
+state="up"
+[ -f "$state_file" ] && state=$(cat "$state_file")
+
+# Strip the standard lightning-cli flags we pass in our verbs.
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--lightning-dir=*|--network=*|--conf=*) shift ;;
+		*) break ;;
+	esac
+done
+
+if [ "$state" = "down" ]; then
+	echo "lightning-cli: cannot connect to RPC" >&2
+	exit 1
+fi
+
+# Failure injection: MOCK_FAIL_<cmd>=1 makes that one RPC return
+# an error JSON + exit 1. Lets unit tests exercise the failure
+# branches in verbs.
+fail_var="MOCK_FAIL_$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
+if [ "${!fail_var:-}" = "1" ]; then
+	printf '{"code":-32602,"message":"mocked failure for %s"}\n' "$1" >&2
+	exit 1
+fi
+
+case "$1" in
+	getinfo)
+		cat <<'EOF'
+{
+  "id": "020000000000000000000000000000000000000000000000000000000000000001",
+  "alias": "TESTNODE",
+  "color": "ff0000",
+  "num_peers": 0,
+  "num_pending_channels": 0,
+  "num_active_channels": 0,
+  "num_inactive_channels": 0,
+  "version": "v24.05",
+  "blockheight": 100,
+  "network": "regtest"
+}
+EOF
+		;;
+	listpeers)
+		echo '{"peers": []}'
+		;;
+	listpeerchannels)
+		# Tests drive our direct channels via MOCK_LISTPEERCHANNELS.
+		printf '{"channels": %s}\n' "${MOCK_LISTPEERCHANNELS:-[]}"
+		;;
+	listchannels)
+		echo '{"channels": []}'
+		;;
+	listpays)
+		# FEAT-217 — tests drive pay history via MOCK_LISTPAYS.
+		printf '{"pays": %s}\n' "${MOCK_LISTPAYS:-[]}"
+		;;
+	listfunds)
+		# Tests drive the UTXO set via MOCK_LISTFUNDS_OUTPUTS — a
+		# JSON array literal that we splice into the outputs field.
+		# Default empty.  FEAT-212 PR-4 (deposit watcher) needs this.
+		printf '{"outputs": %s, "channels": []}\n' "${MOCK_LISTFUNDS_OUTPUTS:-[]}"
+		;;
+	listforwards)
+		# FEAT-215 — auto-tuner reads routing income from this.
+		# Tests drive via MOCK_LISTFORWARDS — a JSON array literal
+		# spliced into the forwards field.  Default empty.
+		printf '{"forwards": %s}\n' "${MOCK_LISTFORWARDS:-[]}"
+		;;
+	newaddr)
+		# FEAT-212 — every account mints a unique address.  Return a
+		# fresh deterministic-but-varying bcrt1q… per call so tests
+		# that create multiple accounts don't collide on the address
+		# primary key in $wallet/accounts/nicknames.recfile.
+		counter_file="${MOCK_STATE:-/tmp/lightning-mock-state}.newaddr"
+		n=$(($(cat "$counter_file" 2>/dev/null || echo 0) + 1))
+		echo "$n" > "$counter_file"
+		# Pad with the counter so repeated calls produce distinct
+		# but predictable addresses.  bech32 charset is fine here —
+		# we don't validate the checksum in tests.
+		printf '{"bech32": "bcrt1qtestaddress%030dxxxx"}\n' "$n"
+		;;
+	stop)
+		echo "down" > "$state_file"
+		echo '"Shutdown complete"'
+		;;
+	invoice)
+		# args: msat label desc expiry
+		# FEAT-225 — stash the description so tests can assert the
+		# recoverable `[ref:<base64url>]` tail round-trips.
+		[ -n "$MOCK_STATE" ] && printf '%s' "$4" > "$MOCK_STATE.lastdesc"
+		hash=$(echo -n "$2$3" | sha256sum | cut -c1-64)
+		cat <<EOF
+{
+  "bolt11": "lnbcrt10n1pmocktest",
+  "payment_hash": "$hash",
+  "expires_at": 4102444800
+}
+EOF
+		;;
+	pay)
+		# args: bolt11 ...
+		hash=$(echo -n "$2" | sha256sum | cut -c1-64)
+		cat <<EOF
+{
+  "status": "complete",
+  "payment_hash": "$hash",
+  "amount_msat": 1000,
+  "amount_sent_msat": 1001,
+  "payment_preimage": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+}
+EOF
+		;;
+	decodepay)
+		cat <<'EOF'
+{
+  "currency": "bcrt",
+  "amount_msat": 1000,
+  "description": "test",
+  "payment_hash": "deadbeef",
+  "expiry": 3600
+}
+EOF
+		;;
+	decode)
+		# Detect type from the arg.
+		s=$(printf '%s' "$2" | tr 'A-Z' 'a-z')
+		case "$s" in
+			lno*) echo '{"type": "bolt12 offer", "valid": true, "offer_description": "mock"}' ;;
+			lni*) echo '{"type": "bolt12 invoice", "valid": true}' ;;
+			lnurl*) echo '{"type": "lnurl", "url": "https://example.com/.well-known/lnurlp/test"}' ;;
+			*) echo '{"type": "unknown", "valid": false}' ;;
+		esac
+		;;
+	keysend)
+		hash=$(echo -n "$2" | sha256sum | cut -c1-64)
+		cat <<EOF
+{
+  "payment_hash": "$hash",
+  "status": "complete"
+}
+EOF
+		;;
+	connect)
+		echo '{"id": "020000000000000000000000000000000000000000000000000000000000000002"}'
+		;;
+	fundchannel)
+		cat <<'EOF'
+{
+  "tx": "0200000000000000",
+  "txid": "0000000000000000000000000000000000000000000000000000000000000001",
+  "channel_id": "0000000000000000000000000000000000000000000000000000000000000001",
+  "outnum": 0
+}
+EOF
+		;;
+	close)
+		cat <<'EOF'
+{
+  "type": "mutual",
+  "txid": "0000000000000000000000000000000000000000000000000000000000000002"
+}
+EOF
+		;;
+	offer)
+		cat <<'EOF'
+{
+  "bolt12": "lno1pgmocktest",
+  "offer_id": "deadbeefcafe",
+  "active": true,
+  "single_use": false
+}
+EOF
+		;;
+	fetchinvoice)
+		echo '{"invoice": "lni1pgmocktest"}'
+		;;
+	listoffers)
+		echo '{"offers": []}'
+		;;
+	disableoffer)
+		echo '{"active": false}'
+		;;
+	staticbackup)
+		echo '{"scb": ["00112233445566778899aabbccddeeff", "ffeeddccbbaa99887766554433221100"]}'
+		;;
+	emergencyrecover)
+		echo '{"stubs": [], "channel_count": 1}'
+		;;
+	addtower)
+		printf '{"id":"%s","host":"127.0.0.1","port":9814,"num_sessions":0}\n' "${2%@*}"
+		;;
+	listtowers)
+		echo '{"towers": []}'
+		;;
+	watchtower-stats)
+		echo '{"channels": 0, "breaches": 0}'
+		;;
+	plugin)
+		# `plugin start|stop` — just acknowledge.
+		printf '{"command":"%s","plugin":"%s","success":true}\n' "$2" "${3:-watchtower}"
+		;;
+	help)
+		# Used by tower/fee to probe plugin presence. Return an empty
+		# command list by default; specific tests override by passing
+		# MOCK_HELP_INCLUDES.
+		if [ -n "$MOCK_HELP_INCLUDES" ]; then
+			printf '{"help":[%s]}\n' "$MOCK_HELP_INCLUDES"
+		else
+			echo '{"help":[]}'
+		fi
+		;;
+	setchannel)
+		printf '{"channels":[{"channel_id":"%s","fee_base_msat":%s,"fee_proportional_millionths":%s}]}\n' \
+			"$2" "$3" "$4"
+		;;
+	# FEAT-198 — cln-lsps plugin RPCs.  Tests set MOCK_LSPS1_STATE /
+	# MOCK_LSPS1_CHANNEL_ID to drive the order-state machine; defaults
+	# are the happy path (state=READY, channel materialised on first poll).
+	lsps1-get-info)
+		cat <<EOF
+{
+  "options": {
+    "min_channel_balance_sat": "100000",
+    "max_channel_balance_sat": "10000000",
+    "min_initial_client_balance_sat": "0",
+    "max_initial_client_balance_sat": "0",
+    "min_initial_lsp_balance_sat": "100000",
+    "max_initial_lsp_balance_sat": "10000000",
+    "min_channel_expiry_blocks": 4320,
+    "max_channel_expiry_blocks": 52560
+  }
+}
+EOF
+		;;
+	lsps1-create-order)
+		# args: pubkey sat
+		cat <<EOF
+{
+  "order_id": "mock-order-${MOCK_LSPS1_ORDER_ID:-deadbeef}",
+  "payment": {
+    "bolt11": "lnbcrt${2}n1pmocktestlsps1",
+    "fee_total_sat": "5000",
+    "order_total_sat": "$2",
+    "state": "EXPECT_PAYMENT"
+  }
+}
+EOF
+		;;
+	lsps1-get-order)
+		# args: order_id
+		state="${MOCK_LSPS1_STATE:-READY}"
+		channel_id="${MOCK_LSPS1_CHANNEL_ID-abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789}"
+		if [ -n "$channel_id" ]; then
+			cat <<EOF
+{
+  "order_id": "$2",
+  "payment": {"state": "$state"},
+  "channel": {"channel_id": "$channel_id"}
+}
+EOF
+		else
+			cat <<EOF
+{
+  "order_id": "$2",
+  "payment": {"state": "$state"}
+}
+EOF
+		fi
+		;;
+	listinvoices)
+		# FEAT-225 — settlement lookup by payment_hash.  Tests drive the
+		# result set via MOCK_LISTINVOICES (a JSON array literal for the
+		# `invoices` field); default empty = unpaid / not found.
+		printf '{"invoices": %s}\n' "${MOCK_LISTINVOICES:-[]}"
+		;;
+	*)
+		echo "mock lightning-cli: unhandled command '$1'" >&2
+		exit 1
+		;;
+esac

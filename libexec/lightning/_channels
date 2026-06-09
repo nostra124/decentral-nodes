@@ -1,0 +1,31 @@
+#!/bin/bash
+# lightning channels — TSV list of channels.
+#
+# Implements: clightning listpeerchannels reshape per FEAT-171.
+# Output columns: id<TAB>peer<TAB>capacity<TAB>local<TAB>remote<TAB>state
+
+set -e
+
+command -v lightning-cli >/dev/null || {
+	echo "lightning: lightning-cli not found — install Core Lightning (lightningd) and ensure lightning-cli is on PATH" >&2
+	exit 127
+}
+
+LIGHTNING_DIR="${LIGHTNING_DIR:-$HOME/.lightning}"
+LIGHTNING_NETWORK="${LIGHTNING_NETWORK:-bitcoin}"
+
+cli() { lightning-cli --lightning-dir="$LIGHTNING_DIR" --network="$LIGHTNING_NETWORK" "$@"; }
+
+# clightning >= 23.05 ships listpeerchannels; we don't support older
+# versions. The previous listpeers fallback used renamed-then-removed
+# fields (msatoshi_total / msatoshi_to_us) and was dead code.
+json=$(cli listpeerchannels)
+printf "id\tpeer\tcapacity\tlocal\tremote\tstate\n"
+jq -r '.channels[] | [
+	(.short_channel_id // .channel_id // "-"),
+	.peer_id,
+	((.total_msat // 0) / 1000 | floor),
+	((.to_us_msat  // 0) / 1000 | floor),
+	(((.total_msat // 0) - (.to_us_msat // 0)) / 1000 | floor),
+	.state
+] | @tsv' <<<"$json"

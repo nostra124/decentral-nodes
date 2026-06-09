@@ -1,0 +1,81 @@
+.TH "LIGHTNING-NODE" 1 "May 2026" "lightning 0.6.0" "User Commands"
+.SH NAME
+lightning-node \- node management and diagnostics
+.SH SYNOPSIS
+.B lightning node
+[\fIsubcommand\fR] [\fIargs\fR]
+.SH DESCRIPTION
+.nf
+lightning node — node management and diagnostics.
+
+Consolidates the node-* micro-verb family into a single dispatcher.
+Covers identity, config / policy, routing, peers, decoding, offers,
+runes, and operational commands. Statistics live in the separate
+`lightning statistics` object; plugin management in `lightning plugin`.
+.fi
+.SH USAGE
+.nf
+usage: lightning node <subcommand> [args]
+
+Info / identity:
+   info                              short node summary (JSON)
+   pubkey                            node public key
+   alias [<name>]                    get or set node alias
+   alias-lookup <alias>              resolve alias to pubkey via gossip
+   color                             node colour hex
+   network                           bitcoin / testnet / regtest
+   block-height                      current block height
+   sync-progress                     bitcoind / lightningd sync warnings
+   announce-addr                     announced + bound addresses
+   lnurl-info                        LNURL / lightning-address info
+   uptime                            node liveness snapshot
+
+Config / policy:
+   fee-policy                        per-channel local fee policies
+   fee-rate [urgent|normal|slow]     on-chain fee rates
+   check-config                      key lightningd config values
+
+Routing / payments:
+   check-route <dest> <msat>         probe a route
+   getroute <node_id> <msat>         find a route
+   pay-route <dest> <msat>           alias for getroute
+   pay-status <payment_hash>         payment status by hash
+   reachability <peer_id>            route-probe reachability check
+   routing-table [--limit N]         routing table excerpt
+
+Peers:
+   connect-check <node_id>           is peer currently connected?
+   connect-auto                      schedule reconnects to known peers
+   ping <peer_id>                    send ping to peer
+   peer-score <peer_id>              simple connectivity score
+
+Decoding:
+   bolt12-decode <offer>             decode a BOLT-12 offer
+   invoice-decode <bolt11>           decode a BOLT-11 invoice
+   onion-decode <onion_hex>          decode an onion packet
+
+Offers / runes:
+   invoice-create-keysend <id> <msat>  keysend payment
+   offer-create [<desc>]             create a BOLT-12 offer
+   offers-list [--limit N]           list offers
+   rune-create [<restriction>...]    create a rune
+   rune-list                         list runes
+
+Operations:
+   backup-state [<dir>]              write SCB snapshot to directory
+   emergency-recover <scb_file>      force-close via SCB
+   emergency-stop                    stop lightningd
+   close-all [--force]               close every channel (use with care)
+   channel-graph [--limit N]         channel graph edge list
+   channel-graph-dump                raw graph dump (first 10 channels)
+   lnurl-pay <lnurl>                 fetch invoice via LNURL
+.fi
+.SH "SEE ALSO"
+.BR lightning (1),
+.BR lightning-statistics (1),
+.BR lightning-plugin (1),
+.BR lightning-channel (1),
+.BR lightning-fee (1),
+.BR lightning-balance (1)
+.SH AUTHOR
+Part of the \fBlightning\fR educational Lightning Network frontend.

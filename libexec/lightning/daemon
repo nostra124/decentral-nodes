@@ -1,0 +1,2671 @@
+#!/bin/bash
+# lightning daemon — lightningd lifecycle management.
+#
+# Implements FEAT-183. Subcommands:
+#   start    — bring up lightningd (background; --daemon or via supervisor)
+#   run      — bring up lightningd in foreground (for launchd/systemd Type=simple)
+#   stop     — graceful shutdown via `lightning-cli stop`
+#   restart  — stop + start
+#   status   — health check (process / RPC / sync / unlock)
+#   monitor  — tail the live log
+#   install  — install Core Lightning itself (FEAT-207)
+#   enable   — generate a service unit
+#              Linux: systemd (~/.config/systemd/user/lightning.service)
+#                     or system-mode (/etc/systemd/system/clightningd.service)
+#              Alpine: OpenRC (/etc/init.d/clightningd) — system-only
+#              macOS: launchd (~/Library/LaunchAgents/<label>.plist)
+#   disable  — stop service and remove unit
+
+set -e
+
+LIGHTNING_DIR="${LIGHTNING_DIR:-$HOME/.lightning}"
+LIGHTNING_NETWORK="${LIGHTNING_NETWORK:-bitcoin}"
+NETWORK_DIR="$LIGHTNING_DIR/$LIGHTNING_NETWORK"
+RPC_FILE="$NETWORK_DIR/lightning-rpc"
+LAUNCHD_LABEL="network.lightning.lightningd"
+KEEPALIVE_LABEL="network.lightning.keepalive"
+ALERT_LABEL="network.lightning.alert"
+AUTOPILOT_LABEL="network.lightning.autopilot"
+TOPUP_WATCHER_LABEL="network.lightning.topup-watcher"
+ACCOUNT_GC_LABEL="network.lightning.account-gc"
+FEE_AUTOTUNE_LABEL="network.lightning.fee-autotune"
+PRICE_ORACLE_LABEL="network.lightning.price-oracle"
+STANDING_ORDER_LABEL="network.lightning.standing-orders"
+RECONCILE_LABEL="network.lightning.reconcile"
+LIGHTNING_CONF="$LIGHTNING_DIR/config"
+BACKEND_BLOCK_BEGIN="# >>> lightning backend — managed by 'daemon enable'"
+BACKEND_BLOCK_END="# <<< lightning backend"
+# Legacy markers from the dropped --esplora path; stripped on every
+# enable so existing configs migrate cleanly.
+LEGACY_ESPLORA_BEGIN="# >>> lightning esplora — managed by 'daemon enable --esplora'"
+LEGACY_ESPLORA_END="# <<< lightning esplora"
+TRUSTEDCOIN_REPO="nbd-wtf/trustedcoin"
+TRUSTEDCOIN_VERSION="v0.8.6"
+# FEAT-198 — cln-lsps client plugin (LSPS0 transport + LSPS1 RPCs).
+# The repo + version pin here is what `daemon enable --lsps`
+# downloads.  Operators on bleeding-edge LSPs can override with the
+# LSPS_PLUGIN_REPO / LSPS_PLUGIN_VERSION env vars.
+LSPS_PLUGIN_REPO="${LSPS_PLUGIN_REPO:-daywalker90/cln-lsps}"
+LSPS_PLUGIN_VERSION="${LSPS_PLUGIN_VERSION:-v0.3.0}"
+
+cli() { lightning-cli --lightning-dir="$LIGHTNING_DIR" --network="$LIGHTNING_NETWORK" "$@"; }
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# Resolve --user (default) or --system from the argument list.
+# Returns "user" or "system".  When not specified, auto-detects
+# from the installed supervisor state.
+daemon:_mode() {
+	local mode=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user)   mode=user; shift ;;
+			--system) mode=system; shift ;;
+			*) shift ;;
+		esac
+	done
+	if [ -n "$mode" ]; then
+		echo "$mode"
+	elif system_mode; then
+		echo system
+	else
+		echo user
+	fi
+}
+
+launchd_plist() {
+	# Per-user LaunchAgent first; fall back to the system path if a
+	# LaunchDaemon plist exists (running as the operator usually
+	# means the per-user one; --system install writes the other).
+	local user_plist="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+	local sys_plist="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+	if [ -f "$user_plist" ]; then
+		echo "$user_plist"
+	elif [ -f "$sys_plist" ]; then
+		echo "$sys_plist"
+	elif [ "$EUID" -eq 0 ]; then
+		echo "$sys_plist"
+	else
+		echo "$user_plist"
+	fi
+}
+
+# A plist is *installed* (file on disk).
+launchd_installed() {
+	is_macos && [ -f "$(launchd_plist)" ]
+}
+
+# A plist is *loaded* into launchd (live job).
+launchd_loaded() {
+	is_macos && command -v launchctl >/dev/null 2>&1 && \
+		launchctl list "$LAUNCHD_LABEL" >/dev/null 2>&1
+}
+
+# Linux systemd --user unit installed for this account.
+systemd_user_installed() {
+	[ -f "$HOME/.config/systemd/user/lightning.service" ]
+}
+
+# Linux systemd system unit enabled.
+system_mode() {
+	command -v systemctl >/dev/null 2>&1 && \
+		systemctl --quiet is-enabled clightningd.service 2>/dev/null
+}
+
+# FEAT-207 — podman supervisor.  Returns 0 if install --podman
+# left a persistent container behind (regardless of running state).
+podman_installed() {
+	command -v podman >/dev/null 2>&1 || return 1
+	local name="${LIGHTNING_PODMAN_NAME:-clightning}"
+	podman container exists "$name" 2>/dev/null
+}
+
+# Container is running right now (vs. just existing).
+podman_container_running() {
+	command -v podman >/dev/null 2>&1 || return 1
+	local name="${LIGHTNING_PODMAN_NAME:-clightning}"
+	[ "$(podman inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = "true" ]
+}
+
+usage() {
+	cat >&2 <<EOF
+usage: lightning daemon <subcommand> [args]
+
+   Lifecycle of the underlying clightningd process.
+   All sub-commands accept --user (default) or --system.
+
+   lifecycle:
+     start [--user|--system]    bring up lightningd (background)
+     run                         foreground (for launchd / systemd)
+     stop [--user|--system]     graceful shutdown
+     restart [--user|--system]  stop + start
+     status [--user|--system]   health check
+     monitor [--user|--system]  tail the daemon log
+
+   setup:
+     install [--from <src>]     install lightningd (brew|apt|apk|source)
+     enable [--user|--system]   install + start launchd/systemd unit
+     disable [--user|--system]  stop service and remove unit
+
+   see 'lightning daemon help <subcommand>' for detailed usage.
+EOF
+}
+
+daemon_running() {
+	command -v lightning-cli >/dev/null 2>&1 && cli getinfo >/dev/null 2>&1
+}
+
+# Non-blocking sanity check on the Bitcoin backend. lightningd's bcli
+# plugin needs a reachable bitcoind; without it the daemon prints
+# "BROKEN plugin-bcli: The Bitcoin backend died" and exits seconds
+# after startup. Returns 0 if bitcoind looks usable, 1 otherwise.
+# Callers should warn-and-continue, not exit — the user may be using
+# a non-default backend (e.g. trustedcoin).
+check_bitcoind() {
+	# Skip the check entirely when the user opted into a public backend.
+	if backend_enabled; then
+		info "$(backend_name) backend — skipping bitcoind check"
+		return 0
+	fi
+	if ! command -v bitcoin-cli >/dev/null 2>&1; then
+		warn "bitcoin-cli not found — lightningd needs a Bitcoin backend"
+		warn "  install bitcoind, or run \`lightning daemon enable --trustedcoin\`"
+		warn "  to use public block explorers (degrades trust)"
+		return 1
+	fi
+	if ! bitcoin-cli -getinfo >/dev/null 2>&1; then
+		warn "bitcoind isn't reachable — lightningd will likely crash on startup"
+		warn "  start it:            bitcoind -daemon"
+		warn "  pruned (~550 MB):    bitcoind -daemon -prune=550"
+		warn "  or public explorers: lightning daemon enable --trustedcoin"
+		return 1
+	fi
+	return 0
+}
+
+# Generic managed-backend-block helpers. The same markers wrap any
+# non-default backend — switching backends rewrites the block, and
+# `--bitcoind` (or no flag on a fresh install) leaves no block at all.
+
+# Returns 0 if a managed backend block is present.
+backend_enabled() {
+	[ -f "$LIGHTNING_CONF" ] && grep -qF "$BACKEND_BLOCK_BEGIN" "$LIGHTNING_CONF"
+}
+
+# Names the currently-enabled non-default backend: trustedcoin / bitcoind.
+backend_name() {
+	if [ -f "$LIGHTNING_CONF" ] && \
+	   awk -v begin="$BACKEND_BLOCK_BEGIN" -v end="$BACKEND_BLOCK_END" '
+		$0 == begin {in_block=1; next}
+		$0 == end   {in_block=0; next}
+		in_block && $0 ~ /trustedcoin/ {found=1}
+		END {exit !found}
+	   ' "$LIGHTNING_CONF"; then
+		echo "trustedcoin"
+	else
+		echo "bitcoind"
+	fi
+}
+
+# Strip the managed backend block (and the legacy esplora block from
+# the dropped --esplora path) so we start from a clean slate.
+backend_disable() {
+	[ -f "$LIGHTNING_CONF" ] || return 0
+	local tmp; tmp=$(mktemp "$LIGHTNING_CONF.XXXXXX")
+	awk \
+		-v b1="$BACKEND_BLOCK_BEGIN"  -v e1="$BACKEND_BLOCK_END" \
+		-v b2="$LEGACY_ESPLORA_BEGIN" -v e2="$LEGACY_ESPLORA_END" '
+		$0 == b1 || $0 == b2 {in_block=1; next}
+		$0 == e1 || $0 == e2 {in_block=0; next}
+		!in_block   {print}
+	' "$LIGHTNING_CONF" > "$tmp"
+	mv "$tmp" "$LIGHTNING_CONF"
+	# Trim trailing blank lines.
+	[ -s "$LIGHTNING_CONF" ] && sed -e :a -e '/^$/{$d;N;ba' -e '}' -i.bak "$LIGHTNING_CONF" 2>/dev/null
+	rm -f "$LIGHTNING_CONF.bak"
+}
+
+# Enable trustedcoin: idempotent, replaces any previous managed block.
+backend_enable_trustedcoin() {
+	mkdir -p "$LIGHTNING_DIR"
+	backend_disable
+
+	cat >&2 <<'EOF'
+
+  WARNING: enabling trustedcoin backend.
+  The Lightning node will fetch chain data over HTTPS from public
+  block explorers (blockstream.info, mempool.space, mempool.emzy.de,
+  blockchair.com, blockchain.info — trustedcoin rotates through
+  them as a fallback chain).
+  Trade-off: those endpoints see all your address queries and could
+  lie about block contents. They also charge you implicit trust
+  jointly — a coordinated lie would land. Use only if you can't
+  run bitcoind. Pruned bitcoind (prune=550, ~550 MB) is the
+  self-sovereign alternative.
+
+EOF
+	{
+		[ -s "$LIGHTNING_CONF" ] && echo
+		echo "$BACKEND_BLOCK_BEGIN"
+		echo "# Replace bitcoind/bcli with the trustedcoin plugin"
+		echo "# (https://github.com/$TRUSTEDCOIN_REPO)."
+		echo "disable-plugin=bcli"
+		echo "$BACKEND_BLOCK_END"
+	} >> "$LIGHTNING_CONF"
+
+	info "trustedcoin enabled (multi-explorer fallback)"
+	info "config block written to $LIGHTNING_CONF"
+
+	install_trustedcoin_plugin
+}
+
+install_trustedcoin_plugin() {
+	local plugins_dir="$LIGHTNING_DIR/plugins"
+	local bin="$plugins_dir/trustedcoin"
+
+	if [ -x "$bin" ]; then
+		info "trustedcoin plugin already present at $bin"
+		return 0
+	fi
+
+	mkdir -p "$plugins_dir"
+
+	local os arch
+	case "$(uname -s)" in
+		Linux)   os=linux   ;;
+		Darwin)  os=darwin  ;;
+		FreeBSD) os=freebsd ;;
+		OpenBSD) os=openbsd ;;
+		*) error "trustedcoin: unsupported OS '$(uname -s)'"; return 1 ;;
+	esac
+	case "$(uname -m)" in
+		x86_64|amd64)   arch=amd64 ;;
+		arm64|aarch64)  arch=arm64 ;;
+		*) error "trustedcoin: unsupported arch '$(uname -m)'"; return 1 ;;
+	esac
+
+	if [ "$os" = "darwin" ]; then
+		install_trustedcoin_via_go "$bin"
+		return $?
+	fi
+
+	if ! command -v curl >/dev/null 2>&1; then
+		error "curl not found — install it, or fetch trustedcoin manually from"
+		error "    https://github.com/$TRUSTEDCOIN_REPO/releases"
+		return 1
+	fi
+
+	local tarball="trustedcoin-$TRUSTEDCOIN_VERSION-$os-$arch.tar.gz"
+	local url="https://github.com/$TRUSTEDCOIN_REPO/releases/download/$TRUSTEDCOIN_VERSION/$tarball"
+	local tmp; tmp=$(mktemp -d)
+
+	info "fetching trustedcoin $TRUSTEDCOIN_VERSION for $os-$arch"
+	info "  $url"
+	if ! curl -fsSL -o "$tmp/$tarball" "$url"; then
+		rm -rf "$tmp"
+		error "failed to download $tarball — check the URL or your network"
+		error "manual install:"
+		error "    curl -fsSL -o /tmp/$tarball $url"
+		error "    tar -xzf /tmp/$tarball -C $plugins_dir"
+		error "    chmod +x $bin"
+		return 1
+	fi
+	if ! tar -xzf "$tmp/$tarball" -C "$tmp" 2>/dev/null; then
+		rm -rf "$tmp"
+		error "failed to extract $tarball"
+		return 1
+	fi
+	local extracted; extracted=$(find "$tmp" -name 'trustedcoin' -type f | head -1)
+	if [ -z "$extracted" ]; then
+		rm -rf "$tmp"
+		error "no 'trustedcoin' binary found inside $tarball"
+		return 1
+	fi
+	mv "$extracted" "$bin"
+	chmod +x "$bin"
+	rm -rf "$tmp"
+	info "installed $bin"
+}
+
+# macOS path: trustedcoin doesn't ship prebuilt darwin binaries, so
+# build from source via the Go toolchain. GOBIN drops the binary
+# straight into the plugins dir.
+install_trustedcoin_via_go() {
+	local bin="$1"
+	local gobin_dir; gobin_dir=$(dirname "$bin")
+	if ! command -v go >/dev/null 2>&1; then
+		error "trustedcoin doesn't ship a prebuilt macOS binary."
+		error "build from source with Go:"
+		error "    brew install go"
+		error "    GOBIN=$gobin_dir go install github.com/$TRUSTEDCOIN_REPO@$TRUSTEDCOIN_VERSION"
+		return 1
+	fi
+	info "no prebuilt macOS binary upstream — building via 'go install'"
+	info "  GOBIN=$gobin_dir go install github.com/$TRUSTEDCOIN_REPO@$TRUSTEDCOIN_VERSION"
+	if ! GOBIN="$gobin_dir" go install "github.com/$TRUSTEDCOIN_REPO@$TRUSTEDCOIN_VERSION"; then
+		error "go install failed — try the @latest pseudo-version, then:"
+		error "    cp \"\$(go env GOPATH)/bin/trustedcoin\" $bin"
+		return 1
+	fi
+	chmod +x "$bin"
+	info "installed $bin"
+}
+
+# FEAT-198 — install the cln-lsps client plugin so LSPS1 verbs
+# work.  Mirrors install_trustedcoin_plugin: downloads the prebuilt
+# binary into $LIGHTNING_DIR/plugins/cln-lsps, then adds a `plugin=`
+# line to $LIGHTNING_CONF.  Operator restarts the daemon to pick it up.
+install_lsps_plugin() {
+	local plugins_dir="$LIGHTNING_DIR/plugins"
+	local bin="$plugins_dir/cln-lsps"
+
+	if [ -x "$bin" ]; then
+		info "cln-lsps plugin already present at $bin"
+	else
+		mkdir -p "$plugins_dir"
+		local os arch
+		case "$(uname -s)" in
+			Linux)  os=linux  ;;
+			Darwin) os=darwin ;;
+			*) error "cln-lsps: unsupported OS '$(uname -s)' — build from source"; return 1 ;;
+		esac
+		case "$(uname -m)" in
+			x86_64|amd64)  arch=amd64 ;;
+			arm64|aarch64) arch=arm64 ;;
+			*) error "cln-lsps: unsupported arch '$(uname -m)' — build from source"; return 1 ;;
+		esac
+
+		if ! command -v curl >/dev/null 2>&1; then
+			error "curl not found — install it, or fetch cln-lsps manually from"
+			error "    https://github.com/$LSPS_PLUGIN_REPO/releases"
+			return 1
+		fi
+
+		local tarball="cln-lsps-$LSPS_PLUGIN_VERSION-$os-$arch.tar.gz"
+		local url="https://github.com/$LSPS_PLUGIN_REPO/releases/download/$LSPS_PLUGIN_VERSION/$tarball"
+		local tmp; tmp=$(mktemp -d)
+
+		info "fetching cln-lsps $LSPS_PLUGIN_VERSION for $os-$arch"
+		info "  $url"
+		if ! curl -fsSL -o "$tmp/$tarball" "$url"; then
+			rm -rf "$tmp"
+			error "failed to download $tarball — check the URL or your network"
+			error "manual install:"
+			error "    curl -fsSL -o /tmp/$tarball $url"
+			error "    tar -xzf /tmp/$tarball -C $plugins_dir"
+			error "    chmod +x $bin"
+			return 1
+		fi
+		if ! tar -xzf "$tmp/$tarball" -C "$tmp" 2>/dev/null; then
+			rm -rf "$tmp"
+			error "failed to extract $tarball"
+			return 1
+		fi
+		local extracted; extracted=$(find "$tmp" -name 'cln-lsps' -type f | head -1)
+		if [ -z "$extracted" ]; then
+			rm -rf "$tmp"
+			error "no 'cln-lsps' binary found inside $tarball"
+			return 1
+		fi
+		mv "$extracted" "$bin"
+		chmod +x "$bin"
+		rm -rf "$tmp"
+		info "installed $bin"
+	fi
+
+	# Register with lightningd so it loads the plugin on next start.
+	mkdir -p "$LIGHTNING_DIR"
+	if [ -f "$LIGHTNING_CONF" ] && grep -qF "plugin=$bin" "$LIGHTNING_CONF"; then
+		info "cln-lsps already enabled in $LIGHTNING_CONF"
+	else
+		printf '\n# >>> cln-lsps plugin — managed by '\''daemon enable --lsps'\''\nplugin=%s\n# <<< cln-lsps plugin\n' "$bin" >> "$LIGHTNING_CONF"
+		info "added plugin=$bin to $LIGHTNING_CONF"
+	fi
+
+	info "restart lightningd for the plugin to load:"
+	info "    lightning daemon restart"
+}
+
+# Surface the most recent BROKEN/FATAL line and the daemon log path
+# so the user has a starting point when status is "down".
+report_last_error() {
+	local logfile
+	for candidate in "$LIGHTNING_DIR/log" "$NETWORK_DIR/log"; do
+		[ -f "$candidate" ] && logfile="$candidate" && break
+	done
+	[ -n "$logfile" ] || return 0
+	local last; last=$(grep -E 'BROKEN|FATAL|backend died|died' "$logfile" 2>/dev/null | tail -1)
+	if [ -n "$last" ]; then
+		echo "  last error: $last"
+	fi
+	echo "  log: $logfile  (tail with: lightning daemon monitor -f)"
+}
+
+cmd_start() {
+	local mode; mode=$(daemon:_mode "$@")
+	if daemon_running; then
+		info "daemon already running"
+		return 0
+	fi
+	# Best-effort pre-flight. Warn-only — the user may be using a
+	# non-bcli backend (trustedcoin) or a non-default bitcoind setup.
+	check_bitcoind || true
+	# Detection order: installed supervisor first. The launchd /
+	# systemd unit handles --daemon (or Type=simple via `daemon run`)
+	# and writes its own logs. Falling through to a direct
+	# `lightningd --daemon` is for users who skipped `daemon enable`.
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			info "sudo launchctl load -w $plist"
+			sudo launchctl load -w "$plist"
+		else
+			info "sudo systemctl start clightningd.service"
+			sudo systemctl start clightningd.service
+		fi
+	elif launchd_installed; then
+		local plist; plist=$(launchd_plist)
+		if launchd_loaded; then
+			info "launchctl kickstart $LAUNCHD_LABEL"
+			launchctl kickstart "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || \
+				launchctl start "$LAUNCHD_LABEL"
+		else
+			info "launchctl load -w $plist"
+			launchctl load -w "$plist"
+		fi
+	elif system_mode; then
+		info "sudo systemctl start clightningd.service"
+		sudo systemctl start clightningd.service
+	elif systemd_user_installed; then
+		info "systemctl --user start lightning"
+		systemctl --user start lightning
+	elif podman_installed; then
+		# FEAT-207 — operator installed via install --podman.
+		# The container holds lightningd; supervise via podman.
+		local name="${LIGHTNING_PODMAN_NAME:-clightning}"
+		info "podman start $name"
+		podman start "$name" >/dev/null
+	else
+		command -v lightningd >/dev/null || {
+			error "lightningd not found — install Core Lightning"
+			exit 127
+		}
+		mkdir -p "$LIGHTNING_DIR"
+		local logfile="$LIGHTNING_DIR/log"
+		info "starting lightningd directly (no service unit installed)"
+		info "   tip: run \`lightning daemon enable\` to set up launchd / systemd"
+		info "   log: $logfile"
+		# lightningd writes startup messages to stderr BEFORE forking
+		# (--daemon detaches afterwards), so redirect both streams to
+		# the log file. Otherwise the parent shell sees the leak.
+		lightningd \
+			--lightning-dir="$LIGHTNING_DIR" \
+			--network="$LIGHTNING_NETWORK" \
+			--log-file="$logfile" \
+			--daemon \
+			>>"$logfile" 2>&1
+	fi
+
+	# Auto-unlock hook (FEAT-184).
+	if [ -x "$SELF_LIBEXEC/lightning/wallet" ] && command -v secret >/dev/null 2>&1; then
+		# Wait briefly for the daemon to start asking for a password.
+		for _ in 1 2 3 4 5; do
+			if cli getinfo >/dev/null 2>&1; then
+				return 0
+			fi
+			# clightning needs the password if the HSM is encrypted;
+			# `wallet unlock --stored` is a no-op when not encrypted.
+			"$SELF_LIBEXEC/lightning/wallet" unlock --stored 2>/dev/null && return 0 || true
+			sleep 1
+		done
+	fi
+
+	# Post-start probe: supervisors (launchd / systemd) report success
+	# the moment they fork the process — but lightningd may still die
+	# during init (no bitcoind, port in use, bad config). Give it a
+	# couple of seconds, then surface what happened if it's not up.
+	local up=0
+	for _ in 1 2 3 4 5; do
+		if daemon_running; then up=1; break; fi
+		sleep 1
+	done
+	if [ "$up" -ne 1 ]; then
+		error "daemon did not come up — exited during startup"
+		report_last_error
+		exit 2
+	fi
+
+	# Auto-bootstrap the gossip graph on first start. lightningd
+	# has no peer-discovery built in: a fresh node sits at zero
+	# peers, can't route, and LSPs can't reach it to open inbound.
+	# `peer bootstrap` connects to ~5 well-known nodes.
+	auto_bootstrap_peers
+}
+
+# Called from cmd_start after the daemon is confirmed running.
+# Runs `peer bootstrap` once when the peer count is zero, which is
+# the case on a fresh install. Subsequent starts skip it because
+# clightning persists peer state.
+auto_bootstrap_peers() {
+	if [ -n "$LIGHTNING_NO_BOOTSTRAP" ]; then
+		return 0
+	fi
+	[ -x "$SELF_LIBEXEC/lightning/peer" ] || return 0
+	local count
+	count=$(cli listpeers 2>/dev/null | jq -r '.peers | length' 2>/dev/null) || count=""
+	[ -n "$count" ] || return 0
+	if [ "$count" -eq 0 ] 2>/dev/null; then
+		info "zero peers — bootstrapping the gossip graph"
+		"$SELF_LIBEXEC/lightning/peer" bootstrap || true
+	fi
+}
+
+cmd_run() {
+	# Foreground variant — exec lightningd directly so launchd /
+	# systemd Type=simple can supervise it. Logs stream to stdout /
+	# stderr; the supervisor decides where they land.
+	if daemon_running; then
+		error "daemon already running; stop it before \`daemon run\`"
+		exit 1
+	fi
+	command -v lightningd >/dev/null || {
+		error "lightningd not found — install Core Lightning"
+		exit 127
+	}
+	check_bitcoind || true
+	mkdir -p "$LIGHTNING_DIR"
+	info "running lightningd in foreground"
+	exec lightningd \
+		--lightning-dir="$LIGHTNING_DIR" \
+		--network="$LIGHTNING_NETWORK"
+}
+
+cmd_stop() {
+	local mode; mode=$(daemon:_mode "$@")
+	if ! daemon_running; then
+		info "daemon not running"
+		return 0
+	fi
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			info "sudo launchctl unload $plist"
+			sudo launchctl unload "$plist"
+		else
+			info "sudo systemctl stop clightningd.service"
+			sudo systemctl stop clightningd.service
+		fi
+	elif launchd_loaded; then
+		# `launchctl stop` would SIGTERM but KeepAlive=true would
+		# restart immediately. Unload removes the job entirely;
+		# `daemon start` reloads it. This matches brew services.
+		local plist; plist=$(launchd_plist)
+		info "launchctl unload $plist"
+		launchctl unload "$plist"
+	elif system_mode; then
+		info "sudo systemctl stop clightningd.service"
+		sudo systemctl stop clightningd.service
+	elif systemd_user_installed; then
+		info "systemctl --user stop lightning"
+		systemctl --user stop lightning
+	elif podman_installed; then
+		local name="${LIGHTNING_PODMAN_NAME:-clightning}"
+		info "podman stop $name"
+		podman stop "$name" >/dev/null
+	else
+		cli stop >/dev/null
+	fi
+	info "daemon stopped"
+}
+
+cmd_restart() {
+	local mode; mode=$(daemon:_mode "$@")
+	cmd_stop "$@" || true
+	# Give the socket time to disappear.
+	for _ in 1 2 3 4 5; do
+		[ ! -S "$RPC_FILE" ] && break
+		sleep 1
+	done
+	cmd_start "$@"
+}
+
+cmd_status() {
+	local mode; mode=$(daemon:_mode "$@")
+	local rc=0
+	local backend="bitcoind/bcli"
+	if backend_enabled; then
+		backend="$(backend_name)"
+	fi
+	if daemon_running; then
+		local info; info=$(cli getinfo)
+		local block; block=$(jq -r .blockheight <<<"$info")
+		local warning; warning=$(jq -r '.warning_lightningd_sync // .warning_bitcoind_sync // empty' <<<"$info")
+		local mode="direct"
+		if launchd_loaded;             then mode="launchd"
+		elif system_mode;              then mode="systemd-system"
+		elif systemd_user_installed;   then mode="systemd-user"
+		elif podman_container_running; then mode="podman"
+		fi
+		if [ -n "$warning" ]; then
+			echo "syncing ($mode-mode, block $block, backend: $backend): $warning"
+			rc=1
+		else
+			echo "healthy ($mode-mode, block $block, backend: $backend)"
+		fi
+	else
+		echo "down (backend: $backend)"
+		# Hint at *why* — recent BROKEN/FATAL line + log path.
+		report_last_error
+		rc=2
+	fi
+	exit $rc
+}
+
+cmd_monitor() {
+	local mode; mode=$(daemon:_mode "$@")
+	# Strip --user/--system from args so they don't pass to tail/journalctl
+	local passthrough=()
+	for arg in "$@"; do
+		case "$arg" in
+			--user|--system) ;;
+			*) passthrough+=("$arg") ;;
+		esac
+	done
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local logfile="/usr/local/var/clightning/log"
+			[ -f "$logfile" ] || { error "system log not found at $logfile"; exit 2; }
+			exec tail "${passthrough[@]}" "$logfile"
+		else
+			exec journalctl -u clightningd.service "${passthrough[@]}"
+		fi
+	fi
+	if systemd_user_installed; then
+		exec journalctl --user -u lightning.service "${passthrough[@]}"
+	fi
+	if podman_installed; then
+		# `podman logs` accepts the same -f flag pattern `tail -f` does;
+		# anything else (e.g. --since) is podman-specific and passes through.
+		exec podman logs "${passthrough[@]}" "${LIGHTNING_PODMAN_NAME:-clightning}"
+	fi
+	# launchd's StandardOutPath and our direct `cmd_start` both write
+	# to $LIGHTNING_DIR/log; lightningd's own default is
+	# $LIGHTNING_DIR/<network>/log.
+	local logfile
+	for candidate in "$LIGHTNING_DIR/log" "$NETWORK_DIR/log"; do
+		if [ -f "$candidate" ]; then
+			logfile="$candidate"
+			break
+		fi
+	done
+	[ -n "$logfile" ] || {
+		error "no log file yet at $LIGHTNING_DIR/log or $NETWORK_DIR/log"
+		if launchd_loaded; then
+			warn "the LaunchAgent is loaded but hasn't produced a log entry yet"
+		elif daemon_running; then
+			warn "the daemon is running but logging to an unexpected path"
+		else
+			warn "run \`lightning daemon start\` (or load the LaunchAgent / systemd unit)"
+		fi
+		exit 2
+	}
+	exec tail "${passthrough[@]}" "$logfile"
+}
+
+cmd_enable() {
+	# Tri-state backend toggle:
+	#   -1  leave backend config alone
+	#    1  enable trustedcoin (multi-explorer fallback)
+	#    0  disable any managed backend block (back to bitcoind/bcli)
+	local system=0 migrate=0 backend=-1 keepalive=1 alert=1 lsps=0 autopilot=0 topup_watcher=0 account_gc=0 fee_autotune=0 price_oracle=0 standing_orders=0 reconcile=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--system)      system=1; shift ;;
+			--user)        system=0; shift ;;
+			--migrate)     migrate=1; shift ;;
+			--trustedcoin) backend=1; shift ;;
+			--bitcoind|--bcli|--no-public-backend)
+			               backend=0; shift ;;
+			--no-keepalive) keepalive=0; shift ;;
+			--no-alert)     alert=0; shift ;;
+			--lsps)        lsps=1; shift ;;
+			--autopilot)   autopilot=1; shift ;;
+			--topup-watcher) topup_watcher=1; shift ;;
+			--account-gc)  account_gc=1; shift ;;
+			--fee-autotune) fee_autotune=1; shift ;;
+			--price-oracle) price_oracle=1; shift ;;
+			--standing-orders) standing_orders=1; shift ;;
+			--reconcile)   reconcile=1; shift ;;
+			*) error "daemon enable: unknown flag $1"; exit 1 ;;
+		esac
+	done
+
+	# Apply the backend toggle BEFORE writing the service unit, so
+	# the post-install hints reflect the chosen backend.
+	case "$backend" in
+		1) backend_enable_trustedcoin ;;
+		0) backend_disable && info "managed backend block removed — using bitcoind (default bcli)" ;;
+	esac
+
+	# FEAT-198 — cln-lsps plugin install runs alongside the unit
+	# install.  Same composition pattern as --trustedcoin.
+	if [ "$lsps" -eq 1 ]; then
+		install_lsps_plugin
+	fi
+
+	if is_macos; then
+		if [ $system -eq 1 ]; then
+			install_macos_system "$migrate"
+		else
+			install_macos_user
+		fi
+	elif [ "$(init_system)" = "openrc" ]; then
+		# OpenRC has no per-user mode — Alpine operators install system-wide.
+		# Treat --system as implied; warn but proceed if it wasn't passed.
+		if [ $system -eq 0 ]; then
+			info "OpenRC has no per-user mode — installing system-wide"
+		fi
+		install_openrc_system "$migrate"
+	elif [ $system -eq 1 ]; then
+		install_system "$migrate"
+	else
+		install_user
+	fi
+
+	# FEAT-199 Layer 2 sidecar — keepalive scheduler. Default on
+	# (the operator opts out with --no-keepalive). Only wired in
+	# user-mode for now; system-mode operators run their own
+	# monitoring usually.  Skipped on OpenRC (system-only path).
+	if [ "$keepalive" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_keepalive_sidecar
+	fi
+
+	# FEAT-204 sidecar — alert scheduler. Same gate as keepalive
+	# (user-mode default-on; --no-alert opts out).
+	if [ "$alert" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_alert_sidecar
+	fi
+
+	# FEAT-205 sidecar — channel autopilot.  OPT-IN — only installed
+	# when --autopilot is explicitly passed.  Same gate as other
+	# sidecars (user-mode, non-OpenRC).
+	if [ "$autopilot" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_autopilot_sidecar
+	fi
+
+	# FEAT-212 PR-4 sidecar — deposit watcher.  Polls listfunds for
+	# new UTXOs at known account-addresses and credits the ledger.
+	# Same OPT-IN gate as autopilot.
+	if [ "$topup_watcher" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_topup_watcher_sidecar
+	fi
+
+	# FEAT-212 PR-5 sidecar — account GC.  Closes stale accounts +
+	# deletes long-closed ones.  Daily cadence.  Same gate.
+	if [ "$account_gc" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_account_gc_sidecar
+	fi
+
+	# FEAT-215 sidecar — fee auto-tuner.  Daily cadence.  Same gate.
+	if [ "$fee_autotune" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_fee_autotune_sidecar
+	fi
+
+	# FEAT-229 sidecar — price oracle poller.  15-min cadence.  Same gate.
+	if [ "$price_oracle" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_price_oracle_sidecar
+	fi
+
+	# FEAT-226 sidecar — standing-order runner.  Hourly cadence (finer
+	# than daily so a freshly-due order fires within the hour).  Same gate.
+	if [ "$standing_orders" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_standing_orders_sidecar
+	fi
+
+	# FEAT-244 sidecar — node-balance reconciliation.  Books the
+	# off-chain pays/receipts our verbs never recorded (another client
+	# driving the same lightningd) into the ledger.  The off-chain analog
+	# of the topup-watcher; coarser cadence because listpays/listinvoices
+	# scans are heavier than listfunds.  Same OPT-IN gate.
+	if [ "$reconcile" -eq 1 ] && [ "$system" -eq 0 ] && [ "$(init_system)" != "openrc" ]; then
+		install_reconcile_sidecar
+	fi
+}
+
+cmd_disable() {
+	local mode; mode=$(daemon:_mode "$@")
+	info "stopping daemon"
+	cmd_stop --"$mode" 2>/dev/null || true
+
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			if [ -f "$plist" ]; then
+				sudo launchctl unload "$plist" 2>/dev/null || true
+				sudo rm "$plist"
+				info "removed $plist"
+			fi
+		elif [ "$(init_system)" = "openrc" ]; then
+			local init_d="${LIGHTNING_INIT_D:-/etc/init.d}"
+			if [ -f "$init_d/clightningd" ]; then
+				sudo rc-update del clightningd default 2>/dev/null || true
+				sudo rm "$init_d/clightningd"
+				info "removed $init_d/clightningd"
+			fi
+		else
+			if [ -f /etc/systemd/system/clightningd.service ]; then
+				sudo systemctl stop clightningd.service 2>/dev/null || true
+				sudo systemctl disable clightningd.service 2>/dev/null || true
+				sudo rm /etc/systemd/system/clightningd.service
+				sudo systemctl daemon-reload
+				info "removed /etc/systemd/system/clightningd.service"
+			fi
+		fi
+	else
+		if is_macos; then
+			local plist="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+			if [ -f "$plist" ]; then
+				launchctl unload "$plist" 2>/dev/null || true
+				rm "$plist"
+				info "removed $plist"
+			fi
+		else
+			local unit="$HOME/.config/systemd/user/lightning.service"
+			if [ -f "$unit" ]; then
+				systemctl --user stop lightning 2>/dev/null || true
+				systemctl --user disable lightning 2>/dev/null || true
+				rm "$unit"
+				systemctl --user daemon-reload 2>/dev/null || true
+				info "removed $unit"
+			fi
+		fi
+	fi
+	info "daemon disabled"
+	info "data directory preserved: ${LIGHTNING_DIR}"
+}
+
+install_macos_user() {
+	local plist; plist=$(launchd_plist)
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	# Resolve to an absolute path in case SELF_LIBEXEC is relative.
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+	mkdir -p "$(dirname "$plist")"
+	cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>daemon</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/log</string>
+</dict>
+</plist>
+EOF
+	info "wrote $plist"
+	info "next:"
+	info "    lightning daemon start         # routes through launchctl"
+	info "    lightning daemon status"
+	info "    lightning daemon monitor -f"
+	info "stop:  lightning daemon stop"
+}
+
+# FEAT-199 Layer 2 — keepalive scheduler sidecar.
+# macOS: LaunchAgent that uses both StartInterval (timer) and
+#        KeepAlive { NetworkState: true } (network-event trigger).
+# Linux: systemd --user timer + service pair.
+install_keepalive_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${KEEPALIVE_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${KEEPALIVE_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>peer</string>
+        <string>keepalive</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>KeepAlive</key>
+    <dict>
+        <key>NetworkState</key>
+        <true/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/keepalive.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/keepalive.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (keepalive sidecar)"
+		info "  triggers: every 10min + on network state change"
+		info "  log:      $LIGHTNING_DIR/keepalive.log"
+		info "  opt out:  lightning daemon enable --no-keepalive"
+		return 0
+	fi
+
+	# Linux systemd --user: .service + .timer.
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-keepalive.service" <<EOF
+[Unit]
+Description=Lightning peer keepalive (FEAT-199)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin peer keepalive
+EOF
+	cat > "$dir/lightning-keepalive.timer" <<EOF
+[Unit]
+Description=Lightning peer keepalive timer (every 10min)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+Unit=lightning-keepalive.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-keepalive.{service,timer}"
+		info "  enable + start with: systemctl --user enable --now lightning-keepalive.timer"
+	info "  opt out:  lightning daemon enable --no-keepalive"
+}
+
+# FEAT-204 — alert scheduler sidecar. Same pattern as keepalive
+# but at 1-minute granularity (alerts need to fire quickly).
+install_alert_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${ALERT_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${ALERT_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>alert</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/alert.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/alert.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (alert sidecar)"
+		info "  triggers: every 60s"
+		info "  log:      $LIGHTNING_DIR/alert.log"
+		info "  opt out:  lightning daemon enable --no-alert"
+		return 0
+	fi
+
+	# Linux systemd --user.
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-alert.service" <<EOF
+[Unit]
+Description=Lightning alert evaluator (FEAT-204)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin alert run
+EOF
+	cat > "$dir/lightning-alert.timer" <<EOF
+[Unit]
+Description=Lightning alert evaluator timer (every 1min)
+
+[Timer]
+OnBootSec=30sec
+OnUnitActiveSec=1min
+Unit=lightning-alert.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-alert.{service,timer}"
+	info "  enable + start with: systemctl --user enable --now lightning-alert.timer"
+	info "  opt out:  lightning daemon enable --no-alert"
+}
+
+# FEAT-205 — channel autopilot sidecar.  Same pattern as keepalive /
+# alert but at 15-minute granularity.  OPT-IN — only installed when
+# `daemon enable --autopilot` is passed (unlike keepalive / alert
+# which default on).
+install_autopilot_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${AUTOPILOT_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${AUTOPILOT_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>channel</string>
+        <string>autopilot</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/autopilot.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/autopilot.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (autopilot sidecar)"
+		info "  triggers: every 15min"
+		info "  log:      $LIGHTNING_DIR/autopilot.log"
+		info "  config:   $LIGHTNING_DIR/autopilot.conf"
+		return 0
+	fi
+
+	# Linux systemd --user.
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-autopilot.service" <<EOF
+[Unit]
+Description=Lightning channel autopilot (FEAT-205)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin channel autopilot run
+EOF
+	cat > "$dir/lightning-autopilot.timer" <<EOF
+[Unit]
+Description=Lightning channel autopilot timer (every 15min)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Unit=lightning-autopilot.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-autopilot.{service,timer}"
+	info "  enable + start with: systemctl --user enable --now lightning-autopilot.timer"
+	info "  config:  $LIGHTNING_DIR/autopilot.conf"
+}
+
+# FEAT-212 PR-4 — deposit watcher sidecar.  Polls `listfunds` every
+# minute and credits the ledger for any new UTXO at a known account
+# address.  Same install pattern as autopilot, finer-grained cadence
+# (1 min vs 15 min) because operators expect "I sent sats to my
+# account address, where are they?" to resolve quickly.
+install_topup_watcher_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${TOPUP_WATCHER_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${TOPUP_WATCHER_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>account</string>
+        <string>topup-watcher</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/topup-watcher.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/topup-watcher.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (topup-watcher sidecar)"
+		info "  triggers: every 1min"
+		info "  log:      $LIGHTNING_DIR/topup-watcher.log"
+		return 0
+	fi
+
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-topup-watcher.service" <<EOF
+[Unit]
+Description=Lightning on-chain deposit watcher (FEAT-212 PR-4)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin account topup-watcher run
+EOF
+	cat > "$dir/lightning-topup-watcher.timer" <<EOF
+[Unit]
+Description=Lightning topup-watcher timer (every 1min)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=1min
+Unit=lightning-topup-watcher.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-topup-watcher.{service,timer}"
+	info "  enable + start with: systemctl --user enable --now lightning-topup-watcher.timer"
+}
+
+# FEAT-244 — reconciliation sidecar.  Off-chain analog of the
+# topup-watcher: books pays/receipts that reached lightningd outside our
+# verbs.  5-min cadence — frequent enough to keep a personal node's
+# books current, but lighter than the 1-min topup-watcher since the
+# listpays/listinvoices scans cost more than listfunds.
+install_reconcile_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${RECONCILE_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${RECONCILE_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>ledger</string>
+        <string>reconcile</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/reconcile.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/reconcile.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (reconcile sidecar)"
+		info "  triggers: every 5min"
+		info "  log:      $LIGHTNING_DIR/reconcile.log"
+		return 0
+	fi
+
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-reconcile.service" <<EOF
+[Unit]
+Description=Lightning node-balance reconciliation (FEAT-244)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin ledger reconcile run
+EOF
+	cat > "$dir/lightning-reconcile.timer" <<EOF
+[Unit]
+Description=Lightning reconcile timer (every 5min)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=lightning-reconcile.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-reconcile.{service,timer}"
+	info "  enable + start with: systemctl --user enable --now lightning-reconcile.timer"
+}
+
+# FEAT-212 PR-5 — account-GC sidecar.  Daily cadence — there's no
+# user-visible urgency to closing stale accounts, just hygiene.
+install_account_gc_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${ACCOUNT_GC_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${ACCOUNT_GC_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>account</string>
+        <string>gc</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>86400</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/account-gc.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/account-gc.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (account-gc sidecar)"
+		info "  triggers: daily"
+		info "  log:      $LIGHTNING_DIR/account-gc.log"
+		return 0
+	fi
+
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-account-gc.service" <<EOF
+[Unit]
+Description=Lightning account garbage collector (FEAT-212 PR-5)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin account gc run
+EOF
+	cat > "$dir/lightning-account-gc.timer" <<EOF
+[Unit]
+Description=Lightning account-gc timer (daily)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+Unit=lightning-account-gc.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-account-gc.{service,timer}"
+	info "  enable + start with: systemctl --user enable --now lightning-account-gc.timer"
+}
+
+# FEAT-215 — fee-policy autotune sidecar.  Daily cadence — rates
+# don't need to swing on intra-day routing volatility, and a
+# bounded per-day step (LIGHTNING_FEE_AUTOTUNE_MAX_STEP_PPM)
+# prevents oscillation.
+install_fee_autotune_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${FEE_AUTOTUNE_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${FEE_AUTOTUNE_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>fee-policy</string>
+        <string>autotune</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>86400</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/fee-autotune.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/fee-autotune.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (fee-autotune sidecar)"
+		info "  triggers: daily"
+		info "  log:      $LIGHTNING_DIR/fee-autotune.log"
+		info "  required env: LIGHTNING_FEE_AUTOTUNE_TARGET_MSAT_PER_DAY"
+		return 0
+	fi
+
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-fee-autotune.service" <<EOF
+[Unit]
+Description=Lightning fee-policy autotuner (FEAT-215)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+# Operator must set this — the tuner has no default target.
+#   Environment=LIGHTNING_FEE_AUTOTUNE_TARGET_MSAT_PER_DAY=100000
+ExecStart=$self_bin fee-policy autotune run
+EOF
+	cat > "$dir/lightning-fee-autotune.timer" <<EOF
+[Unit]
+Description=Lightning fee-policy autotune timer (daily)
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=24h
+Unit=lightning-fee-autotune.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-fee-autotune.{service,timer}"
+	info "  set LIGHTNING_FEE_AUTOTUNE_TARGET_MSAT_PER_DAY in the service file"
+	info "  enable + start with: systemctl --user enable --now lightning-fee-autotune.timer"
+}
+
+# FEAT-229 — price-oracle poller sidecar.  15-min cadence (fiat
+# price moves intra-day; tax + display want reasonably fresh + dense
+# history).  Same launchd / systemd-user pattern as the others.
+install_price_oracle_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${PRICE_ORACLE_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PRICE_ORACLE_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>price</string>
+        <string>poll</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>900</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/price-oracle.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/price-oracle.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (price-oracle sidecar)"
+		info "  triggers: every 15min"
+		info "  config:   \$wallet/price.recfile (base + feed url)"
+		return 0
+	fi
+
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-price-oracle.service" <<EOF
+[Unit]
+Description=Lightning sat/fiat price oracle poller (FEAT-229)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin price poll
+EOF
+	cat > "$dir/lightning-price-oracle.timer" <<EOF
+[Unit]
+Description=Lightning price-oracle timer (every 15min)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=15min
+Unit=lightning-price-oracle.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-price-oracle.{service,timer}"
+	info "  config:  \$wallet/price.recfile (base + feed url)"
+	info "  enable + start with: systemctl --user enable --now lightning-price-oracle.timer"
+}
+
+# FEAT-226 — standing-order runner sidecar.  Hourly cadence: picks up
+# due orders (next_run <= now), pays via the normal pay/transfer path,
+# advances next_run.  Same launchd / systemd-user pattern as the others.
+install_standing_orders_sidecar() {
+	local self_bin="$SELF_LIBEXEC/../bin/lightning"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+
+	if is_macos; then
+		local plist="$HOME/Library/LaunchAgents/${STANDING_ORDER_LABEL}.plist"
+		mkdir -p "$(dirname "$plist")"
+		cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${STANDING_ORDER_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>account</string>
+        <string>standing-order</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIGHTNING_DIR</key>
+        <string>${LIGHTNING_DIR}</string>
+        <key>LIGHTNING_NETWORK</key>
+        <string>${LIGHTNING_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+        <key>SELF_QUIET</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>StandardOutPath</key>
+    <string>${LIGHTNING_DIR}/standing-orders.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LIGHTNING_DIR}/standing-orders.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote $plist (standing-orders sidecar)"
+		info "  triggers: hourly"
+		return 0
+	fi
+
+	local dir="$HOME/.config/systemd/user"
+	mkdir -p "$dir"
+	cat > "$dir/lightning-standing-orders.service" <<EOF
+[Unit]
+Description=Lightning standing-order runner (FEAT-226)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SELF_QUIET=1
+Environment=LIGHTNING_DIR=$LIGHTNING_DIR
+Environment=LIGHTNING_NETWORK=$LIGHTNING_NETWORK
+ExecStart=$self_bin account standing-order run
+EOF
+	cat > "$dir/lightning-standing-orders.timer" <<EOF
+[Unit]
+Description=Lightning standing-orders timer (hourly)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Unit=lightning-standing-orders.service
+
+[Install]
+WantedBy=timers.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $dir/lightning-standing-orders.{service,timer}"
+	info "  enable + start with: systemctl --user enable --now lightning-standing-orders.timer"
+}
+
+install_macos_system() {
+	local migrate=$1
+	local state_dir=/usr/local/var/clightning
+	local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+
+	if [ $migrate -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
+		error "\$HOME/.lightning exists (user-mode install detected); refusing"
+		warn "pass --migrate to move it to $state_dir"
+		exit 3
+	fi
+
+	command -v sudo >/dev/null || { error "sudo required for --system"; exit 127; }
+
+	# macOS doesn't have useradd — use dscl. UID 250-300 is the
+	# conventional range for third-party system users.
+	local svc_user="_clightning"
+	local svc_uid=297
+	local svc_gid=297
+
+	if ! dscl . -read /Users/$svc_user >/dev/null 2>&1; then
+		# Pick an unused UID in the system range if 297 is taken.
+		while dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}' | grep -qx "$svc_uid"; do
+			svc_uid=$((svc_uid + 1))
+		done
+		svc_gid=$svc_uid
+
+		info "creating system user $svc_user (uid $svc_uid)"
+		sudo dscl . -create /Groups/$svc_user
+		sudo dscl . -create /Groups/$svc_user PrimaryGroupID $svc_gid
+		sudo dscl . -create /Users/$svc_user
+		sudo dscl . -create /Users/$svc_user UniqueID $svc_uid
+		sudo dscl . -create /Users/$svc_user PrimaryGroupID $svc_gid
+		sudo dscl . -create /Users/$svc_user UserShell /usr/bin/false
+		sudo dscl . -create /Users/$svc_user NFSHomeDirectory $state_dir
+		sudo dscl . -create /Users/$svc_user RealName "Core Lightning daemon"
+		sudo dscl . -create /Users/$svc_user IsHidden 1
+	fi
+
+	# State dir, owned by the service user, group-readable so the
+	# operator (added to the group) can reach the RPC socket.
+	sudo install -d -o $svc_user -g $svc_user -m 0750 "$state_dir"
+
+	# Add the current user to the clightning group so they can talk
+	# to the RPC socket without sudo.
+	sudo dseditgroup -o edit -a "$USER" -t user "$svc_user"
+
+	# clightning config — rpc-file-mode=0660 so the group can read.
+	local cfg="$state_dir/config"
+	sudo tee "$cfg" >/dev/null <<EOF
+network=$LIGHTNING_NETWORK
+log-file=$state_dir/log
+rpc-file-mode=0660
+EOF
+	sudo chown $svc_user:$svc_user "$cfg"
+
+	# LaunchDaemon plist running as the service user.
+	local lightningd_bin; lightningd_bin=$(command -v lightningd)
+	sudo tee "$plist" >/dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>UserName</key>
+    <string>${svc_user}</string>
+    <key>GroupName</key>
+    <string>${svc_user}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${lightningd_bin}</string>
+        <string>--lightning-dir=${state_dir}</string>
+        <string>--conf=${cfg}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>${state_dir}/log</string>
+    <key>StandardErrorPath</key>
+    <string>${state_dir}/log</string>
+</dict>
+</plist>
+EOF
+	sudo chown root:wheel "$plist"
+	sudo chmod 644 "$plist"
+
+	info "installed system-mode at $state_dir"
+	info "user '$svc_user' created (uid $svc_uid); '$USER' added to its group"
+	info "next:"
+	info "    sudo launchctl load -w $plist  # one-time, run as root"
+	info "    lightning daemon status"
+	info "log out and back in for your group membership to take effect"
+}
+
+install_user() {
+	local dir="$HOME/.config/systemd/user"
+	local unit="$dir/lightning.service"
+	mkdir -p "$dir"
+	cat > "$unit" <<EOF
+[Unit]
+Description=Lightning Network daemon (clightning, user-mode)
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=$(command -v lightningd) --lightning-dir=$LIGHTNING_DIR --network=$LIGHTNING_NETWORK --daemon
+ExecStop=$(command -v lightning-cli) --lightning-dir=$LIGHTNING_DIR --network=$LIGHTNING_NETWORK stop
+PIDFile=$LIGHTNING_DIR/lightningd-${LIGHTNING_NETWORK}.pid
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Install]
+WantedBy=default.target
+EOF
+	systemctl --user daemon-reload 2>/dev/null || true
+	info "wrote $unit"
+	info "next:"
+	info "    lightning daemon start         # routes through systemctl --user"
+	info "    lightning daemon status"
+	info "    lightning daemon monitor -f"
+	info "to survive logout:  loginctl enable-linger $USER"
+	info "to autostart at login:  systemctl --user enable lightning"
+}
+
+install_system() {
+	local migrate=$1
+
+	if [ $migrate -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
+		warn "\$HOME/.lightning exists (user-mode install detected); refusing"
+		error "pass --migrate to move it to /var/lib/clightning"
+		exit 3
+	fi
+
+	command -v sudo >/dev/null || { error "sudo required for --system"; exit 127; }
+
+	# 1. Create the clightning system user (idempotent).
+	if ! getent passwd clightning >/dev/null; then
+		sudo useradd --system --home /var/lib/clightning \
+			--shell /usr/sbin/nologin --user-group clightning
+	fi
+
+	# 2. State dir.
+	sudo install -d -o clightning -g clightning -m 0750 /var/lib/clightning
+
+	# 3. Add the operator to the clightning group.
+	sudo usermod -a -G clightning "$USER"
+
+	# 4. clightning's config — rpc-file-mode=0660 so the group can read it.
+	local cfg=/var/lib/clightning/config
+	sudo tee "$cfg" >/dev/null <<EOF
+network=$LIGHTNING_NETWORK
+log-file=/var/lib/clightning/log
+rpc-file-mode=0660
+EOF
+	sudo chown clightning:clightning "$cfg"
+
+	# 5. Systemd unit.
+	local unit=/etc/systemd/system/clightningd.service
+	sudo tee "$unit" >/dev/null <<EOF
+[Unit]
+Description=Lightning Network daemon (clightning, system-mode)
+After=network.target
+
+[Service]
+Type=simple
+User=clightning
+Group=clightning
+ExecStart=$(command -v lightningd) --lightning-dir=/var/lib/clightning --conf=$cfg
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=3
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	sudo systemctl daemon-reload
+
+	info "installed system-mode at /var/lib/clightning"
+	info "user 'clightning' created; '$USER' added to group 'clightning'"
+	info "next:"
+	info "    sudo systemctl enable clightningd"
+	info "    lightning daemon start         # routes through systemctl"
+	info "    lightning daemon status"
+	info "log out and back in for your group membership to take effect"
+}
+
+# FEAT-207 — Alpine / OpenRC system install.  Writes an
+# `/etc/init.d/clightningd` service unit driven by supervise-daemon,
+# creates the `clightning` system user + group, and seeds a config
+# with rpc-file-mode so the operator's primary group can reach the
+# RPC socket (same three-user pattern as install_system above).
+#
+# Two paths are parameterized via env vars for testability:
+#   LIGHTNING_INIT_D         /etc/init.d           — service-unit dir
+#   LIGHTNING_OPENRC_STATE   /var/lib/clightning   — daemon state dir
+#
+# In production the defaults are correct; tests override both so the
+# verb's filesystem writes land under $BATS_TMPDIR instead of /etc.
+install_openrc_system() {
+	local migrate=$1
+	local prefix; prefix=$(ic_root_prefix)
+	local init_d="${LIGHTNING_INIT_D:-/etc/init.d}"
+	local state_dir="${LIGHTNING_OPENRC_STATE:-/var/lib/clightning}"
+
+	if [ "$migrate" -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
+		warn "\$HOME/.lightning exists (user-mode install detected); refusing"
+		error "pass --migrate to move it to $state_dir"
+		exit 3
+	fi
+
+	# Alpine ships busybox `adduser` / `addgroup`, not the shadow-utils
+	# variants used in install_system.  Both -S flags create system
+	# accounts (no password, no aging).
+	if ! getent group clightning >/dev/null 2>&1; then
+		$prefix addgroup -S clightning || { error "failed to create clightning group"; exit 1; }
+	fi
+	if ! getent passwd clightning >/dev/null 2>&1; then
+		$prefix adduser -S -H -h "$state_dir" -s /sbin/nologin -G clightning clightning || {
+			error "failed to create clightning user"
+			exit 1
+		}
+	fi
+
+	$prefix install -d -o clightning -g clightning -m 0750 "$state_dir"
+
+	# Operator joins the clightning group so they can talk to the RPC socket.
+	$prefix adduser "$USER" clightning >/dev/null 2>&1 || true
+
+	local cfg="$state_dir/config"
+	$prefix tee "$cfg" >/dev/null <<EOF
+network=$LIGHTNING_NETWORK
+log-file=$state_dir/log
+rpc-file-mode=0660
+EOF
+	$prefix chown clightning:clightning "$cfg"
+
+	$prefix mkdir -p "$init_d"
+	local unit="$init_d/clightningd"
+	$prefix tee "$unit" >/dev/null <<EOF
+#!/sbin/openrc-run
+# Core Lightning OpenRC service unit (FEAT-207).
+# Written by 'lightning daemon enable' on Alpine.
+
+description="Lightning Network daemon (Core Lightning)"
+
+command="/usr/bin/lightningd"
+command_args="--lightning-dir=$state_dir --network=$LIGHTNING_NETWORK"
+command_user="clightning:clightning"
+pidfile="$state_dir/lightningd-$LIGHTNING_NETWORK.pid"
+
+# supervise-daemon restarts the process on exit; respawn_* caps the
+# tight-loop case (3 restarts in 5 minutes, then stop).  Mirrors the
+# StartLimitBurst / StartLimitIntervalSec semantics of the systemd unit.
+supervisor=supervise-daemon
+respawn_delay=30
+respawn_period=300
+respawn_max=3
+
+output_log="$state_dir/log"
+error_log="$state_dir/log"
+
+depend() {
+	need net
+}
+EOF
+	$prefix chmod +x "$unit"
+
+	info "wrote $unit"
+	info "next:"
+	info "    sudo rc-update add clightningd default   # enable at boot"
+	info "    sudo rc-service clightningd start         # start now"
+	info "    lightning daemon status"
+	info "    lightning daemon monitor -f"
+	info "stop:  sudo rc-service clightningd stop"
+	info "log out and back in for clightning group membership to take effect"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-207 — Core Lightning binary installer
+#
+# Currently a scaffold: parses flags, computes the planned action, prints
+# what it would do, and exits.  The contract and implementation plan live
+# in issues/feature/207-clightning-install.md.
+# ---------------------------------------------------------------------------
+
+# Returns: darwin / ubuntu / alpine / unknown
+platform_id() {
+	if is_macos; then echo darwin; return; fi
+	local os_release="${LIGHTNING_OS_RELEASE:-/etc/os-release}"
+	if [ -r "$os_release" ]; then
+		# shellcheck disable=SC1090,SC1091
+		. "$os_release"
+		case "${ID:-}" in
+			ubuntu|debian) echo ubuntu; return ;;
+			alpine)        echo alpine; return ;;
+		esac
+		case "${ID_LIKE:-}" in
+			*debian*) echo ubuntu; return ;;
+		esac
+	fi
+	echo unknown
+}
+
+# Returns: systemd / launchd / openrc / none
+init_system() {
+	if is_macos; then echo launchd; return; fi
+	if command -v openrc >/dev/null 2>&1 || [ -d /etc/init.d ] && [ "$(platform_id)" = "alpine" ]; then
+		echo openrc; return
+	fi
+	if command -v systemctl >/dev/null 2>&1; then
+		echo systemd; return
+	fi
+	echo none
+}
+
+# Returns: rpk / brew / apk / source / podman / none
+preferred_backend() {
+	command -v rpk    >/dev/null 2>&1 && { echo rpk;    return; }
+	if is_macos && command -v brew >/dev/null 2>&1; then
+		echo brew; return
+	fi
+	if [ "$(platform_id)" = "alpine" ] && command -v apk >/dev/null 2>&1; then
+		echo apk; return
+	fi
+	command -v podman >/dev/null 2>&1 && { echo podman; return; }
+	if [ "$(platform_id)" = "ubuntu" ]; then
+		echo source; return
+	fi
+	echo none
+}
+
+cmd_install() {
+	local backend="" version="" system=0 yes=0 dry_run=0 force=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--from)
+				[ -n "$backend" ] && { error "daemon install: pick one source, got '$backend' and '$2'"; exit 1; }
+				backend="$2"; shift 2 ;;
+			--tag)   version="$2"; shift 2 ;;
+			--system)  system=1; shift ;;
+			--yes)     yes=1; shift ;;
+			--dry-run) dry_run=1; shift ;;
+			--force)   force=1; shift ;;
+			--help|-h) subhelp install; exit 0 ;;
+			*) error "daemon install: unknown flag '$1'"; exit 1 ;;
+		esac
+	done
+
+	[ -n "$backend" ] || backend=$(preferred_backend)
+
+	if [ "$backend" = "none" ]; then
+		error "daemon install: cannot auto-detect a source for platform '$(platform_id)'"
+		info  "  pass --from with one of: brew apk source rpk podman"
+		exit 2
+	fi
+
+	# Idempotency — refuse to overwrite an existing install without --force.
+	if [ $force -eq 0 ] && [ $dry_run -eq 0 ] && command -v lightningd >/dev/null 2>&1; then
+		local existing
+		existing=$(lightningd --version 2>/dev/null | head -1)
+		error "daemon install: lightningd is already on PATH${existing:+ ($existing)}"
+		echo "  pass --force to reinstall, or:"                            >&2
+		echo "    lightning daemon enable          # write the service unit" >&2
+		echo "    lightning daemon status          # check the running daemon" >&2
+		exit 1
+	fi
+
+	# Plan summary (printed in all modes so operators can confirm what's about to happen).
+	echo "source:     $backend"
+	echo "platform:   $(platform_id)"
+	echo "init:       $(init_system)"
+	echo "tag:        ${version:-latest}"
+	echo "scope:      $([ $system -eq 1 ] && echo system || echo user)"
+	echo "confirm:    $([ $yes -eq 1 ] && echo skip || echo prompt)"
+	echo "mode:       $([ $dry_run -eq 1 ] && echo dry-run || echo planned)"
+
+	case "$backend" in
+		rpk)    ic_run_rpk    "$version" "$dry_run" "$yes" "$force" ;;
+		brew)   ic_run_brew   "$version" "$dry_run" "$yes" "$force" ;;
+		apk)    ic_run_apk    "$version" "$dry_run" "$yes" "$force" ;;
+		source) ic_run_source "$version" "$dry_run" "$yes" "$force" ;;
+		podman) ic_run_podman "$version" "$dry_run" "$yes" "$force" "$system" ;;
+		docker)
+			error "daemon install: docker is not supported — use --from podman"
+			info  "  install podman:  https://podman.io/docs/installation"
+			exit 1 ;;
+		*)
+			error "daemon install: unknown source '$backend'"
+			info  "  pick one of: brew apk source rpk podman"
+			exit 1 ;;
+	esac
+}
+
+# Picks the privilege-escalation prefix for backends that need root
+# (apk, apt-get).  doas is preferred on Alpine; sudo elsewhere.  When
+# already root or neither is available, returns the empty string —
+# the package manager then either succeeds (root) or fails loudly with
+# its own permissions error (no escalation tool installed).
+ic_root_prefix() {
+	[ "$(id -u 2>/dev/null)" = "0" ] && { echo ""; return; }
+	command -v doas >/dev/null 2>&1 && { echo "doas"; return; }
+	command -v sudo >/dev/null 2>&1 && { echo "sudo"; return; }
+	echo ""
+}
+
+# rpk path — assumes a sister `lightningd` rpk package.  Surfaces rpk's
+# own exit code on failure; callers see "package not found" or whatever
+# rpk reports.  Acceptance criterion #9 (FEAT-207).
+ic_run_rpk() {
+	local version="$1" dry_run="$2" yes="$3" force="$4"
+	local cmd=(rpk install lightningd)
+	[ -n "$version" ] && cmd+=(--version "$version")
+	[ "$yes"   = "1" ] && cmd+=(--yes)
+	[ "$force" = "1" ] && cmd+=(--force)
+	echo "plan:       ${cmd[*]}"
+	if [ "$dry_run" = "1" ]; then return 0; fi
+	if ! command -v rpk >/dev/null 2>&1; then
+		error "daemon install: rpk not on PATH"
+		echo "  install rpk first, or use a different source:"                   >&2
+		echo "    --from brew (macOS) --from apk (Alpine) --from source (Ubuntu) --from podman (any)" >&2
+		exit 1
+	fi
+	"${cmd[@]}" || {
+		local rc=$?
+		error "daemon install: rpk install failed (exit $rc)"
+		echo "  if the lightningd rpk package isn't published yet, try:"          >&2
+		echo "    --from brew (macOS) --from apk (Alpine) --from source (Ubuntu) --from podman (any)" >&2
+		exit "$rc"
+	}
+	ic_verify_lightningd
+}
+
+# Homebrew path — macOS only.  brew handles version pinning via the
+# `core-lightning@<version>` formula naming convention.
+ic_run_brew() {
+	local version="$1" dry_run="$2" yes="$3" force="$4"
+	local pkg="core-lightning"
+	[ -n "$version" ] && pkg="core-lightning@$version"
+	local cmd=(brew install "$pkg")
+	[ "$force" = "1" ] && cmd=(brew reinstall "$pkg")
+	echo "plan:       ${cmd[*]}"
+	if [ "$dry_run" = "1" ]; then return 0; fi
+	if ! is_macos; then
+		error "daemon install: Homebrew is macOS-only"
+		echo "  on this platform use: --from apk (Alpine) --from source (Ubuntu) --from podman (any)" >&2
+		exit 1
+	fi
+	if ! command -v brew >/dev/null 2>&1; then
+		error "daemon install: brew not on PATH"
+		echo "  install Homebrew first: https://brew.sh"                              >&2
+		echo "  (daemon install does not auto-install brew — see FEAT-207 §non-goals)"  >&2
+		exit 1
+	fi
+	"${cmd[@]}" || {
+		local rc=$?
+		error "daemon install: brew install failed (exit $rc)"
+		exit "$rc"
+	}
+	ic_verify_lightningd
+}
+
+# Alpine path — `apk add lightningd[=version]`.  Picks doas/sudo as
+# the privilege prefix; on a non-Alpine system, refuses with a hint
+# pointing at the other backends.  Version pinning uses apk's `=`
+# syntax (matches the spec table in FEAT-207).
+ic_run_apk() {
+	local version="$1" dry_run="$2" yes="$3" force="$4"
+	local pkg="lightningd"
+	[ -n "$version" ] && pkg="lightningd=$version"
+	local cmd=()
+	local prefix
+	prefix=$(ic_root_prefix)
+	[ -n "$prefix" ] && cmd+=("$prefix")
+	cmd+=(apk add)
+	# `--force-overwrite` is apk's closest analogue to brew reinstall —
+	# overwrites files claimed by other packages.  Operators who want a
+	# clean reinstall can `apk del lightningd && lightning daemon install --from apk`.
+	[ "$force" = "1" ] && cmd+=(--force-overwrite)
+	cmd+=("$pkg")
+	echo "plan:       ${cmd[*]}"
+	if [ "$dry_run" = "1" ]; then return 0; fi
+	if [ "$(platform_id)" != "alpine" ]; then
+		error "daemon install: this is not an Alpine system (platform: $(platform_id))"
+		echo "  on this platform use: --from brew (macOS) --from source (Ubuntu) --from podman (any)" >&2
+		exit 1
+	fi
+	if ! command -v apk >/dev/null 2>&1; then
+		error "daemon install: apk not on PATH"
+		echo "  apk is Alpine's package manager — it should be installed by default" >&2
+		exit 1
+	fi
+	"${cmd[@]}" || {
+		local rc=$?
+		error "daemon install: apk add failed (exit $rc)"
+		exit "$rc"
+	}
+	ic_verify_lightningd
+}
+
+# Source-build path — for Ubuntu / Debian, which has no upstream
+# Core Lightning apt package.  Multi-step: apt-get build-deps,
+# git clone, ./configure && make, sudo make install.  Each step
+# propagates the underlying tool's exit code on failure.
+#
+# Build deps list mirrors Core Lightning's official install docs
+# (https://docs.corelightning.org/docs/installation, Ubuntu section).
+# Keep in sync if upstream updates them.
+ic_source_build_deps() {
+	echo "autoconf automake build-essential git libtool libsqlite3-dev"
+	echo "libpq-dev python3 python3-pip net-tools zlib1g-dev libsodium-dev"
+	echo "gettext valgrind libpython3-dev"
+}
+
+ic_run_source() {
+	local version="$1" dry_run="$2" yes="$3" force="$4"
+	local repo="https://github.com/ElementsProject/lightning.git"
+	local builddir="${LIGHTNING_BUILD_DIR:-$HOME/.cache/lightning/build}"
+
+	local prefix
+	prefix=$(ic_root_prefix)
+
+	echo "plan:       apt-get install build-deps + git clone + ./configure && make + sudo make install"
+	echo "build-dir:  $builddir"
+	if [ "$dry_run" = "1" ]; then return 0; fi
+
+	if [ "$(platform_id)" != "ubuntu" ]; then
+		error "daemon install: this isn't an Ubuntu/Debian system (platform: $(platform_id))"
+		echo "  --source is wired for apt-get build-deps; on this platform try:"   >&2
+		echo "    --brew (macOS) --apk (Alpine) --podman (any) --rpk (anywhere)"    >&2
+		exit 1
+	fi
+	for tool in apt-get git make; do
+		if ! command -v "$tool" >/dev/null 2>&1; then
+			error "daemon install: $tool not on PATH"
+			echo "  --from source needs apt-get, git, and make to be installed" >&2
+			exit 1
+		fi
+	done
+
+	# Acceptance criterion #5 — print the deps list and prompt.  --yes
+	# skips the prompt for unattended use.  Refuse when there's no TTY
+	# unless --yes is set, so we never block a CI pipeline mid-stream.
+	echo ""
+	echo "About to install Ubuntu build-deps via apt-get:"
+	ic_source_build_deps | sed 's/^/  /'
+	if [ "$yes" != "1" ]; then
+		if [ ! -t 0 ]; then
+			error "daemon install: stdin is not a TTY; pass --yes to install build-deps non-interactively"
+			exit 1
+		fi
+		printf "Continue? [y/N] "
+		local ans
+		read -r ans
+		case "$ans" in
+			y|Y|yes|YES) ;;
+			*) error "daemon install: declined by operator"; exit 1 ;;
+		esac
+	fi
+
+	# Build-dep install.  apt-get needs root.
+	# shellcheck disable=SC2046
+	${prefix:+$prefix} apt-get install -y $(ic_source_build_deps | tr '\n' ' ') || {
+		local rc=$?
+		error "daemon install: apt-get install failed (exit $rc)"
+		exit "$rc"
+	}
+
+	# Clone (or fetch if already cloned — supports --force re-runs).
+	mkdir -p "$builddir" || exit 1
+	if [ -d "$builddir/lightning/.git" ]; then
+		echo "lightning repo already cloned, fetching..."
+		( cd "$builddir/lightning" && git fetch --tags ) || {
+			error "daemon install: git fetch failed"
+			exit 1
+		}
+	else
+		git clone "$repo" "$builddir/lightning" || {
+			error "daemon install: git clone failed"
+			exit 1
+		}
+	fi
+	if [ -n "$version" ]; then
+		( cd "$builddir/lightning" && git checkout "$version" ) || {
+			error "daemon install: git checkout '$version' failed"
+			exit 1
+		}
+	fi
+
+	# Build.
+	( cd "$builddir/lightning" && ./configure && make ) || {
+		local rc=$?
+		error "daemon install: build failed (exit $rc)"
+		echo "  build dir left at $builddir/lightning for inspection" >&2
+		exit "$rc"
+	}
+
+	# Install — needs root.
+	# shellcheck disable=SC2086
+	( cd "$builddir/lightning" && ${prefix:+$prefix} make install ) || {
+		local rc=$?
+		error "daemon install: make install failed (exit $rc)"
+		exit "$rc"
+	}
+
+	ic_verify_lightningd
+}
+
+# Podman path — rootless containerized lightningd, used cross-platform
+# when no native package is appropriate (or when the operator just
+# prefers containers).  daemon install:
+#
+#   1. pulls elementsproject/lightningd[:version]
+#   2. creates a persistent container with $LIGHTNING_DIR mounted in
+#   3. writes host shims for `lightning-cli` and `lightningd` that
+#      exec into the container (cli) or run the image one-shot (the
+#      `lightningd --version` host check)
+#
+	# Container lifecycle (start/stop) is handled by `lightning daemon
+	# start / stop` — a separate concern from install.  See FEAT-207
+# acceptance criterion #3.
+ic_run_podman() {
+	local version="$1" dry_run="$2" yes="$3" force="$4" system="$5"
+	local image="elementsproject/lightningd${version:+:$version}"
+	local container_name="${LIGHTNING_PODMAN_NAME:-clightning}"
+	local lightning_dir="${LIGHTNING_DIR:-$HOME/.lightning}"
+	local shim_dir="${LIGHTNING_SHIM_DIR:-$HOME/.local/bin}"
+
+	echo "plan:       podman pull $image"
+	echo "            podman create --name $container_name -v $lightning_dir:/root/.lightning $image"
+	echo "shim-dir:   $shim_dir (lightning-cli, lightningd)"
+	if [ "$dry_run" = "1" ]; then return 0; fi
+
+	if [ "$system" = "1" ]; then
+		error "daemon install: --system is not supported with podman"
+		echo "  podman ships rootless by design; system-wide containerized installs are out of scope" >&2
+		echo "  (see FEAT-207 acceptance criterion #3)" >&2
+		exit 1
+	fi
+	if ! command -v podman >/dev/null 2>&1; then
+		error "daemon install: podman not on PATH"
+		echo "  install podman:  https://podman.io/docs/installation" >&2
+		echo "  (daemon install does not auto-install podman — FEAT-207 §non-goals)" >&2
+		exit 1
+	fi
+
+	podman pull "$image" || {
+		local rc=$?
+		error "daemon install: podman pull failed (exit $rc)"
+		exit "$rc"
+	}
+
+	# Container creation — idempotent under --force.
+	if podman container exists "$container_name" 2>/dev/null; then
+		if [ "$force" = "1" ]; then
+			podman rm -f "$container_name" >/dev/null || {
+				error "daemon install: failed to remove existing container '$container_name'"
+				exit 1
+			}
+		else
+			error "daemon install: container '$container_name' already exists"
+			echo "  pass --force to recreate, or:"                                        >&2
+			echo "    lightning daemon start    # bring the existing container up"        >&2
+			echo "    podman rm -f $container_name   # discard it and re-run daemon install" >&2
+			exit 1
+		fi
+	fi
+
+	mkdir -p "$lightning_dir" || {
+		error "daemon install: cannot create state dir $lightning_dir"
+		exit 1
+	}
+	podman create \
+		--name "$container_name" \
+		--volume "$lightning_dir:/root/.lightning" \
+		"$image" >/dev/null || {
+		local rc=$?
+		error "daemon install: podman create failed (exit $rc)"
+		exit "$rc"
+	}
+
+	# Host shims.  Both files are bare sh wrappers; the image tag and
+	# container name are inlined at install time so the shims are
+	# self-contained.
+	mkdir -p "$shim_dir" || {
+		error "daemon install: cannot create shim dir $shim_dir"
+		exit 1
+	}
+	cat > "$shim_dir/lightning-cli" <<EOF
+#!/bin/sh
+# daemon install --podman shim (FEAT-207) — routes lightning-cli into
+# the persistent '$container_name' container.  Container must be
+# running; bring it up via 'lightning daemon start'.
+exec podman exec "$container_name" lightning-cli "\$@"
+EOF
+	chmod +x "$shim_dir/lightning-cli"
+	cat > "$shim_dir/lightningd" <<EOF
+#!/bin/sh
+# daemon install --podman shim (FEAT-207).  --version is special-cased
+# so it works without a running container (one-shot 'podman run');
+# everything else routes into the persistent '$container_name' container.
+case "\$1" in
+	--version)
+		exec podman run --rm "$image" lightningd --version
+		;;
+	*)
+		exec podman exec "$container_name" lightningd "\$@"
+		;;
+esac
+EOF
+	chmod +x "$shim_dir/lightningd"
+
+	# PATH-ordering warning.  The shim only "wins" if shim_dir comes
+	# before whatever host-side lightning-cli the operator may have.
+	case ":$PATH:" in
+		*":$shim_dir:"*) ;;
+		*)
+			echo "warning: $shim_dir is not on \$PATH — add it (eg. to ~/.profile)" >&2
+			echo "         so the lightning-cli and lightningd shims are picked up." >&2
+			;;
+	esac
+
+	ic_verify_lightningd "$shim_dir/lightningd"
+}
+
+# Post-install sanity check.  The spec says `lightningd --version` must
+# succeed after daemon install exits 0 — we verify it directly.  Pass a
+# path argument for backends that install to a non-PATH location (the
+# podman shim, for example).
+ic_verify_lightningd() {
+	local bin="${1:-lightningd}"
+	if [ "$bin" = "lightningd" ]; then
+		if ! command -v lightningd >/dev/null 2>&1; then
+			error "daemon install: install reported success but lightningd is not on PATH"
+			echo "  check the package manager's output above; the install may be partial" >&2
+			exit 1
+		fi
+	else
+		if [ ! -x "$bin" ]; then
+			error "daemon install: install reported success but $bin is missing or not executable"
+			exit 1
+		fi
+	fi
+	local ver
+	ver=$("$bin" --version 2>/dev/null | head -1)
+	echo "✓ lightningd installed${ver:+: $ver}"
+	echo "  next: lightning daemon enable      # write the service unit"
+}
+
+SELF_LIBEXEC="${SELF_LIBEXEC:-$(cd "$(dirname "$0")/.." && pwd)}"
+
+subhelp() {
+	case "$1" in
+		start)
+			cat <<'EOF'
+usage: lightning daemon start [--user|--system]
+
+Bring up lightningd in the background. Routes through the installed
+supervisor (detected by file presence):
+   1. launchd        — ~/Library/LaunchAgents/<label>.plist or
+                       /Library/LaunchDaemons/<label>.plist
+                       => `launchctl load -w` (or `kickstart` if loaded)
+   2. systemd-system  — clightningd.service enabled
+                       => `sudo systemctl start clightningd.service`
+   3. systemd-user    — ~/.config/systemd/user/lightning.service
+                       => `systemctl --user start lightning`
+   4. podman         — `clightning` container exists (FEAT-207
+                       install --podman)
+                       => `podman start clightning`
+   5. direct          — no service unit installed
+                       => `lightningd --daemon`, output -> log file
+--user (default) or --system selects the supervisor scope explicitly.
+Auto-detected when not specified. Triggers auto-unlock (FEAT-184)
+when the `secret` package is installed.
+EOF
+			;;
+		run)
+			cat <<'EOF'
+usage: lightning daemon run
+
+Bring up lightningd in the FOREGROUND — exec the binary without
+--daemon, so logs stream to stdout/stderr and exit propagates to
+the caller. This is the entry point invoked by launchd and by
+systemd units with Type=simple. Refuses if the daemon is already
+running.
+EOF
+			;;
+		stop)
+			cat <<'EOF'
+usage: lightning daemon stop [--user|--system]
+
+Graceful shutdown. Same detection order as `start`:
+   launchd       => `launchctl unload <plist>` (KeepAlive would
+                    fight a plain stop; unload removes the job
+                    until the next `daemon start`)
+   systemd-system => `sudo systemctl stop clightningd.service`
+   systemd-user   => `systemctl --user stop lightning`
+   direct         => `lightning-cli stop`
+--user (default) or --system selects the supervisor scope.
+No-op if the daemon isn't running.
+EOF
+			;;
+		restart)
+			cat <<'EOF'
+usage: lightning daemon restart [--user|--system]
+
+`stop` then `start`, waiting up to 5s for the RPC socket to
+disappear in between. Re-triggers auto-unlock on the way up.
+--user (default) or --system selects the supervisor scope.
+EOF
+			;;
+		status)
+			cat <<'EOF'
+usage: lightning daemon status [--user|--system]
+
+Health check. Exits 0 (healthy), 1 (syncing), or 2 (down).
+Output names the mode (user|system) and current blockheight, plus
+any warning_lightningd_sync / warning_bitcoind_sync from getinfo.
+--user (default) or --system selects the supervisor scope.
+EOF
+			;;
+		monitor)
+			cat <<'EOF'
+usage: lightning daemon monitor [--user|--system] [tail-flags...]
+
+Tail the daemon log. In system-mode reads `journalctl -u
+clightningd.service` (forwards extra flags); in user-mode tails
+$LIGHTNING_DIR/log or $LIGHTNING_DIR/$LIGHTNING_NETWORK/log.
+Add -f to follow. --user (default) or --system selects scope.
+EOF
+			;;
+		enable)
+			cat <<EOF
+usage: lightning daemon enable [--user|--system] [--migrate]
+                                [--trustedcoin | --bitcoind]
+                                [--no-keepalive] [--no-alert]
+                                [--lsps] [--autopilot] [--topup-watcher]
+                                [--account-gc] [--fee-autotune]
+                                [--price-oracle] [--standing-orders]
+                                [--reconcile]
+
+Write a service unit for the daemon. Platform-aware:
+
+Default (user-mode) — runs as the current user, no sudo needed:
+   macOS  ~/Library/LaunchAgents/network.lightning.lightningd.plist
+          (LaunchAgent calling \`lightning daemon run\` so launchd
+          supervises lightningd).
+   Linux  ~/.config/systemd/user/lightning.service.
+
+--system — runs the daemon as a dedicated unprivileged service
+user, with the operator added to its group so they can reach the
+RPC socket. Requires sudo for the install step only — the
+daemon never runs as root.
+   macOS  /Library/LaunchDaemons/network.lightning.lightningd.plist
+          UserName=_clightning, state at /usr/local/var/clightning.
+   Linux  /etc/systemd/system/clightningd.service
+          User=clightning, state at /var/lib/clightning
+          (FEAT-183 three-user layout).
+   Alpine /etc/init.d/clightningd (OpenRC), driven by
+          supervise-daemon.  No user-mode — Alpine installs are
+          always system-wide, --system flag is optional and implied.
+
+--migrate moves an existing ~/.lightning into the system state dir.
+
+Backend selection (writes a managed block to \$LIGHTNING_DIR/config):
+--trustedcoin    swap bcli for the trustedcoin plugin, which
+                 fetches chain data from multiple public block
+                 explorers (blockstream.info, mempool.space, ...)
+                 with automatic fallback. Removes the need for a
+                 local bitcoind, at the cost of trusting the
+                 explorers jointly. The command auto-installs the
+                 plugin binary (prebuilt for Linux/BSD, builds via
+                 'go install' on macOS).
+--bitcoind       strip any managed backend block, fall back to
+                 bitcoind/bcli (the CLN default).
+Omit both to leave existing backend config untouched.
+
+Sidecars (user-mode only, default ON):
+--no-keepalive   skip the FEAT-199 keepalive sidecar.
+                 Runs \`peer keepalive\` every 10min + on every
+                 network state change (macOS), or via systemd
+                 .timer (Linux). Reseeds the gossip graph after
+                 laptop sleep / wifi blips.
+--no-alert       skip the FEAT-204 alert sidecar.
+                 Runs \`alert run\` every 60s. Evaluates rules
+                 under \$LIGHTNING_DIR/alerts/ and fires
+                 webhooks when conditions trip.
+EOF
+			;;
+		install)
+			cat <<EOF
+usage: lightning daemon install [--from <src>] [--tag <v>]
+           [--system] [--yes] [--force] [--dry-run]
+
+Install Core Lightning (the lightningd binary). Auto-detects the
+source per platform when --from is omitted:
+
+   1. \`brew\`    macOS with Homebrew
+   2. \`apk\`     Alpine
+   3. \`source\`  Ubuntu / Debian (apt-get build-deps + make install)
+   4. \`rpk\`    when an lightningd rpk package is on PATH
+   5. \`podman\` cross-platform fallback (rootless container)
+
+Sources:
+  brew    macOS Homebrew (\`core-lightning\` formula)
+  apk     Alpine apk (uses doas/sudo if not root)
+  source  Ubuntu — apt-get build-deps + make install.
+          Build dir defaults to ~/.cache/lightning/build, override
+          with \$LIGHTNING_BUILD_DIR; requires --yes without a TTY.
+  rpk     assumes a sister lightningd rpk package
+  podman  rootless containerized lightningd.
+          Writes host shims for lightning-cli and lightningd into
+          \$LIGHTNING_SHIM_DIR (default ~/.local/bin).
+          --system is not supported (rootless by design).
+
+Refuses to overwrite an existing lightningd on PATH unless --force.
+
+After install exits 0, lightningd --version succeeds.
+Follow up with: lightning daemon enable
+EOF
+			;;
+		disable)
+			cat <<'EOF'
+usage: lightning daemon disable [--user|--system]
+
+Stop the daemon and remove its service unit. Preserves the data
+directory. --user (default) removes the per-user LaunchAgent or
+systemd --user unit. --system removes the system-wide LaunchDaemon
+or /etc/systemd/system unit (requires sudo).
+
+This is the inverse of `daemon enable`.
+EOF
+			;;
+		*)
+			usage
+			return 1
+			;;
+	esac
+}
+
+SUB="${1:-}"
+[ -n "$SUB" ] && shift
+case "${1:-}" in
+	--help|-h) subhelp "$SUB"; exit ;;
+esac
+
+case "$SUB" in
+	start)        cmd_start "$@" ;;
+	run)          cmd_run "$@" ;;
+	stop)         cmd_stop "$@" ;;
+	restart)      cmd_restart "$@" ;;
+	status)       cmd_status "$@" ;;
+	monitor|logs) cmd_monitor "$@" ;;
+	install)      cmd_install "$@" ;;
+	enable|install-service) cmd_enable "$@" ;;
+	disable)       cmd_disable "$@" ;;
+	help)         subhelp "${1:-}" || usage; exit ;;
+	"")           usage; exit 1 ;;
+	*)            error "daemon: unknown subcommand '$SUB'"; usage; exit 1 ;;
+esac

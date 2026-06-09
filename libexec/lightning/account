@@ -1,0 +1,1685 @@
+#!/bin/bash
+# lightning account — virtual-account management.
+#
+# Implements FEAT-174 (account concept) + FEAT-195 (bank-mode
+# overdraft + limits) + FEAT-211 (account-centric verb facade) +
+# FEAT-212 PR-1 (bitcoin-address ID + API key + nickname store).
+#
+# Subcommands:
+#   list                                       all accounts
+#   create <name> [<description>]              now also mints a
+#          [--limit <sat>] [--overdraft deny|warn|allow]   bc1q… ID + API key
+#   delete <name>
+#   show <handle>                              looks up by address,
+#                                              nickname, or name
+#   close <handle>                             FEAT-212 — revoke key,
+#                                              mark closed
+#   nickname add|list|remove                   FEAT-212 — operator-local
+#                                              aliases for addresses
+
+set -e
+
+command -v sqlite3 >/dev/null || { echo "lightning: sqlite3 not installed" >&2; exit 127; }
+
+WALLETS_ROOT="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning/wallet}"
+ACTIVE_LINK="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning}/active"
+LIGHTNING_DIR="${LIGHTNING_DIR:-$HOME/.lightning}"
+LIGHTNING_NETWORK="${LIGHTNING_NETWORK:-bitcoin}"
+
+active_wallet_name() {
+	local name="default"
+	[ -f "$ACTIVE_LINK" ] && name=$(cat "$ACTIVE_LINK")
+	echo "$name"
+}
+
+active_db() {
+	local name; name=$(active_wallet_name)
+	local db="$WALLETS_ROOT/$name/state.db"
+	[ -f "$db" ] || { echo "lightning account: no active wallet (try \`lightning wallet new\`)" >&2; exit 2; }
+	migrate_accounts_schema "$db"
+	echo "$db"
+}
+
+# FEAT-212 — additive, idempotent migration of the accounts table.
+# Pre-FEAT-212 wallets are missing address / created_at / closed_at /
+# last_api_call_at; add whichever are absent.  FEAT-218 extends with
+# the `referrer` column + the `invite_codes` table.  FEAT-222 adds
+# the `wallet_users` table + accounts.owner_user + invite_codes'
+# owner_user/credit_account columns.
+migrate_accounts_schema() {
+	local db="$1"
+	local cols
+	cols=$(sqlite3 "$db" "PRAGMA table_info(accounts);" 2>/dev/null | awk -F'|' '{print $2}')
+	local col
+	for col in address created_at closed_at last_api_call_at referrer owner_user profile fund_class; do
+		echo "$cols" | grep -qx "$col" || {
+			local type=TEXT
+			case "$col" in created_at|closed_at|last_api_call_at) type=INTEGER ;; esac
+			sqlite3 "$db" "ALTER TABLE accounts ADD COLUMN $col $type;" 2>/dev/null || true
+		}
+	done
+
+	# FEAT-218 — invite codes table.
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS invite_codes ( \
+		code        TEXT PRIMARY KEY, \
+		account     TEXT NOT NULL REFERENCES accounts(name) ON DELETE CASCADE, \
+		created_at  INTEGER NOT NULL, \
+		uses        INTEGER NOT NULL DEFAULT 0 \
+	);" 2>/dev/null || true
+
+	# FEAT-222 — wallet-user layer.  `wallet_users` (NOT the FEAT-176
+	# `users` lnaddr table) is the human identity that owns accounts.
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS wallet_users ( \
+		id            TEXT PRIMARY KEY, \
+		created_at    INTEGER NOT NULL, \
+		referrer_user TEXT, \
+		label         TEXT NOT NULL DEFAULT '' \
+	);" 2>/dev/null || true
+	# invite_codes gains owner_user + credit_account (additive).
+	local ic_cols
+	ic_cols=$(sqlite3 "$db" "PRAGMA table_info(invite_codes);" 2>/dev/null | awk -F'|' '{print $2}')
+	echo "$ic_cols" | grep -qx "owner_user" || \
+		sqlite3 "$db" "ALTER TABLE invite_codes ADD COLUMN owner_user TEXT;" 2>/dev/null || true
+	echo "$ic_cols" | grep -qx "credit_account" || \
+		sqlite3 "$db" "ALTER TABLE invite_codes ADD COLUMN credit_account TEXT;" 2>/dev/null || true
+	# Make `account` nullable for user-owned invite codes (FEAT-222 PR-5).
+	local acct_notnull
+	acct_notnull=$(sqlite3 "$db" \
+		"SELECT [notnull] FROM pragma_table_info('invite_codes') WHERE name='account';" 2>/dev/null)
+	if [ "$acct_notnull" = "1" ]; then
+		sqlite3 "$db" "PRAGMA foreign_keys=OFF;
+BEGIN;
+CREATE TABLE invite_codes_new (
+	code           TEXT PRIMARY KEY,
+	account        TEXT REFERENCES accounts(name) ON DELETE CASCADE,
+	created_at     INTEGER NOT NULL,
+	uses           INTEGER NOT NULL DEFAULT 0,
+	owner_user     TEXT,
+	credit_account TEXT
+);
+INSERT INTO invite_codes_new SELECT code, account, created_at, uses,
+	COALESCE(owner_user,NULL), COALESCE(credit_account,NULL) FROM invite_codes;
+DROP TABLE invite_codes;
+ALTER TABLE invite_codes_new RENAME TO invite_codes;
+COMMIT;
+PRAGMA foreign_keys=ON;" 2>/dev/null || true
+	fi
+
+	# FEAT-222 PR-3 — passkey credential storage + challenge pool.  Only
+	# the public half of each credential is stored; sign_count is the
+	# authenticator's monotonic counter (a non-increase on assertion is
+	# a replay / clone signal).  Challenges are short-lived, cleaned
+	# lazily; `user` is NULL on register-begin (no user yet).
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS user_passkeys ( \
+		id            INTEGER PRIMARY KEY AUTOINCREMENT, \
+		user          TEXT    NOT NULL REFERENCES wallet_users(id) ON DELETE CASCADE, \
+		credential_id TEXT    NOT NULL UNIQUE, \
+		public_key    BLOB    NOT NULL, \
+		sign_count    INTEGER NOT NULL DEFAULT 0, \
+		label         TEXT    NOT NULL DEFAULT '', \
+		created_at    INTEGER NOT NULL, \
+		last_used_at  INTEGER \
+	);" 2>/dev/null || true
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS auth_challenges_user ( \
+		challenge   TEXT    PRIMARY KEY, \
+		user        TEXT, \
+		purpose     TEXT    NOT NULL, \
+		created_at  INTEGER NOT NULL, \
+		expires_at  INTEGER NOT NULL \
+	);" 2>/dev/null || true
+
+	# FEAT-229 — price history table.
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS prices ( \
+		ts        INTEGER NOT NULL, \
+		base      TEXT    NOT NULL, \
+		btc_fiat  REAL    NOT NULL, \
+		source    TEXT    NOT NULL, \
+		PRIMARY KEY (ts, base) \
+	);" 2>/dev/null || true
+
+	# FEAT-225 — commercial invoices (reference + terms).
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS commerce_invoices ( \
+		payment_hash TEXT    PRIMARY KEY, \
+		account      TEXT    NOT NULL REFERENCES accounts(name) ON DELETE CASCADE, \
+		bolt11       TEXT    NOT NULL, \
+		face_sat     INTEGER NOT NULL, \
+		reference    TEXT, \
+		terms        TEXT, \
+		issued_at    INTEGER NOT NULL, \
+		state        TEXT    NOT NULL DEFAULT 'issued' \
+	);" 2>/dev/null || true
+
+	# FEAT-226 — standing orders (scheduled recurring push payments).
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS standing_orders ( \
+		id          TEXT    PRIMARY KEY, \
+		account     TEXT    NOT NULL REFERENCES accounts(name) ON DELETE CASCADE, \
+		target      TEXT    NOT NULL, \
+		sat         INTEGER NOT NULL, \
+		cadence     TEXT    NOT NULL, \
+		next_run    INTEGER NOT NULL, \
+		last_run    INTEGER, \
+		failures    INTEGER NOT NULL DEFAULT 0, \
+		status      TEXT    NOT NULL DEFAULT 'active', \
+		created_at  INTEGER NOT NULL \
+	);" 2>/dev/null || true
+
+	# FEAT-227 — direct-debit mandates + pull attempts.
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS mandates ( \
+		id              TEXT    PRIMARY KEY, \
+		merchant        TEXT    NOT NULL, \
+		customer        TEXT    NOT NULL REFERENCES accounts(name) ON DELETE CASCADE, \
+		max_per_period  INTEGER NOT NULL, \
+		period          TEXT    NOT NULL, \
+		mode            TEXT    NOT NULL DEFAULT 'auto', \
+		status          TEXT    NOT NULL DEFAULT 'active', \
+		secret          TEXT    NOT NULL, \
+		created_at      INTEGER NOT NULL \
+	);" 2>/dev/null || true
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS mandate_pulls ( \
+		id          TEXT    PRIMARY KEY, \
+		mandate     TEXT    NOT NULL REFERENCES mandates(id) ON DELETE CASCADE, \
+		sat         INTEGER NOT NULL, \
+		reference   TEXT, \
+		state       TEXT    NOT NULL, \
+		created_at  INTEGER NOT NULL \
+	);" 2>/dev/null || true
+
+	# FEAT-228 — commerce charge lifecycle (escrow / auth-capture /
+	# refund / installments / dunning) + an append-only event log.
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS commerce_charges ( \
+		id                TEXT    PRIMARY KEY, \
+		merchant          TEXT    NOT NULL REFERENCES accounts(name) ON DELETE CASCADE, \
+		customer          TEXT    NOT NULL REFERENCES accounts(name) ON DELETE CASCADE, \
+		amount_sat        INTEGER NOT NULL, \
+		captured_sat      INTEGER NOT NULL DEFAULT 0, \
+		refunded_sat      INTEGER NOT NULL DEFAULT 0, \
+		installments_n    INTEGER NOT NULL DEFAULT 0, \
+		installments_paid INTEGER NOT NULL DEFAULT 0, \
+		reference         TEXT, \
+		terms             TEXT, \
+		state             TEXT    NOT NULL DEFAULT 'issued', \
+		created_at        INTEGER NOT NULL, \
+		due_at            INTEGER \
+	);" 2>/dev/null || true
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS commerce_events ( \
+		id         INTEGER PRIMARY KEY AUTOINCREMENT, \
+		charge     TEXT    NOT NULL REFERENCES commerce_charges(id) ON DELETE CASCADE, \
+		event      TEXT    NOT NULL, \
+		amount_sat INTEGER NOT NULL DEFAULT 0, \
+		ts         INTEGER NOT NULL, \
+		detail     TEXT \
+	);" 2>/dev/null || true
+	# Escrow holding account — funds in flight between customer and
+	# merchant sit here (held / authorized).  overdraft=allow so a
+	# release/void leg is never blocked by a limit.
+	sqlite3 "$db" "INSERT OR IGNORE INTO accounts(name, description, overdraft) \
+		VALUES('escrow', 'commerce escrow holding', 'allow');" 2>/dev/null || true
+
+	# FEAT-233 — compliance audit log.  Every hook decision (allow /
+	# deny / observe) is appended here; the log itself is a compliance
+	# requirement.  Empty + cheap until a module is enabled.
+	sqlite3 "$db" "CREATE TABLE IF NOT EXISTS compliance_events ( \
+		id        INTEGER PRIMARY KEY AUTOINCREMENT, \
+		ts        INTEGER NOT NULL, \
+		hook      TEXT    NOT NULL, \
+		op        TEXT    NOT NULL, \
+		module    TEXT    NOT NULL DEFAULT '-', \
+		decision  TEXT    NOT NULL, \
+		account   TEXT, \
+		detail    TEXT \
+	);" 2>/dev/null || true
+}
+
+# FEAT-212 — mint a fresh on-chain address from lightningd; that
+# address IS the account's canonical ID for the HTTP API and the
+# on-chain top-up destination.
+mint_address() {
+	command -v lightning-cli >/dev/null 2>&1 || {
+		echo "lightning account: lightning-cli not found — needed to mint account address" >&2
+		return 127
+	}
+	local addr_json
+	addr_json=$(lightning-cli --lightning-dir="$LIGHTNING_DIR" --network="$LIGHTNING_NETWORK" newaddr 2>/dev/null) || return 1
+	jq -r '.bech32 // .p2tr // .p2wkh // empty' <<<"$addr_json"
+}
+
+# FEAT-212 — 32-byte random API key, base64url-encoded (43 chars
+# after stripping padding), prefixed `lt_` for type tagging.
+mint_api_key() {
+	local raw
+	raw=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
+	echo "lt_$raw"
+}
+
+# FEAT-212 — operator-local nickname store.  Records are blank-line
+# separated and look like:
+#
+#     nickname: rent
+#     address: bc1q...
+#
+# Never sent over the wire; purely for human-readable CLI lookups.
+nicknames_file() {
+	local wallet; wallet=$(active_wallet_name)
+	echo "$WALLETS_ROOT/$wallet/accounts/nicknames.recfile"
+}
+
+nickname_to_address() {
+	local nick="$1" f
+	f=$(nicknames_file)
+	[ -f "$f" ] || return 1
+	awk -v nick="$nick" '
+		BEGIN { RS=""; FS="\n" }
+		{
+			has_nick=0; addr=""
+			for (i=1; i<=NF; i++) {
+				if ($i == "nickname: "nick) has_nick=1
+				if ($i ~ /^address: /) { addr=$i; sub(/^address: /, "", addr) }
+			}
+			if (has_nick && addr != "") { print addr; exit }
+		}
+	' "$f"
+}
+
+address_to_nickname() {
+	local addr="$1" f
+	f=$(nicknames_file)
+	[ -f "$f" ] || return 0
+	awk -v addr="$addr" '
+		BEGIN { RS=""; FS="\n" }
+		{
+			has_addr=0; nick=""
+			for (i=1; i<=NF; i++) {
+				if ($i == "address: "addr) has_addr=1
+				if ($i ~ /^nickname: /) { nick=$i; sub(/^nickname: /, "", nick) }
+			}
+			if (has_addr && nick != "") { print nick; exit }
+		}
+	' "$f"
+}
+
+# Resolve a user-supplied handle (address, nickname, or legacy name)
+# to (address, name) pair from the accounts table.  Sets two globals
+# RESOLVED_ADDRESS and RESOLVED_NAME so callers can use both.
+RESOLVED_ADDRESS=""
+RESOLVED_NAME=""
+resolve_account() {
+	local handle="$1"
+	RESOLVED_ADDRESS=""
+	RESOLVED_NAME=""
+	[ -n "$handle" ] || return 1
+
+	# Bitcoin-address shape → direct address lookup.
+	case "$handle" in
+		bc1*|tb1*|bcrt1*)
+			RESOLVED_ADDRESS="$handle"
+			RESOLVED_NAME=$(sqlite3 "$(active_db)" \
+				"SELECT name FROM accounts WHERE address = $(sql_quote "$handle") LIMIT 1;" 2>/dev/null)
+			[ -n "$RESOLVED_NAME" ] || return 1
+			return 0 ;;
+	esac
+
+	# Operator-local nickname → resolve to address, then look up.
+	local mapped; mapped=$(nickname_to_address "$handle" 2>/dev/null)
+	if [ -n "$mapped" ]; then
+		RESOLVED_ADDRESS="$mapped"
+		RESOLVED_NAME=$(sqlite3 "$(active_db)" \
+			"SELECT name FROM accounts WHERE address = $(sql_quote "$mapped") LIMIT 1;" 2>/dev/null)
+		[ -n "$RESOLVED_NAME" ] || return 1
+		return 0
+	fi
+
+	# Legacy: handle IS the name column.
+	local row
+	row=$(sqlite3 -separator $'\t' "$(active_db)" \
+		"SELECT name, COALESCE(address,'') FROM accounts WHERE name = $(sql_quote "$handle") LIMIT 1;" 2>/dev/null)
+	[ -n "$row" ] || return 1
+	IFS=$'\t' read -r RESOLVED_NAME RESOLVED_ADDRESS <<<"$row"
+	return 0
+}
+
+sq() { sqlite3 -separator $'\t' "$(active_db)" "$@"; }
+sqh() { sqlite3 -header -separator $'\t' "$(active_db)" "$@"; }
+
+usage() {
+	cat >&2 <<EOF
+usage: lightning account <subcommand>
+
+   list [--balances]                             TSV of accounts
+   create <name> [<desc>] [--limit <sat>]
+                          [--overdraft deny|warn|allow]
+                          [--host <domain>]      auto-create user@<domain>
+                                                 also mints a bc1q... ID
+                                                 + lt_... API key (FEAT-212)
+   delete <name>
+   show <handle>                                 balance + recent ledger
+                                                 (handle: address, nickname,
+                                                 or legacy name)
+   close <handle>                                revoke API key + mark closed
+   nickname add <bc1q...> <name>                 operator-local alias
+   nickname list                                 TSV of aliases
+   nickname remove <name>
+   apikey create <name> --scope read|write       issue an API key
+   apikey list <name>                            which scopes exist
+   apikey revoke <name> --scope read|write
+   topup-watcher run|dry-run|status              credit new on-chain
+                                                 deposits to known
+                                                 account-addresses
+   gc run|dry-run|status                         close stale + delete
+                                                 long-closed accounts
+   invite-code create <handle> [--code <s>]      mint a referral code
+   invite-code list [<handle>]                   TSV: code, account, uses
+   invite-code revoke <code>
+   topup <name> <sat> [--via lightning]          QR for on-chain top-up
+   withdraw <name> <sat> <onchain-addr>          submarine swap out
+   pay <name> <bolt11|bolt12|lnurl|addr|node-id>
+                                                 dispatch by string shape
+        [--sat <sat>]                             (keysend needs amount)
+   receive <name> <sat> [--desc <text>]
+                          [--reusable]            BOLT-12 + QR; default BOLT-11
+   transfer <from> <to> <sat> [--note <text>]    intra-node move between
+                                                 two local accounts
+   standing-order create <handle> <target> <sat> <daily|weekly|monthly>
+                          list [<handle>] | pause|resume|cancel <id>
+                          run | dry-run         scheduled recurring push
+                                                 payment (Dauerauftrag)
+   profiles                                      list capability profiles
+   capability <handle> <cap>                     exit 0 if allowed (FEAT-243)
+   set-profile <handle> <treasury|family|prepaid|custodial>
+                                                 gate which money-moves
+                                                 an account may do
+   set-fund-class <handle> own|foreign           balance-sheet label
+EOF
+}
+
+# FEAT-211 — account-centric user-facing verb surface.  Each new
+# subcommand below is a thin wrapper around an existing power-user
+# verb (invoice / offer / liquidity / lnurl / send) with the
+# --account context already plumbed.
+require_account() {
+	local name="$1"
+	[ -n "$name" ] || { echo "lightning account: missing account name" >&2; exit 1; }
+	local found
+	found=$(sqlite3 "$(active_db)" "SELECT 1 FROM accounts WHERE name = '${name//\'/\'\'}' LIMIT 1;" 2>/dev/null)
+	[ "$found" = "1" ] || {
+		echo "lightning account: account '$name' not found" >&2
+		echo "  list with: lightning account list" >&2
+		echo "  create with: lightning account create $name" >&2
+		exit 2
+	}
+}
+
+cmd_list() {
+	local with_balances=0
+	[ "${1:-}" = "--balances" ] && with_balances=1
+	if [ $with_balances -eq 1 ]; then
+		sqlite3 -header -separator $'\t' "$(active_db)" "
+			SELECT a.name,
+			       COALESCE(a.limit_sat, -1) AS limit_sat,
+			       COALESCE(SUM(l.amount_msat),0)/1000 AS balance_sat,
+			       a.overdraft
+			FROM accounts a
+			LEFT JOIN ledger l ON l.account = a.name
+			WHERE a.name NOT IN ('-', 'house', 'escrow', 'others')
+			GROUP BY a.name
+			ORDER BY a.name;"
+	else
+		sqlite3 -header -separator $'\t' "$(active_db)" \
+			"SELECT name, description, COALESCE(limit_sat, -1) AS limit_sat, overdraft FROM accounts WHERE name NOT IN ('-', 'house', 'escrow', 'others') ORDER BY name;"
+	fi
+}
+
+# Bash doesn't have a clean SQL-injection-safe quoter; we constrain
+# the inputs (name regex, numeric limit, enum overdraft) before
+# building the query.
+sql_quote() { printf "'%s'" "${1//\'/\'\'}"; }
+
+cmd_create() {
+	[ $# -lt 1 ] && { echo "usage: lightning account create <name> [<desc>] [--limit <sat>] [--overdraft deny|warn|allow] [--host <domain>]" >&2; exit 1; }
+	local name="$1"; shift
+	local desc=""
+	[ $# -gt 0 ] && [[ "$1" != --* ]] && { desc="$1"; shift; }
+	local limit="NULL"
+	local overdraft="deny"
+	local host=""
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--limit)
+				[[ "$2" =~ ^[0-9]+$ ]] || { echo "--limit: integer required" >&2; exit 1; }
+				limit="$2"; shift 2 ;;
+			--overdraft)
+				case "$2" in deny|warn|allow) overdraft="$2"; shift 2 ;;
+					*) echo "--overdraft: must be deny|warn|allow" >&2; exit 1 ;;
+				esac ;;
+			--host)
+				host="$2"; shift 2 ;;
+			*) echo "lightning account create: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+
+	[[ "$name" =~ ^[a-z][a-z0-9_-]*$ ]] || {
+		echo "lightning account: name must match [a-z][a-z0-9_-]*" >&2; exit 1; }
+
+	# FEAT-212 — mint the canonical address ID + API key.  Account
+	# creation against a daemon-down installation still works (legacy
+	# operator path); the address/key fields stay NULL and the operator
+	# can promote later.  Set LIGHTNING_ACCOUNT_NO_MINT=1 to skip the
+	# mint explicitly (used by some tests and by `wallet new` bootstrap).
+	local address="" api_key="" now
+	now=$(date -u +%s)
+	if [ -z "$LIGHTNING_ACCOUNT_NO_MINT" ]; then
+		address=$(mint_address 2>/dev/null || true)
+		if [ -n "$address" ]; then
+			api_key=$(mint_api_key)
+			# Best-effort secret store; operators without the `secret`
+			# package can still create accounts, they just won't have a
+			# server-side key cache.  PR-2's HTTP layer will refuse such
+			# accounts at request time with a clear error.
+			if command -v secret >/dev/null 2>&1; then
+				echo "$api_key" | secret put "lightning.account.$address.apikey" >/dev/null 2>&1 || true
+			fi
+		fi
+	fi
+
+	# INSERT covers the new columns when address was minted; falls back
+	# to the legacy three-column write when it wasn't.
+	if [ -n "$address" ]; then
+		sqlite3 "$(active_db)" \
+			"INSERT INTO accounts(name, description, limit_sat, overdraft, address, created_at) VALUES($(sql_quote "$name"), $(sql_quote "$desc"), $limit, $(sql_quote "$overdraft"), $(sql_quote "$address"), $now);"
+	else
+		sqlite3 "$(active_db)" \
+			"INSERT INTO accounts(name, description, limit_sat, overdraft) VALUES($(sql_quote "$name"), $(sql_quote "$desc"), $limit, $(sql_quote "$overdraft"));"
+	fi
+
+	# Operator-local nickname binding (the `name` doubles as the
+	# first nickname so `account show <name>` still works without an
+	# explicit `nickname add`).
+	if [ -n "$address" ]; then
+		local nf; nf=$(nicknames_file)
+		mkdir -p "$(dirname "$nf")"
+		printf 'nickname: %s\naddress: %s\n\n' "$name" "$address" >> "$nf"
+	fi
+
+	echo "lightning account: created $name"
+	if [ -n "$address" ]; then
+		echo "  address:  $address"
+	fi
+	if [ -n "$api_key" ]; then
+		echo "  api_key:  $api_key"
+		echo "  (save it now — this is the only time it'll be printed)" >&2
+	fi
+
+	# Auto-address (FEAT-195): chain into `lightning address create`.
+	if [ -n "$host" ]; then
+		"$(dirname "$0")/address" create "${name}@${host}" --account "$name" || {
+			echo "lightning account: address create failed; account remains" >&2
+		}
+	fi
+}
+
+cmd_delete() {
+	[ $# -lt 1 ] && { echo "usage: lightning account delete <name>" >&2; exit 1; }
+	local name="$1"
+	[ "$name" = "-" ] && { echo "lightning account: cannot delete the unassigned account" >&2; exit 2; }
+	sqlite3 "$(active_db)" "DELETE FROM accounts WHERE name = $(sql_quote "$name");"
+	echo "lightning account: deleted $name"
+}
+
+cmd_show() {
+	[ $# -lt 1 ] && { echo "usage: lightning account show <handle>" >&2; exit 1; }
+	local handle="$1"
+	local db; db=$(active_db)
+
+	resolve_account "$handle" || {
+		echo "lightning account: no such account '$handle'" >&2; exit 2
+	}
+	local name="$RESOLVED_NAME" address="$RESOLVED_ADDRESS"
+
+	local row
+	row=$(sqlite3 -separator $'\t' "$db" \
+		"SELECT description, COALESCE(limit_sat,-1), overdraft, COALESCE(closed_at, 0) \
+		 FROM accounts WHERE name = $(sql_quote "$name");")
+
+	local desc limit overdraft closed_at
+	IFS=$'\t' read -r desc limit overdraft closed_at <<<"$row"
+	local balance_msat
+	balance_msat=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat),0) FROM ledger WHERE account = $(sql_quote "$name");")
+	local balance_sat=$(( balance_msat / 1000 ))
+
+	printf "name:        %s\n"  "$name"
+	if [ -n "$address" ]; then
+		printf "address:     %s\n"  "$address"
+	fi
+	printf "description: %s\n"  "$desc"
+	printf "balance_sat: %s\n"  "$balance_sat"
+	if [ "$limit" != "-1" ]; then
+		printf "limit_sat:   %s\n"  "$limit"
+	else
+		printf "limit_sat:   (none)\n"
+	fi
+	printf "overdraft:   %s\n"  "$overdraft"
+	if [ "$closed_at" != "0" ] && [ "$closed_at" != "" ]; then
+		printf "closed_at:   %s (UTC epoch)\n"  "$closed_at"
+	fi
+	printf "\nrecent ledger:\n"
+	sqlite3 -header -separator $'\t' "$db" "SELECT ts, direction, amount_msat, peer, message FROM ledger WHERE account = $(sql_quote "$name") ORDER BY id DESC LIMIT 10;"
+}
+
+# FEAT-212 — close an account.  Revoke its API key (if any) and stamp
+# closed_at.  The row stays in the table so the ledger still
+# resolves; a cleanup cron (PR-5) deletes long-empty closed accounts
+# after a grace window.
+cmd_close() {
+	[ $# -lt 1 ] && { echo "usage: lightning account close <handle>" >&2; exit 1; }
+	local handle="$1"
+	resolve_account "$handle" || {
+		echo "lightning account: no such account '$handle'" >&2; exit 2
+	}
+	local name="$RESOLVED_NAME" address="$RESOLVED_ADDRESS"
+	[ "$name" = "-" ] && { echo "lightning account: cannot close the unassigned account" >&2; exit 2; }
+
+	local now; now=$(date -u +%s)
+	sqlite3 "$(active_db)" \
+		"UPDATE accounts SET closed_at = $now WHERE name = $(sql_quote "$name");"
+	if [ -n "$address" ] && command -v secret >/dev/null 2>&1; then
+		secret rm "lightning.account.$address.apikey" 2>/dev/null || true
+	fi
+	echo "lightning account: closed $name${address:+ ($address)}"
+}
+
+# FEAT-212 — operator-local nickname store (recfile under
+# $wallet/accounts/nicknames.recfile).  Never sent over the wire.
+cmd_nickname() {
+	local op="${1:-}"; shift 2>/dev/null || true
+	local nf; nf=$(nicknames_file)
+	case "$op" in
+		add)
+			[ $# -lt 2 ] && { echo "usage: lightning account nickname add <address> <name>" >&2; exit 1; }
+			local addr="$1" nick="$2"
+			case "$addr" in
+				bc1*|tb1*|bcrt1*) ;;
+				*) echo "lightning account nickname add: '$addr' must be a bitcoin address" >&2; exit 1 ;;
+			esac
+			mkdir -p "$(dirname "$nf")"
+			# Drop any existing record for this nickname or this address
+			# so add is idempotent + acts as rename.
+			if [ -f "$nf" ]; then
+				awk -v nick="$nick" -v addr="$addr" '
+					BEGIN { RS=""; FS="\n" }
+					{
+						drop=0
+						for (i=1; i<=NF; i++) {
+							if ($i == "nickname: "nick || $i == "address: "addr) { drop=1; break }
+						}
+						if (!drop) { print; print "" }
+					}
+				' "$nf" > "$nf.tmp" && mv "$nf.tmp" "$nf"
+			fi
+			printf 'nickname: %s\naddress: %s\n\n' "$nick" "$addr" >> "$nf"
+			echo "lightning account nickname: $nick -> $addr"
+			;;
+		list|"")
+			[ -f "$nf" ] || { return 0; }
+			printf "nickname\taddress\n"
+			awk '
+				BEGIN { RS=""; FS="\n"; OFS="\t" }
+				{
+					nick=""; addr=""
+					for (i=1; i<=NF; i++) {
+						if ($i ~ /^nickname: /) { nick=$i; sub(/^nickname: /, "", nick) }
+						if ($i ~ /^address: /)  { addr=$i; sub(/^address: /, "", addr) }
+					}
+					if (nick != "" && addr != "") print nick, addr
+				}
+			' "$nf"
+			;;
+		remove)
+			[ $# -lt 1 ] && { echo "usage: lightning account nickname remove <name>" >&2; exit 1; }
+			local nick="$1"
+			[ -f "$nf" ] || { return 0; }
+			awk -v nick="$nick" '
+				BEGIN { RS=""; FS="\n" }
+				{
+					drop=0
+					for (i=1; i<=NF; i++) {
+						if ($i == "nickname: "nick) { drop=1; break }
+					}
+					if (!drop) { print; print "" }
+				}
+			' "$nf" > "$nf.tmp" && mv "$nf.tmp" "$nf"
+			echo "lightning account nickname: removed $nick"
+			;;
+		*)
+			echo "usage: lightning account nickname {add <address> <name>|list|remove <name>}" >&2
+			exit 1 ;;
+	esac
+}
+
+# FEAT-212 PR-4 — deposit watcher.
+#
+# Each account's ID is a bitcoin address (FEAT-212), which doubles as
+# the on-chain top-up destination.  This verb polls `lightning-cli
+# listfunds` for new confirmed UTXOs at any known account-address and
+# books a credit into the ledger.  Idempotent — UTXOs are deduped by
+# the synthetic payment_hash "txid:vout".
+#
+# Subcommands:
+#   run            credit any new UTXOs (default if no arg)
+#   dry-run        list what would be credited; don't write
+#   status         show the last-seen UTXO + count of credits
+#
+# Driven by `daemon enable --topup-watcher` (one-shot timer; same
+# pattern as autopilot).  Manual invocation: `lightning account
+# topup-watcher run`.
+cmd_topup_watcher() {
+	local op="${1:-run}"
+	local dry=0
+	case "$op" in
+		run)            dry=0 ;;
+		dry-run|--dry-run) dry=1 ;;
+		status)         _topup_watcher_status; return ;;
+		*) echo "usage: lightning account topup-watcher {run|dry-run|status}" >&2; exit 1 ;;
+	esac
+
+	command -v lightning-cli >/dev/null || {
+		echo "lightning account topup-watcher: lightning-cli not found" >&2
+		exit 127
+	}
+	command -v jq >/dev/null || {
+		echo "lightning account topup-watcher: jq not installed" >&2
+		exit 127
+	}
+
+	local db; db=$(active_db)
+	# Active accounts only — closed accounts (closed_at IS NOT NULL)
+	# stop receiving credits at the watcher level.  An incoming UTXO
+	# to a closed-account address is logged as orphan but not booked.
+	local known
+	known=$(sqlite3 -separator $'\t' "$db" \
+		"SELECT address, name FROM accounts WHERE address IS NOT NULL AND closed_at IS NULL;")
+	# Don't early-return on empty `known` — UTXOs at closed-account
+	# addresses still need to be detected so the operator sees the
+	# orphan warning rather than silently dropping the deposit.
+
+	local listfunds
+	listfunds=$(lightning-cli \
+		--lightning-dir="${LIGHTNING_DIR:-$HOME/.lightning}" \
+		--network="${LIGHTNING_NETWORK:-bitcoin}" \
+		listfunds 2>/dev/null) || {
+			echo "lightning account topup-watcher: listfunds failed (is lightningd running?)" >&2
+			exit 4
+		}
+
+	# Project the UTXO list into a TSV of (txid \t output \t address
+	# \t amount_msat).  Only confirmed UTXOs are credited; pending
+	# ones are picked up on a later pass.  amount_msat normalises
+	# both the post-23.02 string form and the legacy `value` field.
+	local utxos
+	utxos=$(jq -r '
+		.outputs[]?
+		| select(.status == "confirmed")
+		| [ .txid,
+		    (.output|tostring),
+		    (.address // ""),
+		    ( (.amount_msat // empty)
+		      | (if type == "string" then sub("msat$"; "") | tonumber
+		         else . end)
+		    )
+		  ]
+		| @tsv' <<<"$listfunds")
+
+	local credited=0 skipped_dupe=0 unknown=0 closed=0
+	local txid vout addr amount_msat name pmt_hash
+	while IFS=$'\t' read -r txid vout addr amount_msat; do
+		[ -n "$addr" ] || continue
+		# Match against known account-addresses.
+		name=$(awk -F'\t' -v a="$addr" '$1 == a { print $2; exit }' <<<"$known")
+		if [ -z "$name" ]; then
+			# Possibly a closed-account address — log it but don't credit.
+			if sqlite3 "$db" "SELECT 1 FROM accounts WHERE address = $(sql_quote "$addr") AND closed_at IS NOT NULL LIMIT 1;" 2>/dev/null | grep -q 1; then
+				closed=$((closed+1))
+				printf 'skip\t%s\taccount closed\t+%s msat\t%s:%s\n' "$addr" "$amount_msat" "$txid" "$vout"
+			else
+				unknown=$((unknown+1))
+			fi
+			continue
+		fi
+		pmt_hash="$txid:$vout"
+		# Dedupe via payment_hash.  Cheap — the column is indexed
+		# implicitly only on the PK, but the table is small enough
+		# that the full scan is fine.
+		if sqlite3 "$db" "SELECT 1 FROM ledger WHERE payment_hash = $(sql_quote "$pmt_hash") LIMIT 1;" 2>/dev/null | grep -q 1; then
+			skipped_dupe=$((skipped_dupe+1))
+			continue
+		fi
+		# FEAT-213 — operator-fee skim at credit time.  Read fees.recfile
+		# lazily (once per UTXO is fine — file is small) so an operator
+		# edit to the recfile takes effect on the next watcher pass.
+		operator_fee_msat=0
+		if [ -f "$WALLETS_ROOT/$(active_wallet_name)/fees.recfile" ]; then
+			read -r fee_base_sat fee_rate_ppm fee_interest < <(awk -v op="topup-onchain" '
+				BEGIN { RS=""; FS="\n"; b=0; r=0; im=0 }
+				{
+					in_op=0; bb=0; rr=0; ii=0
+					for (i=1; i<=NF; i++) {
+						if ($i == "operation: " op) in_op=1
+						if ($i ~ /^base_sat: *-?[0-9]/) { bb=$i; sub(/^base_sat: */, "", bb) }
+						if ($i ~ /^rate_ppm: *-?[0-9]/) { rr=$i; sub(/^rate_ppm: */, "", rr) }
+						if ($i ~ /^interest_mode: */)   { mm=$i; sub(/^interest_mode: */, "", mm); ii=(mm=="on")?1:0 }
+					}
+					if (in_op) { b=bb; r=rr; im=ii }
+				}
+				END { printf "%d %d %d\n", b+0, r+0, im+0 }
+			' "$WALLETS_ROOT/$(active_wallet_name)/fees.recfile")
+			operator_fee_msat=$(( fee_base_sat * 1000 + amount_msat * fee_rate_ppm / 1000000 ))
+			# FEAT-216 — a negative (subsidy) fee is only honoured when
+			# interest mode is on for this op; otherwise clamp to >= 0.
+			if [ "$operator_fee_msat" -lt 0 ] && [ "${fee_interest:-0}" != "1" ]; then
+				operator_fee_msat=0
+			fi
+		fi
+		# FEAT-216 — interest subsidy (negative fee): the user is credited
+		# |fee| extra and the house is debited the same.
+		tw_subsidy_msat=0
+		[ "$operator_fee_msat" -lt 0 ] && tw_subsidy_msat=$(( -operator_fee_msat ))
+		if [ $dry -eq 1 ]; then
+			if [ "$operator_fee_msat" -gt 0 ]; then
+				printf 'would-credit\t%s\t%s\t+%s msat (skim %s msat)\t%s\n' "$name" "$addr" "$amount_msat" "$operator_fee_msat" "$pmt_hash"
+			elif [ "$tw_subsidy_msat" -gt 0 ]; then
+				printf 'would-credit\t%s\t%s\t+%s msat (interest +%s msat)\t%s\n' "$name" "$addr" "$amount_msat" "$tw_subsidy_msat" "$pmt_hash"
+			else
+				printf 'would-credit\t%s\t%s\t+%s msat\t%s\n' "$name" "$addr" "$amount_msat" "$pmt_hash"
+			fi
+		else
+			if [ "$operator_fee_msat" -gt 0 ] || [ "$tw_subsidy_msat" -gt 0 ]; then
+				sqlite3 "$db" "INSERT OR IGNORE INTO accounts(name, description, overdraft) \
+					VALUES('house', 'operator fee revenue', 'allow');" 2>/dev/null || true
+			fi
+			# FEAT-219 — referral split (same shape as api-account-pay).
+			tw_referral_msat=0
+			tw_referrer=""
+			tw_direct_pct="${LIGHTNING_REFERRAL_DIRECT_PCT:-0}"
+			case "$tw_direct_pct" in ''|*[!0-9]*) tw_direct_pct=0 ;; esac
+			[ "$tw_direct_pct" -gt 100 ] && tw_direct_pct=100
+			if [ "$operator_fee_msat" -gt 0 ] && [ "$tw_direct_pct" -gt 0 ]; then
+				tw_referrer=$(sqlite3 "$db" "SELECT COALESCE(referrer, 'house') FROM accounts WHERE name = $(sql_quote "$name");" 2>/dev/null)
+				case "$tw_referrer" in
+					""|"house"|"-") tw_referrer="" ;;
+					*)
+						tw_min_msat=$(( ${LIGHTNING_REFERRAL_MIN_ACTIVITY_SAT:-10000} * 1000 ))
+						tw_act_msat=$(sqlite3 "$db" "SELECT COALESCE(SUM(ABS(amount_msat)), 0) FROM ledger \
+							WHERE account = $(sql_quote "$name") AND message NOT LIKE 'fee:%';" 2>/dev/null)
+						[ "${tw_act_msat:-0}" -lt "$tw_min_msat" ] && tw_referrer=""
+						;;
+				esac
+				if [ -n "$tw_referrer" ]; then
+					tw_cap_msat=$(( ${LIGHTNING_REFERRAL_MAX_PER_DAY_SAT:-10000} * 1000 ))
+					tw_today_msat=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat), 0) FROM ledger \
+						WHERE account = $(sql_quote "$tw_referrer") \
+						  AND direction = 'in' \
+						  AND message LIKE 'fee:referral%' \
+						  AND date(ts) = date('now');" 2>/dev/null)
+					[ "${tw_today_msat:-0}" -ge "$tw_cap_msat" ] && tw_referrer=""
+				fi
+				if [ -n "$tw_referrer" ]; then
+					tw_referral_msat=$(( operator_fee_msat * tw_direct_pct / 100 ))
+				fi
+			fi
+			tw_house_msat=$(( operator_fee_msat - tw_referral_msat ))
+
+			sql="BEGIN;"
+			sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+			sql+=" VALUES(datetime('now'), $(sql_quote "$name"), 'in', $amount_msat, 'on-chain', $(sql_quote "$pmt_hash"), 'topup-watcher');"
+			if [ "$operator_fee_msat" -gt 0 ]; then
+				sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+				sql+=" VALUES(datetime('now'), $(sql_quote "$name"), 'out', -$operator_fee_msat, 'on-chain', $(sql_quote "$pmt_hash"), 'fee:topup-onchain');"
+				if [ "$tw_house_msat" -gt 0 ]; then
+					sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+					sql+=" VALUES(datetime('now'), 'house', 'in', $tw_house_msat, 'on-chain', $(sql_quote "$pmt_hash"), $(sql_quote "fee:topup-onchain from $name"));"
+				fi
+				if [ "$tw_referral_msat" -gt 0 ] && [ -n "$tw_referrer" ]; then
+					sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+					sql+=" VALUES(datetime('now'), $(sql_quote "$tw_referrer"), 'in', $tw_referral_msat, $(sql_quote "referee:$name"), $(sql_quote "$pmt_hash"), $(sql_quote "fee:referral from $name"));"
+				fi
+			fi
+			# FEAT-216 — interest subsidy: extra credit to the user, debit
+			# the house (out of accumulated routing income).
+			if [ "$tw_subsidy_msat" -gt 0 ]; then
+				sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+				sql+=" VALUES(datetime('now'), $(sql_quote "$name"), 'in', $tw_subsidy_msat, 'on-chain', $(sql_quote "$pmt_hash"), 'interest:topup-onchain');"
+				sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+				sql+=" VALUES(datetime('now'), 'house', 'out', -$tw_subsidy_msat, $(sql_quote "subsidy:$name"), $(sql_quote "$pmt_hash"), $(sql_quote "interest:topup-onchain to $name"));"
+			fi
+			sql+=" COMMIT;"
+			sqlite3 "$db" "$sql"
+			printf 'credit\t%s\t%s\t+%s msat\t%s\n' "$name" "$addr" "$amount_msat" "$pmt_hash"
+		fi
+		credited=$((credited+1))
+	done <<<"$utxos"
+
+	# One-line summary to stderr so the systemd journal stays tidy.
+	if [ $dry -eq 1 ]; then
+		echo "topup-watcher dry-run: would credit $credited (dupes $skipped_dupe, closed $closed, unknown $unknown)" >&2
+	else
+		echo "topup-watcher: credited $credited (dupes $skipped_dupe, closed $closed, unknown $unknown)" >&2
+	fi
+}
+
+_topup_watcher_status() {
+	local db; db=$(active_db)
+	local last
+	last=$(sqlite3 -separator $'\t' "$db" \
+		"SELECT ts, account, amount_msat, payment_hash FROM ledger WHERE message = 'topup-watcher' ORDER BY id DESC LIMIT 1;")
+	local total
+	total=$(sqlite3 "$db" "SELECT COUNT(*) FROM ledger WHERE message = 'topup-watcher';")
+	local watched
+	watched=$(sqlite3 "$db" "SELECT COUNT(*) FROM accounts WHERE address IS NOT NULL AND closed_at IS NULL;")
+	printf "watched_accounts: %s\n" "$watched"
+	printf "total_credits:    %s\n" "$total"
+	if [ -n "$last" ]; then
+		printf "last_credit:      %s\n" "$last"
+	else
+		printf "last_credit:      (none yet)\n"
+	fi
+}
+
+# FEAT-212 PR-5 — account garbage collection.
+#
+# Two stages, both safe:
+#
+#   1. "idle close" — accounts that are:
+#        * address-keyed (FEAT-212 minted, not legacy)
+#        * not already closed
+#        * balance_sat == 0
+#        * no API call in LIGHTNING_ACCOUNT_GC_DAYS days (default 90)
+#        * no pending invoice
+#      get their API key revoked + closed_at stamped.  Same effect
+#      as `account close` but driven by inactivity.
+#
+#   2. "expired close cleanup" — accounts that:
+#        * closed_at is set
+#        * closed more than LIGHTNING_ACCOUNT_GC_CLOSED_DAYS ago
+#          (default 7)
+#        * balance_sat == 0
+#      are DELETED from the schema.  The ledger's FK `ON DELETE
+#      SET DEFAULT` lifts any historical entries onto the '-'
+#      account, so audit history survives.  Nickname recfile
+#      entries pointing at the deleted address are stripped.
+#
+# Subcommands:
+#   run            do both stages
+#   dry-run        list what would happen, don't write
+#   status         show the candidate counts for the next run
+cmd_gc() {
+	local op="${1:-run}"
+	local dry=0
+	case "$op" in
+		run)               dry=0 ;;
+		dry-run|--dry-run) dry=1 ;;
+		status)            _gc_status; return ;;
+		*) echo "usage: lightning account gc {run|dry-run|status}" >&2; exit 1 ;;
+	esac
+
+	local db; db=$(active_db)
+	local now; now=$(date -u +%s)
+	local idle_days="${LIGHTNING_ACCOUNT_GC_DAYS:-90}"
+	local closed_days="${LIGHTNING_ACCOUNT_GC_CLOSED_DAYS:-7}"
+	case "$idle_days"    in ''|*[!0-9]*) idle_days=90 ;; esac
+	case "$closed_days"  in ''|*[!0-9]*) closed_days=7 ;; esac
+	local idle_cutoff=$(( now - idle_days * 86400 ))
+	local closed_cutoff=$(( now - closed_days * 86400 ))
+
+	# Stage 1 — idle accounts to close.
+	local stage1
+	stage1=$(sqlite3 -separator $'\t' "$db" "
+		SELECT a.name, a.address
+		FROM accounts a
+		WHERE a.address IS NOT NULL
+		  AND a.closed_at IS NULL
+		  AND a.name NOT IN ('-', 'house', 'escrow', 'others')
+		  AND COALESCE(a.last_api_call_at, a.created_at, 0) < $idle_cutoff
+		  AND COALESCE((SELECT SUM(amount_msat) FROM ledger WHERE account = a.name), 0) = 0
+		  AND NOT EXISTS (SELECT 1 FROM invoices WHERE account = a.name AND state = 'pending');")
+
+	# Stage 2 — already-closed accounts to delete.
+	local stage2
+	stage2=$(sqlite3 -separator $'\t' "$db" "
+		SELECT a.name, a.address
+		FROM accounts a
+		WHERE a.closed_at IS NOT NULL
+		  AND a.closed_at < $closed_cutoff
+		  AND a.name NOT IN ('-', 'house', 'escrow', 'others')
+		  AND COALESCE((SELECT SUM(amount_msat) FROM ledger WHERE account = a.name), 0) = 0;")
+
+	local closed=0 deleted=0 name addr
+	while IFS=$'\t' read -r name addr; do
+		[ -n "$name" ] || continue
+		if [ $dry -eq 1 ]; then
+			printf 'would-close\t%s\t%s\n' "$name" "$addr"
+		else
+			sqlite3 "$db" "UPDATE accounts SET closed_at = $now WHERE name = $(sql_quote "$name");"
+			if [ -n "$addr" ] && command -v secret >/dev/null 2>&1; then
+				secret rm "lightning.account.$addr.apikey" 2>/dev/null || true
+			fi
+			printf 'close\t%s\t%s\n' "$name" "$addr"
+		fi
+		closed=$((closed+1))
+	done <<<"$stage1"
+
+	while IFS=$'\t' read -r name addr; do
+		[ -n "$name" ] || continue
+		if [ $dry -eq 1 ]; then
+			printf 'would-delete\t%s\t%s\n' "$name" "$addr"
+		else
+			# FEAT-233 — retention lifecycle hook: a compliance module
+			# may hold the record (legal_hold) and veto the delete.  Fast
+			# no-op unless the operator opted in via compliance.recfile.
+			if [ -s "$WALLETS_ROOT/$(active_wallet_name)/compliance.recfile" ] \
+			   && ! "$SELF_LIBEXEC/lightning/_compliance" hook lifecycle gc "{\"account\":\"$name\",\"op\":\"gc\"}" >/dev/null 2>&1; then
+				printf 'retain\t%s\t%s\tlegal_hold\n' "$name" "$addr"
+				continue
+			fi
+			sqlite3 "$db" "DELETE FROM accounts WHERE name = $(sql_quote "$name");"
+			if [ -n "$addr" ]; then
+				if command -v secret >/dev/null 2>&1; then
+					secret rm "lightning.account.$addr.apikey" 2>/dev/null || true
+				fi
+				# Strip any nickname entries pointing at this address.
+				local nf; nf=$(nicknames_file)
+				if [ -f "$nf" ]; then
+					awk -v addr="$addr" '
+						BEGIN { RS=""; FS="\n" }
+						{
+							drop=0
+							for (i=1; i<=NF; i++) {
+								if ($i == "address: "addr) { drop=1; break }
+							}
+							if (!drop) { print; print "" }
+						}
+					' "$nf" > "$nf.tmp" && mv "$nf.tmp" "$nf"
+				fi
+			fi
+			printf 'delete\t%s\t%s\n' "$name" "$addr"
+		fi
+		deleted=$((deleted+1))
+	done <<<"$stage2"
+
+	if [ $dry -eq 1 ]; then
+		echo "gc dry-run: would close $closed, would delete $deleted (idle=${idle_days}d, closed=${closed_days}d)" >&2
+	else
+		echo "gc: closed $closed, deleted $deleted (idle=${idle_days}d, closed=${closed_days}d)" >&2
+	fi
+}
+
+_gc_status() {
+	local db; db=$(active_db)
+	local now; now=$(date -u +%s)
+	local idle_days="${LIGHTNING_ACCOUNT_GC_DAYS:-90}"
+	local closed_days="${LIGHTNING_ACCOUNT_GC_CLOSED_DAYS:-7}"
+	case "$idle_days"    in ''|*[!0-9]*) idle_days=90 ;; esac
+	case "$closed_days"  in ''|*[!0-9]*) closed_days=7 ;; esac
+	local idle_cutoff=$(( now - idle_days * 86400 ))
+	local closed_cutoff=$(( now - closed_days * 86400 ))
+
+	local n_idle n_closed n_total
+	n_total=$(sqlite3 "$db" "SELECT COUNT(*) FROM accounts WHERE name NOT IN ('-', 'house', 'escrow', 'others');")
+	n_idle=$(sqlite3 "$db" "
+		SELECT COUNT(*) FROM accounts a
+		WHERE a.address IS NOT NULL
+		  AND a.closed_at IS NULL
+		  AND a.name NOT IN ('-', 'house', 'escrow', 'others')
+		  AND COALESCE(a.last_api_call_at, a.created_at, 0) < $idle_cutoff
+		  AND COALESCE((SELECT SUM(amount_msat) FROM ledger WHERE account = a.name), 0) = 0
+		  AND NOT EXISTS (SELECT 1 FROM invoices WHERE account = a.name AND state = 'pending');")
+	n_closed=$(sqlite3 "$db" "
+		SELECT COUNT(*) FROM accounts a
+		WHERE a.closed_at IS NOT NULL
+		  AND a.closed_at < $closed_cutoff
+		  AND a.name NOT IN ('-', 'house', 'escrow', 'others')
+		  AND COALESCE((SELECT SUM(amount_msat) FROM ledger WHERE account = a.name), 0) = 0;")
+	printf "total_accounts:    %s\n" "$n_total"
+	printf "idle_days:         %s\n" "$idle_days"
+	printf "closed_grace_days: %s\n" "$closed_days"
+	printf "would_close:       %s\n" "$n_idle"
+	printf "would_delete:      %s\n" "$n_closed"
+}
+
+# FEAT-218 — invite code management.  Codes are 7-char base32-ish
+# strings (uppercase letters + digits, [A-Z2-9] minus 0/1/I/O which
+# confuse humans) that map back to an account name via the
+# invite_codes table.  Used by `POST /api/accounts {"invite_code":...}`
+# to stamp `referrer` on new accounts.
+cmd_invite_code() {
+	local op="${1:-}"
+	case "$op" in
+		create) shift; _invite_code_create "$@" ;;
+		list)   shift; _invite_code_list "$@" ;;
+		revoke) shift; _invite_code_revoke "$@" ;;
+		*) echo "usage: lightning account invite-code {create|list|revoke}" >&2; exit 1 ;;
+	esac
+}
+
+_invite_code_mint() {
+	# 7 chars from [a-z0-9] (lowercase to dodge the I/O/1/0 readability
+	# issue without resorting to a custom alphabet).  Source: urandom
+	# → base32 → lowercase → strip pad → first 7 chars.
+	head -c 8 /dev/urandom | base32 | tr 'A-Z' 'a-z' | tr -d '=\n' | head -c 7
+}
+
+_invite_code_create() {
+	local handle="" code=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--code) code="$2"; shift 2 ;;
+			*) handle="$1"; shift ;;
+		esac
+	done
+	local db; db=$(active_db)
+	# Default account = the active wallet's name-equivalent — fall
+	# back to the operator's own account if not supplied.  Most CLI
+	# users want to mint a code for an existing account they own.
+	if [ -z "$handle" ]; then
+		echo "usage: lightning account invite-code create <handle> [--code <vanity>]" >&2
+		exit 1
+	fi
+	resolve_account "$handle" || {
+		echo "lightning account invite-code: no such account '$handle'" >&2
+		exit 2
+	}
+	local name="$RESOLVED_NAME"
+
+	# FEAT-222 PR-6 — invite whitelist.  When access.recfile lists a
+	# non-empty invite_whitelist, only those accounts may mint codes.
+	local access_file; access_file="$WALLETS_ROOT/$(active_wallet_name)/access.recfile"
+	if [ -f "$access_file" ]; then
+		local whitelist; whitelist=$(sed -n 's/^invite_whitelist:[[:space:]]*//p' "$access_file" | head -1)
+		if [ -n "$(printf '%s' "$whitelist" | tr -d '[:space:]')" ]; then
+			local ok=0 w
+			for w in $(printf '%s' "$whitelist" | tr ',' ' '); do
+				if [ "$w" = "$name" ] || [ "$w" = "$RESOLVED_ADDRESS" ]; then ok=1; break; fi
+			done
+			[ "$ok" = "1" ] || {
+				echo "lightning account invite-code: '$name' is not on the invite whitelist (access.recfile)" >&2
+				exit 4
+			}
+		fi
+	fi
+
+	if [ -z "$code" ]; then
+		code=$(_invite_code_mint)
+	else
+		# Sanity-check operator-supplied codes — keep them in the
+		# expected alphabet so resolution stays predictable.
+		[[ "$code" =~ ^[a-z0-9]{3,32}$ ]] || {
+			echo "lightning account invite-code: --code must be 3-32 chars of [a-z0-9]" >&2
+			exit 1
+		}
+	fi
+
+	local now; now=$(date -u +%s)
+	sqlite3 "$db" "INSERT INTO invite_codes(code, account, created_at) \
+		VALUES($(sql_quote "$code"), $(sql_quote "$name"), $now);" 2>/dev/null || {
+			echo "lightning account invite-code: '$code' already exists" >&2
+			exit 3
+		}
+	echo "code:    $code"
+	echo "account: $name"
+	echo "link:    ?invite=$code"
+}
+
+_invite_code_list() {
+	local handle="$1"
+	local where=""
+	if [ -n "$handle" ]; then
+		resolve_account "$handle" || {
+			echo "lightning account invite-code: no such account '$handle'" >&2
+			exit 2
+		}
+		where="WHERE account = $(sql_quote "$RESOLVED_NAME")"
+	fi
+	local db; db=$(active_db)
+	printf "code\taccount\tuses\tcreated_at\n"
+	sqlite3 -separator $'\t' "$db" \
+		"SELECT code, account, uses, created_at FROM invite_codes $where ORDER BY created_at DESC;"
+}
+
+_invite_code_revoke() {
+	[ $# -lt 1 ] && { echo "usage: lightning account invite-code revoke <code>" >&2; exit 1; }
+	local code="$1"
+	local db; db=$(active_db)
+	# Use change-count to tell whether a row was actually deleted.
+	local before after
+	before=$(sqlite3 "$db" "SELECT COUNT(*) FROM invite_codes WHERE code = $(sql_quote "$code");")
+	sqlite3 "$db" "DELETE FROM invite_codes WHERE code = $(sql_quote "$code");" 2>/dev/null || true
+	after=$(sqlite3 "$db" "SELECT COUNT(*) FROM invite_codes WHERE code = $(sql_quote "$code");")
+	if [ "$before" -gt 0 ] && [ "$after" = "0" ]; then
+		echo "lightning account invite-code: revoked $code"
+	else
+		echo "lightning account invite-code: '$code' not found" >&2
+		exit 2
+	fi
+}
+
+cmd_apikey() {
+	[ $# -lt 1 ] && { echo "usage: lightning account apikey {create,list,revoke} <name> --scope read|write" >&2; exit 1; }
+	local op="$1"; shift
+	[ $# -lt 1 ] && { echo "lightning account apikey: account name required" >&2; exit 1; }
+	local name="$1"; shift
+	local scope=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--scope)
+				case "$2" in read|write) scope="$2"; shift 2 ;;
+					*) echo "--scope: must be read|write" >&2; exit 1 ;;
+				esac ;;
+			*) echo "lightning account apikey: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+
+	command -v secret >/dev/null || {
+		echo "lightning account apikey: the \`secret\` package is required" >&2; exit 127; }
+
+	case "$op" in
+		create)
+			[ -z "$scope" ] && { echo "--scope required" >&2; exit 1; }
+			# 32 bytes -> base64url; drop trailing =.
+			local key
+			key=$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n')
+			echo "$key" | secret put "lightning.$name.apikey.$scope" >/dev/null
+			echo "lightning account apikey: $name/$scope ="
+			echo "$key"
+			echo "(save it now — this is the only time it'll be printed)" >&2 ;;
+		list)
+			for s in read write; do
+				if secret get "lightning.$name.apikey.$s" >/dev/null 2>&1; then
+					echo "$s"
+				fi
+			done ;;
+		revoke)
+			[ -z "$scope" ] && { echo "--scope required" >&2; exit 1; }
+			secret rm "lightning.$name.apikey.$scope" 2>/dev/null || true
+			echo "lightning account apikey: revoked $name/$scope" ;;
+		*) echo "lightning account apikey: unknown op '$op'" >&2; exit 1 ;;
+	esac
+}
+
+# --- FEAT-211: account-centric verb facade --------------------------------
+
+cmd_topup() {
+	[ $# -lt 2 ] && { echo "usage: lightning account topup <name> <sat> [--via lightning]" >&2; exit 1; }
+	local name="$1" sat="$2"; shift 2
+	local via="onchain"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--via)
+				case "$2" in
+					lightning|onchain) via="$2"; shift 2 ;;
+					*) echo "lightning account topup: --via must be 'lightning' or 'onchain'" >&2; exit 1 ;;
+				esac ;;
+			*) echo "lightning account topup: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+	require_account "$name"
+
+	if [ "$via" = "lightning" ]; then
+		# BOLT-11 invoice tied to the account.
+		exec "$SELF_LIBEXEC/lightning/invoice" create "$sat" \
+			"topup-$name-$(date +%s)" \
+			--description "top-up of $name (Lightning)" \
+			--account "$name" --qr
+	fi
+
+	# Default: on-chain top-up.  Get a fresh receive address from the
+	# daemon, render the BIP-21 URI as QR.
+	command -v lightning-cli >/dev/null || {
+		echo "lightning account topup: lightning-cli not found" >&2; exit 127; }
+	local addr_json addr
+	addr_json=$(lightning-cli \
+		--lightning-dir="${LIGHTNING_DIR:-$HOME/.lightning}" \
+		--network="${LIGHTNING_NETWORK:-bitcoin}" \
+		newaddr 2>/dev/null) || {
+			echo "lightning account topup: newaddr failed (is lightningd running?)" >&2
+			exit 4
+		}
+	addr=$(jq -r '.bech32 // .p2tr // .p2wkh // empty' <<<"$addr_json")
+	[ -n "$addr" ] || {
+		echo "lightning account topup: lightningd returned no usable address" >&2
+		exit 4
+	}
+
+	echo "Top up account '$name' with $sat sats to:"
+	echo "  $addr"
+	echo "  (BIP-21: bitcoin:$addr?amount=$sat)"
+	echo ""
+	if [ -x "$SELF_LIBEXEC/lightning/qr" ]; then
+		"$SELF_LIBEXEC/lightning/qr" "bitcoin:$addr?amount=$sat"
+	fi
+}
+
+cmd_withdraw() {
+	[ $# -lt 3 ] && { echo "usage: lightning account withdraw <name> <sat> <onchain-addr>" >&2; exit 1; }
+	local name="$1" sat="$2" addr="$3"
+	require_account "$name"
+	# Loose bitcoin-address sanity check.  Better-than-nothing — full
+	# validation needs bech32 + base58check, which we don't shell out
+	# for.  Requires minimum length (26) so a typoed prefix like
+	# "not-an-address" doesn't sneak past the `n*` testnet rule.
+	if [ "${#addr}" -lt 26 ]; then
+		echo "lightning account withdraw: '$addr' doesn't look like a bitcoin address (too short)" >&2
+		exit 1
+	fi
+	case "$addr" in
+		bc1*|tb1*|bcrt1*|1*|3*|m*|n*|2*) ;;
+		*) echo "lightning account withdraw: '$addr' doesn't look like a bitcoin address" >&2; exit 1 ;;
+	esac
+
+	echo "Withdrawing $sat sat from account '$name' to $addr"
+	echo "  via reverse submarine swap (Boltz)"
+	if ! command -v boltzcli >/dev/null; then
+		echo "lightning account withdraw: boltzcli not installed" >&2
+		echo "  install:  https://github.com/BoltzExchange/boltz-client" >&2
+		echo "  alternative: close a channel and spend the resulting UTXO" >&2
+		exit 127
+	fi
+	boltzcli createreverseswap --amount "$sat" --address "$addr" || {
+		echo "lightning account withdraw: boltzcli reverse swap failed" >&2
+		exit 1
+	}
+
+	# Record the debit in the per-account ledger.
+	if [ -x "$SELF_LIBEXEC/lightning/_ledger" ]; then
+		"$SELF_LIBEXEC/lightning/_ledger" add out "$(( sat * 1000 ))" \
+			--account "$name" \
+			--note "withdraw to $addr" 2>/dev/null || true
+	fi
+	echo "ok"
+}
+
+# Dispatch on the payment-string shape.  Order matters — more specific
+# prefixes are checked before more general ones (lnbc* before generic
+# hex pubkey check, etc.).
+cmd_pay() {
+	[ $# -lt 2 ] && { echo "usage: lightning account pay <name> <payment-string> [--sat <sat>]" >&2; exit 1; }
+	local name="$1" target="$2"; shift 2
+	local sat=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--sat) sat="$2"; shift 2 ;;
+			*) echo "lightning account pay: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+	require_account "$name"
+
+	# Normalise for prefix matching (don't lowercase the original — we
+	# pass the operator's exact input down so case-sensitive parsers
+	# downstream stay happy).
+	local lower; lower=$(printf '%s' "$target" | tr 'A-Z' 'a-z')
+
+	case "$lower" in
+		lnbc*|lntb*)
+			# BOLT-11 invoice (mainnet lnbc / testnet lntb / regtest lnbcrt
+			# — the last is covered by lnbc*).
+			exec "$SELF_LIBEXEC/lightning/invoice" pay "$target" --account "$name" ;;
+		lno*)
+			# BOLT-12 offer.
+			if [ -n "$sat" ]; then
+				exec "$SELF_LIBEXEC/lightning/_offer" pay "$target" "$sat" --account "$name"
+			else
+				exec "$SELF_LIBEXEC/lightning/_offer" pay "$target" --account "$name"
+			fi ;;
+		lnurl*)
+			# LNURL-pay.
+			exec "$SELF_LIBEXEC/lightning/_lnurl" pay "$target" --account "$name" ;;
+		*@*.*)
+			# Lightning address (user@host).
+			exec "$SELF_LIBEXEC/lightning/_lnurl" pay "$target" --account "$name" ;;
+		02*|03*)
+			# 66-char hex node pubkey → keysend.
+			if [ "${#target}" -ne 66 ]; then
+				echo "lightning account pay: '$target' starts like a node pubkey but isn't 66 chars" >&2
+				exit 1
+			fi
+			[ -n "$sat" ] || {
+				echo "lightning account pay: keysend needs --sat <amount>" >&2
+				exit 1
+			}
+			exec "$SELF_LIBEXEC/lightning/_send" "$target" "$sat" --account "$name" ;;
+		*)
+			echo "lightning account pay: couldn't identify payment-string type" >&2
+			echo "  supported shapes:" >&2
+			echo "    lnbc* / lntb* / lnbcrt*  (BOLT-11 invoice)" >&2
+			echo "    lno*                     (BOLT-12 offer)" >&2
+			echo "    lnurl*                   (LNURL)" >&2
+			echo "    user@host                (Lightning address)" >&2
+			echo "    02xx... / 03xx... (66h)  (node pubkey, needs --sat)" >&2
+			exit 1 ;;
+	esac
+}
+
+cmd_receive() {
+	[ $# -lt 2 ] && { echo "usage: lightning account receive <name> <sat> [--desc <text>] [--reusable]" >&2; exit 1; }
+	local name="$1" sat="$2"; shift 2
+	local desc="" reusable=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--desc) desc="$2"; shift 2 ;;
+			--reusable) reusable=1; shift ;;
+			*) echo "lightning account receive: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+	require_account "$name"
+	[ -n "$desc" ] || desc="receive to $name"
+
+	if [ "$reusable" -eq 1 ]; then
+		# BOLT-12 — reusable, payer fetches an invoice on the wire.
+		exec "$SELF_LIBEXEC/lightning/_offer" create "$sat" "$desc" \
+			--account "$name" --qr
+	else
+		# BOLT-11 — single-use.
+		exec "$SELF_LIBEXEC/lightning/invoice" create "$sat" \
+			"receive-$name-$(date +%s)" \
+			--description "$desc" \
+			--account "$name" --qr
+	fi
+}
+
+# FEAT-223 — operator-side inter-account transfer.  Resolves both
+# handles, then drives the api-account-transfer verb (which carries
+# the atomic ledger + fee logic).  The sender must have a minted
+# address (the verb is address-keyed).
+cmd_transfer() {
+	[ $# -lt 3 ] && { echo "usage: lightning account transfer <from> <to> <sat> [--note <text>]" >&2; exit 1; }
+	local from="$1" to="$2" sat="$3"; shift 3
+	local note=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--note) note="$2"; shift 2 ;;
+			*) echo "lightning account transfer: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+	case "$sat" in ''|*[!0-9]*) echo "lightning account transfer: <sat> must be a positive integer" >&2; exit 1 ;; esac
+
+	resolve_account "$from" || { echo "lightning account transfer: no such sender '$from'" >&2; exit 2; }
+	[ -n "$RESOLVED_ADDRESS" ] || { echo "lightning account transfer: sender '$from' has no address (legacy account); transfer needs an address-keyed sender" >&2; exit 2; }
+	local from_addr="$RESOLVED_ADDRESS"
+
+	# Resolve the recipient to a name the verb accepts (it takes a
+	# bech32 address or a bare name).  Prefer the address if present.
+	resolve_account "$to" || { echo "lightning account transfer: no such recipient '$to'" >&2; exit 2; }
+	local to_arg="$RESOLVED_NAME"
+	[ -n "$RESOLVED_ADDRESS" ] && to_arg="$RESOLVED_ADDRESS"
+
+	local self_libexec; self_libexec=$(cd "$(dirname "$0")" && pwd)
+	if [ -n "$note" ]; then
+		"$self_libexec/api-account-transfer" "$from_addr" "$to_arg" "$sat" --note "$note"
+	else
+		"$self_libexec/api-account-transfer" "$from_addr" "$to_arg" "$sat"
+	fi
+}
+
+# FEAT-226 — standing orders (Dauerauftrag).  Schedule a recurring
+# push payment to a re-payable target; a sidecar `run` executes due
+# orders.  Operator-side CLI; the HTTP surface is api-account-standing-
+# order (address-keyed) routed through accounts.py.
+_so_mint_id() {
+	local raw
+	raw=$(head -c 10 /dev/urandom | base32 2>/dev/null | tr 'A-Z' 'a-z' | tr -d '=\n' | cut -c1-16)
+	[ -n "$raw" ] || raw=$(head -c 10 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-16)
+	echo "so_$raw"
+}
+
+# Advance a unix timestamp by one cadence step.  daily/weekly are fixed
+# seconds; monthly is a real calendar month (GNU date, then BSD date,
+# then a 30-day fallback) so "the 1st of the month" stays the 1st.
+_so_advance() {
+	local ts="$1" cadence="$2" n=""
+	case "$cadence" in
+		daily)  echo $(( ts + 86400 )) ;;
+		weekly) echo $(( ts + 604800 )) ;;
+		monthly)
+			local base
+			base=$(date -u -d "@$ts" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null) \
+				&& n=$(date -u -d "$base +1 month" +%s 2>/dev/null)
+			[ -n "$n" ] || n=$(date -u -r "$ts" -v+1m +%s 2>/dev/null)
+			[ -n "$n" ] || n=$(( ts + 2592000 ))
+			echo "$n" ;;
+		*) echo "$ts" ;;
+	esac
+}
+
+# A target is re-payable if it's a local account, a BOLT-12 offer, an
+# LNURL, or a Lightning address.  A single-use BOLT-11 (lnbc*) is NOT.
+_so_validate_target() {
+	local t="$1" db="$2" lower
+	# Local account (by name or address)?
+	[ "$(sqlite3 "$db" "SELECT 1 FROM accounts WHERE (name = $(sql_quote "$t") OR address = $(sql_quote "$t")) LIMIT 1;" 2>/dev/null)" = "1" ] && return 0
+	lower=$(printf '%s' "$t" | tr 'A-Z' 'a-z')
+	case "$lower" in
+		lno*|lnurl*) return 0 ;;
+		*@*.*) return 0 ;;
+		lnbc*|lntb*) return 1 ;;   # single-use invoice — not re-payable
+		*) return 1 ;;
+	esac
+}
+
+cmd_standing_order() {
+	local op="${1:-}"; [ $# -gt 0 ] && shift
+	case "$op" in
+		create) _so_create "$@" ;;
+		list)   _so_list "$@" ;;
+		pause)  _so_transition paused "$@" ;;
+		resume) _so_transition active "$@" ;;
+		cancel) _so_transition cancelled "$@" ;;
+		run|dry-run|--dry-run) _so_run "$op" ;;
+		*) echo "usage: lightning account standing-order {create <handle> <target> <sat> <daily|weekly|monthly>|list [<handle>]|pause <id>|resume <id>|cancel <id>|run|dry-run}" >&2; exit 1 ;;
+	esac
+}
+
+_so_create() {
+	[ $# -lt 4 ] && { echo "usage: lightning account standing-order create <handle> <target> <sat> <daily|weekly|monthly>" >&2; exit 1; }
+	local handle="$1" target="$2" sat="$3" cadence="$4"
+	resolve_account "$handle" || { echo "lightning account standing-order: no such account '$handle'" >&2; exit 2; }
+	local name="$RESOLVED_NAME"
+	case "$sat" in ''|*[!0-9]*) echo "lightning account standing-order: <sat> must be a positive integer" >&2; exit 1 ;; esac
+	[ "$sat" -gt 0 ] || { echo "lightning account standing-order: <sat> must be > 0" >&2; exit 1; }
+	case "$cadence" in daily|weekly|monthly) ;; *) echo "lightning account standing-order: cadence must be daily|weekly|monthly" >&2; exit 1 ;; esac
+	local db; db=$(active_db)
+	_so_validate_target "$target" "$db" || { echo "lightning account standing-order: target '$target' is not re-payable (use a local account, BOLT-12 offer, LNURL, or LN address — not a single-use BOLT-11)" >&2; exit 1; }
+	local now id next
+	now=$(date -u +%s)
+	id=$(_so_mint_id)
+	next=$(_so_advance "$now" "$cadence")
+	sqlite3 "$db" "INSERT INTO standing_orders(id, account, target, sat, cadence, next_run, created_at) \
+		VALUES($(sql_quote "$id"), $(sql_quote "$name"), $(sql_quote "$target"), $sat, $(sql_quote "$cadence"), $next, $now);"
+	jq -nc --arg id "$id" --arg acct "$name" --arg target "$target" \
+		--argjson sat "$sat" --arg cadence "$cadence" --argjson next "$next" \
+		'{id:$id, account:$acct, target:$target, sat:$sat, cadence:$cadence, next_run:$next, status:"active"}'
+}
+
+_so_list() {
+	local db; db=$(active_db)
+	if [ $# -ge 1 ]; then
+		resolve_account "$1" || { echo "lightning account standing-order: no such account '$1'" >&2; exit 2; }
+		sqlite3 -header -separator $'\t' "$db" \
+			"SELECT id, account, target, sat, cadence, next_run, COALESCE(last_run,'') AS last_run, failures, status \
+			 FROM standing_orders WHERE account = $(sql_quote "$RESOLVED_NAME") ORDER BY next_run;"
+	else
+		sqlite3 -header -separator $'\t' "$db" \
+			"SELECT id, account, target, sat, cadence, next_run, COALESCE(last_run,'') AS last_run, failures, status \
+			 FROM standing_orders ORDER BY next_run;"
+	fi
+}
+
+_so_transition() {
+	local new_status="$1" id="$2"
+	[ -n "$id" ] || { echo "usage: lightning account standing-order {pause|resume|cancel} <id>" >&2; exit 1; }
+	local db; db=$(active_db)
+	[ "$(sqlite3 "$db" "SELECT 1 FROM standing_orders WHERE id = $(sql_quote "$id") LIMIT 1;")" = "1" ] || {
+		echo "lightning account standing-order: no such order '$id'" >&2; exit 2; }
+	sqlite3 "$db" "UPDATE standing_orders SET status = $(sql_quote "$new_status") WHERE id = $(sql_quote "$id");"
+	jq -nc --arg id "$id" --arg status "$new_status" '{id:$id, status:$status}'
+}
+
+# Pay one order's target on behalf of the account.  Local-account
+# targets go through the atomic transfer verb; external re-payable
+# targets reuse the pay-string dispatch.  Returns the underlying exit.
+_so_pay() {
+	local from_name="$1" target="$2" sat="$3" db="$4" lower
+	if [ "$(sqlite3 "$db" "SELECT 1 FROM accounts WHERE (name = $(sql_quote "$target") OR address = $(sql_quote "$target")) LIMIT 1;" 2>/dev/null)" = "1" ]; then
+		"$SELF_LIBEXEC/lightning/account" transfer "$from_name" "$target" "$sat" --note "standing-order"
+		return $?
+	fi
+	lower=$(printf '%s' "$target" | tr 'A-Z' 'a-z')
+	case "$lower" in
+		lno*)        "$SELF_LIBEXEC/lightning/_offer" pay "$target" "$sat" --account "$from_name" ;;
+		lnurl*|*@*.*) "$SELF_LIBEXEC/lightning/_lnurl" pay "$target" --account "$from_name" ;;
+		*) return 1 ;;
+	esac
+}
+
+_so_run() {
+	local dry=0
+	case "${1:-run}" in run) dry=0 ;; dry-run|--dry-run) dry=1 ;; esac
+	local db; db=$(active_db)
+	local now maxf
+	now=$(date -u +%s)
+	maxf="${LIGHTNING_STANDING_ORDER_MAX_FAILURES:-3}"
+	case "$maxf" in ''|*[!0-9]*) maxf=3 ;; esac
+	[ "$maxf" -ge 1 ] || maxf=1
+	local due
+	due=$(sqlite3 -separator $'\t' "$db" \
+		"SELECT id, account, target, sat, cadence, COALESCE(failures,0) \
+		 FROM standing_orders WHERE status = 'active' AND next_run <= $now ORDER BY next_run;")
+	local paid=0 failed=0 paused=0
+	local id acct target sat cadence failures
+	while IFS=$'\t' read -r id acct target sat cadence failures; do
+		[ -n "$id" ] || continue
+		if [ "$dry" -eq 1 ]; then
+			printf 'would-pay\t%s\t%s\t%s\t%s sat\n' "$id" "$acct" "$target" "$sat"
+			continue
+		fi
+		if _so_pay "$acct" "$target" "$sat" "$db" >/dev/null 2>&1; then
+			local next; next=$(_so_advance "$now" "$cadence")
+			sqlite3 "$db" "UPDATE standing_orders SET last_run = $now, next_run = $next, failures = 0 WHERE id = $(sql_quote "$id");"
+			paid=$((paid + 1))
+			printf 'paid\t%s\t%s\t%s\t%s sat\tnext %s\n' "$id" "$acct" "$target" "$sat" "$next"
+		else
+			local nf=$((failures + 1))
+			if [ "$nf" -ge "$maxf" ]; then
+				sqlite3 "$db" "UPDATE standing_orders SET failures = $nf, status = 'paused' WHERE id = $(sql_quote "$id");"
+				paused=$((paused + 1))
+				printf 'paused-after-failures\t%s\t%s\t%s\t%d failures\n' "$id" "$acct" "$target" "$nf" >&2
+			else
+				sqlite3 "$db" "UPDATE standing_orders SET failures = $nf WHERE id = $(sql_quote "$id");"
+				failed=$((failed + 1))
+				printf 'failed\t%s\t%s\t%s\t%d/%d\n' "$id" "$acct" "$target" "$nf" "$maxf" >&2
+			fi
+		fi
+	done <<<"$due"
+	printf '{"paid":%d,"failed":%d,"paused":%d}\n' "$paid" "$failed" "$paused"
+}
+
+# FEAT-243 — capability profiles.  Hard-coded table mapping a profile to
+# its default fund_class + the six gated money-movements.  Fields:
+#   fund_class recv topup transfer_intra transfer_inter pay_external withdraw
+_profile_caps() {
+	case "$1" in
+		treasury)  echo "own on on on on on on" ;;
+		family)    echo "own on on on off on on" ;;
+		prepaid)   echo "own on on on off on off" ;;
+		custodial) echo "foreign on on on on on on" ;;
+		*) return 1 ;;
+	esac
+}
+
+_default_profile() {
+	local af p=""
+	af="$WALLETS_ROOT/$(active_wallet_name)/access.recfile"
+	[ -f "$af" ] && p=$(sed -n 's/^default_profile:[[:space:]]*//p' "$af" | head -1 | tr -d '[:space:]')
+	echo "${p:-treasury}"
+}
+
+# Effective profile / fund_class for an account NAME (column override,
+# else the node default / profile default).
+_account_profile() {
+	local p
+	p=$(sqlite3 "$(active_db)" "SELECT COALESCE(profile,'') FROM accounts WHERE name = $(sql_quote "$1");" 2>/dev/null)
+	[ -n "$p" ] || p=$(_default_profile)
+	echo "$p"
+}
+
+cmd_capability() {
+	# capability <handle> <cap> — exit 0 if allowed, 1 if denied.
+	[ $# -ge 2 ] || { echo "usage: lightning account capability <handle> <cap>" >&2; exit 2; }
+	local handle="$1" cap="$2"
+	resolve_account "$handle" || { echo "lightning account capability: no such account '$handle'" >&2; exit 2; }
+	local prof caps
+	prof=$(_account_profile "$RESOLVED_NAME")
+	caps=$(_profile_caps "$prof") || { echo "lightning account capability: unknown profile '$prof'" >&2; exit 2; }
+	local _fc r_recv r_topup r_intra r_inter r_pay r_wd
+	read -r _fc r_recv r_topup r_intra r_inter r_pay r_wd <<<"$caps"
+	local v=""
+	case "$cap" in
+		recv)                                v="$r_recv" ;;
+		topup)                               v="$r_topup" ;;
+		transfer_intra_user|transfer_intra)  v="$r_intra" ;;
+		transfer_inter_user|transfer_inter)  v="$r_inter" ;;
+		pay_external|pay)                    v="$r_pay" ;;
+		withdraw)                            v="$r_wd" ;;
+		*) echo "lightning account capability: unknown capability '$cap'" >&2; exit 2 ;;
+	esac
+	[ "$v" = "on" ]
+}
+
+cmd_profiles() {
+	printf "profile\tfund_class\trecv\ttopup\tintra\tinter\tpay_ext\twithdraw\n"
+	local p
+	for p in treasury family prepaid custodial; do
+		printf "%s\t%s\n" "$p" "$(_profile_caps "$p" | tr ' ' '\t')"
+	done
+}
+
+cmd_set_profile() {
+	[ $# -ge 2 ] || { echo "usage: lightning account set-profile <handle> <treasury|family|prepaid|custodial>" >&2; exit 1; }
+	local handle="$1" prof="$2"
+	_profile_caps "$prof" >/dev/null || { echo "lightning account set-profile: unknown profile '$prof'" >&2; exit 1; }
+	resolve_account "$handle" || { echo "lightning account set-profile: no such account '$handle'" >&2; exit 2; }
+	sqlite3 "$(active_db)" "UPDATE accounts SET profile = $(sql_quote "$prof") WHERE name = $(sql_quote "$RESOLVED_NAME");"
+	echo "account: $RESOLVED_NAME"
+	echo "profile: $prof"
+}
+
+cmd_set_fund_class() {
+	[ $# -ge 2 ] || { echo "usage: lightning account set-fund-class <handle> own|foreign" >&2; exit 1; }
+	local handle="$1" fc="$2"
+	case "$fc" in own|foreign) ;; *) echo "lightning account set-fund-class: must be own|foreign" >&2; exit 1 ;; esac
+	resolve_account "$handle" || { echo "lightning account set-fund-class: no such account '$handle'" >&2; exit 2; }
+	sqlite3 "$(active_db)" "UPDATE accounts SET fund_class = $(sql_quote "$fc") WHERE name = $(sql_quote "$RESOLVED_NAME");"
+	echo "account: $RESOLVED_NAME"
+	echo "fund_class: $fc"
+}
+
+case "${1:-}" in
+	list)     shift; cmd_list "$@" ;;
+	create)   shift; cmd_create "$@" ;;
+	delete)   shift; cmd_delete "$@" ;;
+	show)     shift; cmd_show "$@" ;;
+	close)    shift; cmd_close "$@" ;;
+	nickname) shift; cmd_nickname "$@" ;;
+	topup-watcher) shift; cmd_topup_watcher "$@" ;;
+	gc)       shift; cmd_gc "$@" ;;
+	invite-code) shift; cmd_invite_code "$@" ;;
+	apikey)   shift; cmd_apikey "$@" ;;
+	topup)    shift; cmd_topup "$@" ;;
+	withdraw) shift; cmd_withdraw "$@" ;;
+	pay)      shift; cmd_pay "$@" ;;
+	receive)  shift; cmd_receive "$@" ;;
+	transfer) shift; cmd_transfer "$@" ;;
+	standing-order) shift; cmd_standing_order "$@" ;;
+	profiles)       shift; cmd_profiles "$@" ;;
+	capability)     shift; cmd_capability "$@" ;;
+	set-profile)    shift; cmd_set_profile "$@" ;;
+	set-fund-class) shift; cmd_set_fund_class "$@" ;;
+	"")       usage; exit 1 ;;
+	*)        echo "lightning account: unknown subcommand '$1'" >&2; usage; exit 1 ;;
+esac

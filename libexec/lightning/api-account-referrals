@@ -1,0 +1,73 @@
+#!/bin/bash
+# lightning api-account-referrals <address>   (FEAT-218)
+#
+# JSON list of direct downline accounts for the given inviter.
+# Single-level — never grandchildren.  Per the spec, the
+# `accrued_credits_sat` field stays at 0 until FEAT-219 wires
+# referral fee distribution; the shape is forward-compatible.
+#
+#   { "referrals": [
+#       { "account_id": "bc1q...",
+#         "joined_at":  <unix-epoch>,
+#         "accrued_credits_sat": <int> },
+#       ...
+#     ] }
+
+set -e
+[ $# -eq 1 ] || exit 1
+address="$1"
+
+case "$address" in bc1*|tb1*|bcrt1*) ;; *) exit 2 ;; esac
+
+WALLETS_ROOT="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning/wallet}"
+ACTIVE_LINK="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning}/active"
+wname="default"; [ -f "$ACTIVE_LINK" ] && wname=$(cat "$ACTIVE_LINK")
+db="$WALLETS_ROOT/$wname/state.db"
+[ -f "$db" ] || { echo '{"error":"no active wallet"}'; exit 3; }
+
+sql_quote() { printf "'%s'" "${1//\'/\'\'}"; }
+name=$(sqlite3 "$db" "SELECT name FROM accounts WHERE address = $(sql_quote "$address");")
+[ -n "$name" ] || { echo '{"error":"unknown account"}'; exit 4; }
+
+now=$(date -u +%s)
+sqlite3 "$db" "UPDATE accounts SET last_api_call_at = $now WHERE address = $(sql_quote "$address");" 2>/dev/null || true
+
+# Direct downline only: accounts whose `referrer` is THIS account.
+# Each downline's accrued_credits_sat is the sum of `fee:referral`
+# in-credits on THIS account tagged with `peer = 'referee:<dn>'`
+# (FEAT-219 writes those rows at skim time).  The full address is
+# returned as account_id; clients truncate for display.
+rows=$(sqlite3 -separator $'\t' "$db" "
+	SELECT
+		COALESCE(d.address, '')                AS account_id,
+		COALESCE(d.created_at, 0)              AS joined_at,
+		COALESCE(c.credit_sat, 0)              AS accrued_credits_sat
+	FROM accounts d
+	LEFT JOIN (
+		SELECT
+			substr(peer, length('referee:') + 1) AS referee_name,
+			SUM(amount_msat) / 1000              AS credit_sat
+		FROM ledger
+		WHERE account   = $(sql_quote "$name")
+		  AND direction = 'in'
+		  AND message LIKE 'fee:referral%'
+		  AND peer LIKE 'referee:%'
+		GROUP BY referee_name
+	) c ON c.referee_name = d.name
+	WHERE d.referrer = $(sql_quote "$name") AND d.address IS NOT NULL
+	ORDER BY d.created_at DESC, d.name ASC;")
+
+# Project rows into JSON via jq.
+if [ -z "$rows" ]; then
+	echo '{"referrals": []}'
+	exit 0
+fi
+
+printf '%s\n' "$rows" | jq -Rsc '
+	split("\n")
+	| map(select(length > 0))
+	| map(split("\t"))
+	| map({account_id: .[0],
+	       joined_at: (.[1] | tonumber),
+	       accrued_credits_sat: (.[2] | tonumber)})
+	| {referrals: .}'

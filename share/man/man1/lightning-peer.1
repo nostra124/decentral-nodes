@@ -1,0 +1,90 @@
+.TH "LIGHTNING-PEER" 1 "May 2026" "lightning 0.6.0" "User Commands"
+.SH NAME
+lightning-peer \- Lightning network peering
+.SH SYNOPSIS
+.B lightning peer
+[\fIsubcommand\fR] [\fIargs\fR]
+.SH DESCRIPTION
+.nf
+lightning peer — Lightning network peering.
+
+Peers in clightning are persistent TCP connections to other nodes.
+Channels are owned by `lightning channel`; this object covers the
+bare peering layer (connect, disconnect, list, bootstrap). Bare
+peering is the prerequisite for gossip graph sync, BOLT-12
+fetchinvoice, and LSPS1 / LSP channel-open requests.
+.fi
+.SH USAGE
+.nf
+usage: lightning peer <subcommand> [args]
+
+   Manage Lightning network peering — persistent TCP connections
+   to other nodes. Peers don't imply channels; they're the
+   prerequisite for gossip sync, BOLT-12 fetchinvoice, and any
+   LSP / LSPS1 inbound-liquidity request.
+
+subcommands:
+   list                       connected peers (TSV); --raw keeps the
+                              BOLT-9 feature hex instead of decoding
+   connect <node-uri>         open a bare TCP connection
+                              (pubkey@host:port)
+   disconnect <node-id>       tear down the connection
+   bootstrap [-n N]           connect to N well-known nodes AND
+                              persist them as important-peer= in
+                              \e$LIGHTNING_DIR/config (lightningd will
+                              auto-reconnect on next start)
+   reconnect [-n N]           alias for bootstrap — convenient name
+                              after a network outage / laptop sleep
+   keepalive [--threshold N]  top up peer count when below threshold;
+             [--target N]     designed for cron / launchd / systemd
+                              timer invocation. \e$LIGHTNING_NO_BOOTSTRAP
+                              skips both bootstrap and keepalive.
+   score <node-id>            pre-channel-open intelligence from
+        [--source mempool|1ml|amboss|auto]
+        [--json] [--no-cache]
+                              public Lightning network analytics;
+                              recfile output. 1h cache under
+                              \e$LIGHTNING_DIR/score-cache/.
+   stats [--field <name>]    comprehensive JSON statistics for all peers
+                              and channels (counts, capacity, balances,
+                              fee revenue, HTLC counts, reserves).
+   connected <peer_id>       check if peer is currently connected (JSON)
+   reputation <peer_id>      peer reputation: channels, capacity, state
+   routing-score <peer_id>   count of active CHANNELD_NORMAL channels
+   reconnect-peer <peer_id>  disconnect then reconnect a specific peer
+   disconnect-all            disconnect all currently connected peers
+   node-info <node_id>       gossip node info (alias, color, addresses)
+   features <peer_id>        BOLT-9 feature bitmap for a peer
+   gossip-info <node_id>     gossip layer info for a node
+   reachability <node_id>    check reachability (connected + netaddr)
+   reachable <node_id>       alias for reachability
+   open-channel <peer_id> <sat>  open a channel to this peer
+   scb-backup                static channel backup peer count
+   send-custom <peer_id> <type> <data>  send a custom message
+   score-list                list all peers with basic score info
+   alias <node_id>           look up a peer's alias
+   channels <peer_id>        list channels for a specific peer
+   summary <peer_id>         compact summary: connected, balances, addr
+.fi
+.SH STATS
+.nf
+lightning peer stats [--field <name>]
+
+Runs a single pass over listpeers + listpeerchannels + listforwards and
+emits a comprehensive JSON object. Fields include:
+  peer_count, connected_count, disconnected_count, connected_pct,
+  channel_count, active_channel_count, htlc_count_total,
+  capacity_{total,avg,min,max,range,stddev,median}_msat,
+  local_balance_{total,avg,stddev,variance}_msat,
+  remote_balance_{total,avg,stddev}_msat,
+  local_pct_{avg,stddev,variance},
+  spendable_{total,avg,max}_msat, receivable_{total,avg}_msat,
+  our_reserve_{total,avg}_msat, their_reserve_total_msat,
+  fee_revenue_total_msat, fee_revenue_by_channel.
+
+Use --field <name> to extract a single value.
+.fi
+.SH "SEE ALSO"
+.BR lightning (1)
+.SH AUTHOR
+Part of the \fBlightning\fR educational Lightning Network frontend.

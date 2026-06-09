@@ -1,0 +1,202 @@
+#!/bin/bash
+# lightning api-accounts-create [--hint <label>]   (FEAT-212 PR-2)
+#
+# Anonymous self-service account creation.  Mints a Bitcoin address
+# (via `lightning-cli newaddr`) that doubles as the account's ID and
+# the on-chain top-up destination, plus an `lt_`-prefixed API key.
+#
+# Output:
+#   {"account_id":"bc1q...","api_key":"lt_...","topup_uri":"bitcoin:bc1q...",
+#    "endpoints":{...relative paths...},"limit_sat":100000,"overdraft":"deny"}
+#
+# Rate-limited via a rolling log at $LIGHTNING_DIR/api-accounts.creates.log;
+# default 6 creates / minute, tuneable via LIGHTNING_ACCOUNT_CREATE_RATE.
+# CGI passes REMOTE_ADDR through; we key the limiter off that and a
+# global bucket (so a single client can be slowed even via NAT).
+
+set -e
+hint=""
+invite_code=""
+owner_user=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--hint)        hint="$2"; shift 2 ;;
+		--invite-code) invite_code="$2"; shift 2 ;;
+		--owner-user)  owner_user="$2"; shift 2 ;;
+		*) exit 1 ;;
+	esac
+done
+
+LIGHTNING_DIR="${LIGHTNING_DIR:-$HOME/.lightning}"
+LIMIT_DEFAULT_SAT=100000
+RATE_PER_MIN="${LIGHTNING_ACCOUNT_CREATE_RATE:-6}"
+REMOTE="${REMOTE_ADDR:-unknown}"
+
+# Application-level rate limit.  Keeps the last 60 s of (epoch, ip)
+# tuples in a flat file; rejects if (this ip's count >= RATE) OR
+# (global count >= RATE * 4).  No locking — a small race window is
+# acceptable for what is, fundamentally, a best-effort throttle that
+# Apache mod_ratelimit backs up.
+ratelimit_check() {
+	local log="$LIGHTNING_DIR/api-accounts.creates.log"
+	[ -d "$LIGHTNING_DIR" ] || mkdir -p "$LIGHTNING_DIR"
+	touch "$log"
+	local now; now=$(date -u +%s)
+	local since=$(( now - 60 ))
+	# Filter to the window.
+	awk -v since="$since" '$1 >= since' "$log" > "$log.tmp" || true
+	mv "$log.tmp" "$log"
+	local n_self n_total
+	n_self=$(awk -v ip="$REMOTE" '$2 == ip { n++ } END { print n+0 }' "$log")
+	n_total=$(wc -l < "$log" | tr -d ' ')
+	if [ "$n_self" -ge "$RATE_PER_MIN" ] || [ "$n_total" -ge "$(( RATE_PER_MIN * 4 ))" ]; then
+		printf '{"error":"rate_limited","retry_after":60}\n'
+		exit 6
+	fi
+	printf '%s %s\n' "$now" "$REMOTE" >> "$log"
+}
+
+ratelimit_check
+
+# FEAT-233 — compliance pre-create hook (fast no-op unless opted in; a
+# module may deny creation, e.g. geo-block or KYC-before-open).
+WALLETS_ROOT="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning/wallet}"
+ACTIVE_LINK="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning}/active"
+wname="default"; [ -f "$ACTIVE_LINK" ] && wname=$(cat "$ACTIVE_LINK")
+cc_self=$(cd "$(dirname "$0")" && pwd)
+compliance_hook() {
+	[ -s "$WALLETS_ROOT/$wname/compliance.recfile" ] || return 0
+	local out rc
+	out=$("$cc_self/_compliance" hook "$1" "$2" "$3" 2>/dev/null); rc=$?
+	[ "$rc" -eq 0 ] || { [ -n "$out" ] && echo "$out"; }
+	return "$rc"
+}
+compliance_hook pre create '{"op":"create"}' || exit 6
+
+# FEAT-222 PR-6 — require_referral gate.  When the operator has set
+# require_referral: on in access.recfile, an anonymous create must carry
+# a valid invite code; otherwise the instance is fully open (default).
+access_file="$WALLETS_ROOT/$wname/access.recfile"
+if [ -f "$access_file" ]; then
+	require_referral=$(sed -n 's/^require_referral:[[:space:]]*//p' "$access_file" | head -1 | tr -d '[:space:]')
+	if [ "$require_referral" = "on" ]; then
+		db="$WALLETS_ROOT/$wname/state.db"
+		acc_valid=0
+		if [ -n "$invite_code" ] && [ -f "$db" ]; then
+			acc_q="'${invite_code//\'/\'\'}'"
+			[ "$(sqlite3 "$db" "SELECT 1 FROM invite_codes WHERE code = $acc_q LIMIT 1;" 2>/dev/null)" = "1" ] && acc_valid=1
+		fi
+		[ "$acc_valid" = "1" ] || { echo '{"error":"invite_required"}'; exit 6; }
+	fi
+fi
+
+# Synthesize a stable local `name` for the SQLite primary key.  The
+# user-facing handle is the bitcoin address; this is just a unique
+# internal label.  Random 8 hex chars is plenty (collision after
+# ~2^16 accounts which we cap via the GC sidecar).
+suffix=$(head -c 4 /dev/urandom | od -An -tx1 | tr -d ' \n')
+local_name="anon-$suffix"
+
+# Pull a usable description from the optional hint without persisting
+# anything the caller didn't ask to be public.
+desc=""
+if [ -n "$hint" ]; then
+	# Strip control + newlines; cap at 64 chars.
+	desc=$(printf '%s' "$hint" | tr -d '\000-\037' | cut -c1-64)
+fi
+
+# Hand off to the existing `account create` verb so the mint + key
+# generation + nicknames recfile + secret-store insertion all stay in
+# one place (FEAT-212 PR-1 plumbed those).
+SELF_LIBEXEC="${LIGHTNING_LIBEXEC:-$(cd "$(dirname "$0")/.." && pwd)}"
+create_out=$("$SELF_LIBEXEC/lightning/account" create "$local_name" \
+	${desc:+"$desc"} \
+	--limit "$LIMIT_DEFAULT_SAT" --overdraft deny 2>&1) || {
+		printf '{"error":"create_failed","detail":%s}\n' \
+			"$(jq -Rs . <<<"$create_out")"
+		exit 4
+	}
+
+# Parse the verb's stdout for the address + key it minted.  Both are
+# printed under the leading "lightning account: created ..." line.
+address=$(printf '%s\n' "$create_out" | awk '/^  address: / { print $2 }')
+api_key=$(printf '%s\n' "$create_out" | awk '/^  api_key: / { print $2 }')
+
+if [ -z "$address" ] || [ -z "$api_key" ]; then
+	printf '{"error":"mint_failed","hint":"is lightningd running?"}\n'
+	exit 5
+fi
+
+# FEAT-218 — resolve invite code to a referrer + stamp it on the new
+# account.  Unknown / revoked codes fall back to `referrer = 'house'`
+# silently (we don't reject account creation over a bad invite —
+# user-hostile).  Increment the code's `uses` counter on success.
+referrer="house"
+if [ -n "$invite_code" ]; then
+	WALLETS_ROOT="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning/wallet}"
+	ACTIVE_LINK="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning}/active"
+	wname="default"; [ -f "$ACTIVE_LINK" ] && wname=$(cat "$ACTIVE_LINK")
+	db="$WALLETS_ROOT/$wname/state.db"
+	sql_quote() { printf "'%s'" "${1//\'/\'\'}"; }
+	if [ -f "$db" ]; then
+		looked_up=$(sqlite3 "$db" \
+			"SELECT COALESCE(
+			   CASE WHEN owner_user IS NOT NULL THEN credit_account ELSE NULL END,
+			   account
+			 ) FROM invite_codes WHERE code = $(sql_quote "$invite_code") LIMIT 1;" 2>/dev/null)
+		if [ -n "$looked_up" ]; then
+			referrer="$looked_up"
+			# Stamp the new account's referrer + bump the code's uses.
+			# The `account create` row was inserted by the helper verb
+			# above; we patch the referrer here so the change shows up
+			# in the same wallet-new schema regardless of migration
+			# state.
+			sqlite3 "$db" "UPDATE accounts SET referrer = $(sql_quote "$referrer") WHERE address = $(sql_quote "$address");" 2>/dev/null || true
+			sqlite3 "$db" "UPDATE invite_codes SET uses = uses + 1 WHERE code = $(sql_quote "$invite_code");" 2>/dev/null || true
+		fi
+	fi
+fi
+
+# FEAT-222 PR-4 — stamp owner_user if provided.
+if [ -n "$owner_user" ]; then
+	WALLETS_ROOT="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning/wallet}"
+	ACTIVE_LINK="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning}/active"
+	_wname="default"; [ -f "$ACTIVE_LINK" ] && _wname=$(cat "$ACTIVE_LINK")
+	_db="$WALLETS_ROOT/$_wname/state.db"
+	_sql_quote() { printf "'%s'" "${1//\'/\'\'}"; }
+	if [ -f "$_db" ]; then
+		sqlite3 "$_db" "UPDATE accounts SET owner_user = $(_sql_quote "$owner_user") \
+			WHERE address = $(_sql_quote "$address");" 2>/dev/null || true
+	fi
+fi
+
+# FEAT-233 — lifecycle hook: record the account creation (never blocks).
+compliance_hook lifecycle create "{\"op\":\"create\",\"account\":\"$address\"}" || true
+
+base="/.well-known/lightning/v1/accounts/$address"
+jq -nc \
+	--arg id "$address" \
+	--arg key "$api_key" \
+	--arg uri "bitcoin:$address" \
+	--arg base "$base" \
+	--arg referrer "$referrer" \
+	--argjson limit "$LIMIT_DEFAULT_SAT" \
+	'{
+		account_id: $id,
+		api_key:    $key,
+		topup_uri:  $uri,
+		referrer:   $referrer,
+		limit_sat:  $limit,
+		overdraft:  "deny",
+		endpoints: {
+			balance:       ($base + "/balance"),
+			topup:         ($base + "/topup"),
+			withdraw:      ($base + "/withdraw"),
+			pay:           ($base + "/pay"),
+			recv:          ($base + "/recv"),
+			recv_reusable: ($base + "/recv-reusable"),
+			transfer:      ($base + "/transfer"),
+			referrals:     ($base + "/referrals"),
+			close:         ($base + "/close")
+		}
+	}'

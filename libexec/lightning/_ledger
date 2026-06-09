@@ -1,0 +1,396 @@
+#!/bin/bash
+# lightning ledger — TSV-default view of the SQLite ledger.
+#
+# Implements FEAT-193 verbs.
+#
+# Subcommands:
+#   list [--account <n>] [--since <date>] [--limit <N>]
+#   sum  [--by account|day|month|year] [--account <n>]
+#   balance [<account>]
+#   annotate <payment_hash> <note>
+#   add <direction> <amount_msat> [--account <n>] [--peer <p>]
+#                                  [--payment-hash <h>] [--message <m>]
+#                                  [--note <n>]
+#                                       — used by pay/invoice/forward
+#                                         hooks once they're wired
+#   export csv|jsonl|tsv
+
+set -e
+
+command -v sqlite3 >/dev/null || { echo "lightning: sqlite3 not installed" >&2; exit 127; }
+
+WALLETS_ROOT="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning/wallet}"
+ACTIVE_LINK="${LIGHTNING_WALLETS_ROOT:-$HOME/.lightning}/active"
+
+# Only `reconcile` talks to lightningd; the other subcommands are
+# pure-SQLite, so the cli() helper + deps are checked lazily inside
+# cmd_reconcile rather than at top level.
+LIGHTNING_DIR="${LIGHTNING_DIR:-$HOME/.lightning}"
+LIGHTNING_NETWORK="${LIGHTNING_NETWORK:-bitcoin}"
+cli() { lightning-cli --lightning-dir="$LIGHTNING_DIR" --network="$LIGHTNING_NETWORK" "$@"; }
+
+active_db() {
+	local name="default"
+	[ -f "$ACTIVE_LINK" ] && name=$(cat "$ACTIVE_LINK")
+	local db="$WALLETS_ROOT/$name/state.db"
+	[ -f "$db" ] || { echo "lightning ledger: no active wallet (try \`lightning wallet new\`)" >&2; exit 2; }
+	echo "$db"
+}
+
+sql_quote() { printf "'%s'" "${1//\'/\'\'}"; }
+
+usage() {
+	cat >&2 <<EOF
+usage: lightning ledger <subcommand>
+
+   list [--account <n>] [--since <date>] [--limit <N>]
+   sum  [--by account|day|month|year] [--account <n>]
+   balance [<account>]
+   annotate <payment_hash> <note>
+   add <direction> <amount_msat> [--account <n>] [--peer <p>]
+       [--payment-hash <h>] [--message <m>] [--note <n>]
+   statement --account <n> --period <YYYY-MM|YYYY-Q[1-4]|YYYY> [--tsv]
+   reconcile [run|dry-run|status]
+   export csv|jsonl|tsv
+EOF
+}
+
+cmd_list() {
+	local account="" since="" limit=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--account) account="$2"; shift 2 ;;
+			--since)   since="$2"; shift 2 ;;
+			--limit)   limit="$2"; shift 2 ;;
+			*) echo "lightning ledger list: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+
+	local where=""
+	[ -n "$account" ] && where="WHERE account = $(sql_quote "$account")"
+	if [ -n "$since" ]; then
+		[ -n "$where" ] && where="$where AND ts >= $(sql_quote "$since")" \
+		                || where="WHERE ts >= $(sql_quote "$since")"
+	fi
+	local order="ORDER BY id DESC"
+	[ -n "$limit" ] && order="$order LIMIT $((limit))"
+
+	sqlite3 -header -separator $'\t' "$(active_db)" \
+		"SELECT ts, account, direction, amount_msat, peer, payment_hash, message, note FROM ledger $where $order;"
+}
+
+cmd_sum() {
+	local by="account" account=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--by)
+				case "$2" in account|day|month|year) by="$2"; shift 2 ;;
+					*) echo "--by: must be account|day|month|year" >&2; exit 1 ;;
+				esac ;;
+			--account) account="$2"; shift 2 ;;
+			*) echo "lightning ledger sum: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+
+	local group
+	case "$by" in
+		account) group="account" ;;
+		day)     group="substr(ts, 1, 10)" ;;
+		month)   group="substr(ts, 1, 7)" ;;
+		year)    group="substr(ts, 1, 4)" ;;
+	esac
+
+	local where=""
+	[ -n "$account" ] && where="WHERE account = $(sql_quote "$account")"
+
+	sqlite3 -header -separator $'\t' "$(active_db)" \
+		"SELECT $group AS bucket, SUM(amount_msat) AS total_msat, COUNT(*) AS rows FROM ledger $where GROUP BY $group ORDER BY bucket;"
+}
+
+cmd_balance() {
+	local where=""
+	[ $# -ge 1 ] && where="WHERE account = $(sql_quote "$1")"
+	sqlite3 "$(active_db)" "SELECT COALESCE(SUM(amount_msat),0) FROM ledger $where;"
+}
+
+cmd_annotate() {
+	[ $# -lt 2 ] && { echo "usage: lightning ledger annotate <payment_hash> <note>" >&2; exit 1; }
+	local hash="$1" note="$2"
+	# `changes()` is per-connection — must be in the same invocation as
+	# the UPDATE, or it returns 0.
+	local n
+	n=$(sqlite3 "$(active_db)" \
+		"UPDATE ledger SET note = $(sql_quote "$note") WHERE payment_hash = $(sql_quote "$hash"); SELECT changes();")
+	echo "lightning ledger: $n row(s) annotated"
+}
+
+cmd_add() {
+	[ $# -lt 2 ] && { echo "usage: lightning ledger add <direction> <amount_msat> ..." >&2; exit 1; }
+	local direction="$1" amount="$2"; shift 2
+	local account="-" peer="-" hash="-" message="" note=""
+
+	case "$direction" in in|out|fee|forward) ;; *) echo "direction: must be in|out|fee|forward" >&2; exit 1;; esac
+	[[ "$amount" =~ ^-?[0-9]+$ ]] || { echo "amount_msat: integer required" >&2; exit 1; }
+
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--account)      account="$2"; shift 2 ;;
+			--peer)         peer="$2"; shift 2 ;;
+			--payment-hash) hash="$2"; shift 2 ;;
+			--message)      message="$2"; shift 2 ;;
+			--note)         note="$2"; shift 2 ;;
+			*) echo "lightning ledger add: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+
+	local ts; ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+	sqlite3 "$(active_db)" \
+		"INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message, note) VALUES($(sql_quote "$ts"), $(sql_quote "$account"), $(sql_quote "$direction"), $amount, $(sql_quote "$peer"), $(sql_quote "$hash"), $(sql_quote "$message"), $(sql_quote "$note"));"
+}
+
+cmd_statement() {
+	local account="" period="" want_tsv=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--account) account="$2"; shift 2 ;;
+			--period)  period="$2"; shift 2 ;;
+			--tsv)     want_tsv=1; shift ;;
+			*) echo "lightning ledger statement: unknown flag '$1'" >&2; exit 1 ;;
+		esac
+	done
+	[ -z "$account" ] && { echo "--account required" >&2; exit 1; }
+	[ -z "$period" ]  && { echo "--period required (YYYY-MM | YYYY-Q[1-4] | YYYY)" >&2; exit 1; }
+
+	# Period -> ts range.
+	local start end
+	case "$period" in
+		[0-9][0-9][0-9][0-9])             start="${period}-01-01"; end="${period}-12-31" ;;
+		[0-9][0-9][0-9][0-9]-[0-9][0-9])  start="${period}-01";    end="${period}-31"    ;;
+		[0-9][0-9][0-9][0-9]-Q[1-4])
+			local y="${period%-Q*}" q="${period#*-Q}"
+			case "$q" in
+				1) start="${y}-01-01"; end="${y}-03-31" ;;
+				2) start="${y}-04-01"; end="${y}-06-30" ;;
+				3) start="${y}-07-01"; end="${y}-09-30" ;;
+				4) start="${y}-10-01"; end="${y}-12-31" ;;
+			esac ;;
+		*) echo "lightning ledger statement: bad period '$period'" >&2; exit 1 ;;
+	esac
+
+	local db; db=$(active_db)
+	local opening fee_msat closing
+	opening=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat),0) FROM ledger WHERE account = $(sql_quote "$account") AND ts < $(sql_quote "$start");")
+	closing=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat),0) FROM ledger WHERE account = $(sql_quote "$account") AND ts <= $(sql_quote "${end}T23:59:59Z");")
+	fee_msat=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat),0) FROM ledger WHERE account = $(sql_quote "$account") AND direction = 'fee' AND ts >= $(sql_quote "$start") AND ts <= $(sql_quote "${end}T23:59:59Z");")
+
+	if [ $want_tsv -eq 1 ]; then
+		echo "field	value"
+		printf "opening_msat\t%s\n" "$opening"
+		printf "closing_msat\t%s\n" "$closing"
+		printf "fees_msat\t%s\n"    "$(( -fee_msat ))"
+		printf "net_msat\t%s\n"     "$(( closing - opening ))"
+		echo
+		echo "ts	direction	amount_msat	peer	message"
+		sqlite3 -separator $'\t' "$db" \
+			"SELECT ts, direction, amount_msat, peer, message FROM ledger WHERE account = $(sql_quote "$account") AND ts >= $(sql_quote "$start") AND ts <= $(sql_quote "${end}T23:59:59Z") ORDER BY id;"
+		return
+	fi
+
+	printf "Statement for %s — %s\n" "$account" "$period"
+	echo   "--------------------------------"
+	printf "Opening balance: %15s sat\n" "$(( opening / 1000 ))"
+	sqlite3 -separator $'\t' "$db" \
+		"SELECT ts, amount_msat/1000, message FROM ledger WHERE account = $(sql_quote "$account") AND ts >= $(sql_quote "$start") AND ts <= $(sql_quote "${end}T23:59:59Z") ORDER BY id;" \
+		| awk -F'\t' '{ printf "  %s  %+8d  %s\n", substr($1,1,10), $2, $3 }'
+	echo   "--------------------------------"
+	printf "Closing balance: %15s sat\n" "$(( closing / 1000 ))"
+	printf "Fees paid:       %15s sat\n" "$(( -fee_msat / 1000 ))"
+	printf "Net for period:  %+15d sat\n" "$(( (closing - opening) / 1000 ))"
+}
+
+# FEAT-244 — node-balance reconciliation.
+#
+# Our verbs book a ledger row when THEY move money, but anything that
+# drives the same lightningd directly (another wallet app, a raw
+# `lightning-cli pay`, or a received invoice that settled with no
+# settle-watcher) never lands in the ledger — so SUM(ledger) drifts
+# from the node's real channel liquidity.  This is the off-chain analog
+# of `account topup-watcher` (which covers on-chain deposits): it scans
+# clightning's settled off-chain history, skips anything already booked
+# (deduped by payment_hash, regardless of which verb booked it), and
+# books the residue:
+#   * completed pays  -> `others`, as an `out` (+ a `fee` row for the
+#                        routing fee when the destination amount is known)
+#   * paid invoices   -> the owning account from the `invoices` table
+#                        when known, else `others`, as an `in`
+# On-chain deposits stay with topup-watcher (disjoint payment_hash
+# space — txid:vout vs the off-chain payment hash — so no double-count).
+#
+# Subcommands:
+#   run            book any new external off-chain flows (default)
+#   dry-run        list what would be booked; don't write
+#   status         reconcile activity + current `others` balance
+cmd_reconcile() {
+	local op="${1:-run}"
+	local dry=0
+	case "$op" in
+		run)               dry=0 ;;
+		dry-run|--dry-run) dry=1 ;;
+		status)            _reconcile_status; return ;;
+		*) echo "usage: lightning ledger reconcile {run|dry-run|status}" >&2; exit 1 ;;
+	esac
+
+	command -v lightning-cli >/dev/null || {
+		echo "lightning ledger reconcile: lightning-cli not found" >&2; exit 127; }
+	command -v jq >/dev/null || {
+		echo "lightning ledger reconcile: jq not installed" >&2; exit 127; }
+
+	local db; db=$(active_db)
+
+	# Existing wallets predate the schema seed — create the catch-all
+	# lazily (same pattern as topup-watcher's house bootstrap).  Skip in
+	# dry-run, which must not write.
+	[ $dry -eq 0 ] && sqlite3 "$db" \
+		"INSERT OR IGNORE INTO accounts(name, description, overdraft) VALUES('others', 'external / other-client flows', 'allow');"
+
+	# Normalise an msat field across clightning versions: a bare number,
+	# the post-23.02 "<n>msat" string, or null -> 0.
+	local jq_num='def num: (if . == null then 0 elif type=="string" then (gsub("msat$";"")|tonumber) else . end);'
+
+	local raw pays invs
+	raw=$(cli listpays 2>/dev/null) || {
+		echo "lightning ledger reconcile: listpays failed (is lightningd running?)" >&2; exit 4; }
+	pays=$(jq -r "$jq_num"'
+		.pays[]?
+		| select(.status == "complete")
+		| [ (.payment_hash // "-"),
+		    ((.amount_sent_msat // .msatoshi_sent) | num),
+		    ((.amount_msat // .msatoshi) | num)
+		  ] | @tsv' <<<"$raw")
+
+	raw=$(cli listinvoices 2>/dev/null) || {
+		echo "lightning ledger reconcile: listinvoices failed (is lightningd running?)" >&2; exit 4; }
+	invs=$(jq -r "$jq_num"'
+		.invoices[]?
+		| select(.status == "paid")
+		| [ (.payment_hash // "-"),
+		    ((.amount_received_msat // .msatoshi_received // .amount_msat // .msatoshi) | num)
+		  ] | @tsv' <<<"$raw")
+
+	local booked_pay=0 booked_recv=0 dupe=0
+	local sql="BEGIN;"
+	local hash sent dest recv owner out_msat fee_msat
+
+	# Outgoing — completed pays not already in the ledger.
+	while IFS=$'\t' read -r hash sent dest; do
+		[ -n "$hash" ] && [ "$hash" != "-" ] || continue
+		if _already_booked "$db" "$hash"; then dupe=$((dupe+1)); continue; fi
+		sent=${sent:-0}; dest=${dest:-0}
+		[ "$sent" -gt 0 ] 2>/dev/null || continue
+		# Total outflow = amount_sent (incl routing fee).  Split into the
+		# destination amount (out) + routing fee (fee) when the
+		# destination amount is known; otherwise book the lot as `out`.
+		if [ "$dest" -gt 0 ] 2>/dev/null && [ "$sent" -ge "$dest" ]; then
+			out_msat=$dest; fee_msat=$(( sent - dest ))
+		else
+			out_msat=$sent; fee_msat=0
+		fi
+		if [ $dry -eq 1 ]; then
+			printf 'would-book\tothers\tout\t-%s msat\t%s\n' "$out_msat" "$hash"
+			[ "$fee_msat" -gt 0 ] && printf 'would-book\tothers\tfee\t-%s msat\t%s\n' "$fee_msat" "$hash"
+		else
+			sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+			sql+=" VALUES(datetime('now'), 'others', 'out', -$out_msat, '-', $(sql_quote "$hash"), 'reconcile:pay');"
+			if [ "$fee_msat" -gt 0 ]; then
+				sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+				sql+=" VALUES(datetime('now'), 'others', 'fee', -$fee_msat, '-', $(sql_quote "$hash"), 'reconcile:pay-fee');"
+			fi
+		fi
+		booked_pay=$((booked_pay+1))
+	done <<<"$pays"
+
+	# Incoming — paid invoices not already in the ledger.  Attribute to
+	# the owning account from the `invoices` table when we know it (a
+	# receive our verb minted but never had its settlement booked), else
+	# to `others`.
+	while IFS=$'\t' read -r hash recv; do
+		[ -n "$hash" ] && [ "$hash" != "-" ] || continue
+		if _already_booked "$db" "$hash"; then dupe=$((dupe+1)); continue; fi
+		recv=${recv:-0}
+		[ "$recv" -gt 0 ] 2>/dev/null || continue
+		owner=$(sqlite3 "$db" "SELECT account FROM invoices WHERE payment_hash = $(sql_quote "$hash") LIMIT 1;" 2>/dev/null)
+		case "$owner" in ""|"-") owner="others" ;; esac
+		if [ $dry -eq 1 ]; then
+			printf 'would-book\t%s\tin\t+%s msat\t%s\n' "$owner" "$recv" "$hash"
+		else
+			sql+=" INSERT INTO ledger(ts, account, direction, amount_msat, peer, payment_hash, message)"
+			sql+=" VALUES(datetime('now'), $(sql_quote "$owner"), 'in', $recv, '-', $(sql_quote "$hash"), 'reconcile:recv');"
+			# Keep the invoices table truthful now that we've seen it settle.
+			sql+=" UPDATE invoices SET state='paid' WHERE payment_hash = $(sql_quote "$hash");"
+		fi
+		booked_recv=$((booked_recv+1))
+	done <<<"$invs"
+
+	if [ $dry -eq 0 ]; then
+		sql+=" COMMIT;"
+		sqlite3 "$db" "$sql"
+		echo "reconcile: booked $booked_pay pay(s) + $booked_recv receipt(s) (already-booked $dupe)" >&2
+	else
+		echo "reconcile dry-run: would book $booked_pay pay(s) + $booked_recv receipt(s) (already-booked $dupe)" >&2
+	fi
+}
+
+# True (exit 0) when any ledger row already carries this payment_hash —
+# i.e. one of our verbs (or a prior reconcile pass) already booked it.
+_already_booked() {
+	local hit
+	hit=$(sqlite3 "$1" "SELECT 1 FROM ledger WHERE payment_hash = $(sql_quote "$2") LIMIT 1;" 2>/dev/null)
+	[ -n "$hit" ]
+}
+
+_reconcile_status() {
+	local db; db=$(active_db)
+	local n_pay n_recv others last
+	n_pay=$(sqlite3 "$db" "SELECT COUNT(*) FROM ledger WHERE message LIKE 'reconcile:pay%';")
+	n_recv=$(sqlite3 "$db" "SELECT COUNT(*) FROM ledger WHERE message = 'reconcile:recv';")
+	others=$(sqlite3 "$db" "SELECT COALESCE(SUM(amount_msat),0) FROM ledger WHERE account = 'others';")
+	last=$(sqlite3 -separator $'\t' "$db" \
+		"SELECT ts, account, direction, amount_msat, payment_hash FROM ledger WHERE message LIKE 'reconcile:%' ORDER BY id DESC LIMIT 1;")
+	printf "reconciled_pays:     %s\n" "$n_pay"
+	printf "reconciled_receipts: %s\n" "$n_recv"
+	printf "others_balance_sat:  %s\n" "$(( others / 1000 ))"
+	if [ -n "$last" ]; then
+		printf "last_reconcile:      %s\n" "$last"
+	else
+		printf "last_reconcile:      (none yet)\n"
+	fi
+}
+
+cmd_export() {
+	local fmt="${1:-tsv}"
+	case "$fmt" in
+		tsv)
+			sqlite3 -header -separator $'\t' "$(active_db)" \
+				"SELECT ts, account, direction, amount_msat, peer, payment_hash, message, note FROM ledger ORDER BY id;" ;;
+		csv)
+			sqlite3 -csv -header "$(active_db)" \
+				"SELECT ts, account, direction, amount_msat, peer, payment_hash, message, note FROM ledger ORDER BY id;" ;;
+		jsonl)
+			sqlite3 "$(active_db)" \
+				"SELECT json_object('ts',ts,'account',account,'direction',direction,'amount_msat',amount_msat,'peer',peer,'payment_hash',payment_hash,'message',message,'note',note) FROM ledger ORDER BY id;" ;;
+		*) echo "lightning ledger export: format must be tsv|csv|jsonl" >&2; exit 1 ;;
+	esac
+}
+
+case "${1:-}" in
+	list)      shift; cmd_list "$@" ;;
+	sum)       shift; cmd_sum "$@" ;;
+	balance)   shift; cmd_balance "$@" ;;
+	annotate)  shift; cmd_annotate "$@" ;;
+	add)       shift; cmd_add "$@" ;;
+	export)    shift; cmd_export "$@" ;;
+	statement) shift; cmd_statement "$@" ;;
+	reconcile) shift; cmd_reconcile "$@" ;;
+	"")        usage; exit 1 ;;
+	*)         echo "lightning ledger: unknown subcommand '$1'" >&2; usage; exit 1 ;;
+esac
