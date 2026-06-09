@@ -1436,9 +1436,9 @@ bug015_env() {
 
 @test "BUG-015 — space errors when the data dir is absent" {
 	bug015_env
-	# setup() pre-creates $XDG_DATA_HOME/bitcoin/wallets; point at a
-	# fresh data home with no bitcoin/ dir so the absent path is hit.
-	export XDG_DATA_HOME="$(mktemp -d "$BATS_TMPDIR/empty.XXXXXX")"
+	# setup() gives a fresh $HOME with no ~/.bitcoin, so the user-mode
+	# datadir (daemon:_datadir → $HOME/.bitcoin since 0d2d7d1) is absent
+	# and the error path is hit.
 	run --separate-stderr "$BITCOIN_BIN" daemon space
 	[ "$status" -ne 0 ]
 	echo "$stderr" | grep -q "data dir '.*' does not exist"
@@ -1446,8 +1446,8 @@ bug015_env() {
 
 @test "BUG-015 — space reports the data dir's disk usage" {
 	bug015_env
-	mkdir -p "$XDG_DATA_HOME/bitcoin"
-	head -c 4096 /dev/zero > "$XDG_DATA_HOME/bitcoin/blk"
+	mkdir -p "$HOME/.bitcoin"
+	head -c 4096 /dev/zero > "$HOME/.bitcoin/blk"
 	run "$BITCOIN_BIN" daemon space
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -qE '^[0-9.]+[KMG]?'
