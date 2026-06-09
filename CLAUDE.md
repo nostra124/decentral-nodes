@@ -1,15 +1,47 @@
 # `bitcoin` — developer notes
 
-> Mirrors `CLAUDE.md.foundation`, specialised for
-> educational `bitcoin`.
+> Mirrors `CLAUDE.md.foundation`, specialised for the
+> combined educational Bitcoin stack.
+
+## 0. Combined stack (multi-command repo)
+
+This repo ships the **full Bitcoin stack from one rpk
+package** (`.rpk/identity` = `bitcoin`) via multiple
+command dispatchers:
+
+- `bin/bitcoin` + `libexec/bitcoin/*` — BIP plugins +
+  wallet (this file's §§1–13).
+- `bin/lightning` + `libexec/lightning/*` — the Core
+  Lightning frontend, **merged in from
+  `nostra124/lightning`**. Its developer notes live at
+  `docs/templates/CLAUDE.md.lightning`; the Lightning
+  scope, no-shared-lib rules (it depends on `python3`
+  + `sqlite3`, runs the `.well-known/lightning/` CGI),
+  three-user model, and man-page contract all carry
+  over unchanged.
+- `bin/fulcrum` — *planned* (FEAT-055..060), slots into
+  the same layout.
+
+Each command keeps its own namespaced `libexec/<cmd>/`,
+`share/<cmd>/`, `share/doc/<cmd>/`, and
+`share/man/man1/<cmd>-*.1`. The dispatchers resolve
+their libexec by binary name, so they coexist with no
+cross-wiring. **`bitcoin` and `lightning` never shell
+out to each other** (§4); the on-chain leg of a channel
+open is handled by clightning's own bitcoind connection.
+
+The combined contract is the union of
+`tests/unit/bitcoin.bats` and `tests/unit/lightning.bats`
+(plus `tests/python/` for the CGI layer).
 
 ## 1. Scope
 
-`bitcoin` is the educational Bitcoin frontend. Its
-scope is the BIP plugins (BIP 13/32/39/173, WIF, the
-daemon abstraction) plus a wallet surface.
+`bitcoin` (the command) is the educational Bitcoin
+frontend. Its scope is the BIP plugins (BIP 13/32/39/
+173, WIF, the daemon abstraction) plus a wallet surface.
 
-Out of scope: lightning (that's `lightning`); on-chain
+Out of scope for the `bitcoin` command: Lightning
+(that's the `lightning` command, §0); on-chain
 transaction-history indexing for the whole network
 (out of scope for an educational tool).
 

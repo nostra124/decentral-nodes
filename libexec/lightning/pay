@@ -1,0 +1,48 @@
+#!/bin/bash
+# lightning pay — send payments (BOLT-11, BOLT-12 offer, keysend).
+#
+# Subcommands:
+#   <bolt11> [--max-fee-sat N] [--timeout S]   pay a BOLT-11 invoice
+#   offer <bolt12> [<sat>] [--message <text>]  pay a BOLT-12 offer
+#   keysend <node-id> <sat> [--message <text>] keysend (no invoice)
+
+set -e
+
+command -v lightning-cli >/dev/null || {
+	echo "lightning: lightning-cli not found — install Core Lightning" >&2; exit 127; }
+
+LIGHTNING_DIR="${LIGHTNING_DIR:-$HOME/.lightning}"
+LIGHTNING_NETWORK="${LIGHTNING_NETWORK:-bitcoin}"
+cli() { lightning-cli --lightning-dir="$LIGHTNING_DIR" --network="$LIGHTNING_NETWORK" "$@"; }
+
+usage() {
+	cat >&2 <<EOF
+usage: lightning pay <bolt11> [--max-fee-sat N] [--timeout S]
+       lightning pay offer <bolt12> [<sat>] [--message <text>]
+       lightning pay keysend <node-id> <sat> [--message <text>]
+EOF
+}
+
+[ $# -lt 1 ] && { usage; exit 1; }
+
+SUB="$1"
+
+# If first arg looks like a bolt11/bolt12 string, treat as direct pay.
+case "$SUB" in
+	lnbcrt*|lnsb*|lntb*|lnbc*|LNBCRT*|LNSB*|LNTB*|LNBC*)
+		exec "$(dirname "$0")/_pay" "$@" ;;
+esac
+
+shift || true
+
+case "$SUB" in
+	offer)
+		exec "$(dirname "$0")/_offer-pay" "$@" ;;
+	keysend)
+		exec "$(dirname "$0")/_send" "$@" ;;
+	--help|-h)
+		usage; exit 0 ;;
+	*)
+		# Unknown sub — try as bolt11 anyway (future-proof for lni*, lno* direct pay).
+		exec "$(dirname "$0")/_pay" "$SUB" "$@" ;;
+esac

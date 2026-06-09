@@ -18,21 +18,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unit:
-    name: bats unit tests
+  test:
+    name: bats + pytest unit tests
     runs-on: ubuntu-latest
     # BUG-028: without a cap a hanging test runs to GitHub's 6-hour
-    # default and burns runner minutes. The suite legitimately takes
-    # ~9 min (slower when the runner is throttled), so 30 leaves ample
-    # headroom while still bounding a true hang.
+    # default and burns runner minutes. The merged suite (bitcoin +
+    # lightning) takes a few minutes; 30 bounds a true hang.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install bats + runtime deps
-        run: sudo apt-get update && sudo apt-get install -y bats dc xxd
+      - name: install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bats dc xxd sqlite3 jq python3 python3-pytest \
+            qrencode groff shellcheck openssl
 
-      - name: Run unit tests
+      - name: bats unit tests
         id: bats
         # BATS_TEST_TIMEOUT (BUG-028): kill and name an individual
         # hanging test rather than wedging the whole job.
@@ -40,7 +43,27 @@ jobs:
           BATS_TEST_TIMEOUT: 120
         run: |
           set -o pipefail
-          bats tests/unit/*.bats 2>&1 | tee bats.log
+          bats tests/unit/*.bats 2>&1 | tee /tmp/ci-bats.log
+
+      - name: pytest (FEAT-196 CGI scripts)
+        run: |
+          set -o pipefail
+          pytest tests/python/ 2>&1 | tee /tmp/ci-pytest.log
+
+      - name: shellcheck (lightning merge gate)
+        run: |
+          set -o pipefail
+          # libexec/lightning/ also holds Python helpers (FEAT-222) — filter
+          # to files with a sh/bash shebang so shellcheck doesn't trip SC1071.
+          files=(bin/lightning)
+          for f in libexec/lightning/*; do
+            [ -f "$f" ] || continue
+            head -1 "$f" | grep -qE '^#!.*/(ba)?sh([[:space:]]|$)' && files+=("$f")
+          done
+          files+=(share/lightning/hooks/*)
+          files+=(tests/sit/helpers.bash)
+          files+=(share/doc/lightning/standards/refresh.sh)
+          shellcheck -S warning "${files[@]}" 2>&1 | tee /tmp/ci-shellcheck.log
 
       - name: Comment failure log on PR
         if: failure() && github.event_name == 'pull_request'
@@ -50,22 +73,89 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           {
-            printf '## CI: bats unit tests failed\n\n'
+            printf '## CI: unit tests failed\n\n'
             printf 'Workflow run: %s\n\n' "$RUN_URL"
             printf 'Commit: `%s`\n\n' "$GITHUB_SHA"
-            printf '```\n'
-            tail -c 60000 bats.log
-            printf '```\n'
-          } > pr-comment.md
-          gh pr comment "$PR_NUMBER" --body-file pr-comment.md
+            for f in /tmp/ci-bats.log /tmp/ci-pytest.log /tmp/ci-shellcheck.log; do
+              [ -f "$f" ] || continue
+              name=$(basename "$f" .log | sed 's/^ci-//')
+              printf '<details><summary><code>%s</code> (last 200 lines)</summary>\n\n```\n' "$name"
+              tail -n 200 "$f"
+              printf '\n```\n\n</details>\n\n'
+            done
+          } > /tmp/pr-comment.md
+          gh pr comment "$PR_NUMBER" --body-file /tmp/pr-comment.md
 
       - name: Upload bats log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bats-log
-          path: bats.log
+          path: /tmp/ci-bats.log
           if-no-files-found: ignore
+
+  coverage:
+    name: kcov coverage
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install test deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bats dc xxd sqlite3 jq python3 qrencode openssl stow
+      - name: install kcov build deps
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential pkg-config python3-pyelftools \
+            libcurl4-openssl-dev libelf-dev libstdc++-12-dev \
+            zlib1g-dev libdw-dev libiberty-dev binutils-dev libssl-dev
+      - name: cache kcov binary
+        id: kcov-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/bin/kcov
+            /usr/local/share/doc/kcov
+            /usr/local/share/man/man1/kcov.1
+          key: kcov-v43-${{ runner.os }}-${{ runner.arch }}
+      - name: build kcov from source
+        if: steps.kcov-cache.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp
+          curl -fsSL -o kcov.tgz https://github.com/SimonKagstrom/kcov/archive/refs/tags/v43.tar.gz
+          tar xzf kcov.tgz
+          cd kcov-43
+          mkdir build && cd build
+          cmake -DCMAKE_BUILD_TYPE=Release ..
+          make -j"$(nproc)"
+          sudo make install
+      - name: configure
+        run: ./configure --prefix="$HOME/.local"
+      - name: run coverage
+        run: make coverage
+      - name: summarize coverage
+        if: always()
+        run: |
+          {
+            echo "## Coverage"
+            if [ -f build/bitcoin/coverage/bats/coverage.json ]; then
+              pct=$(jq -r .percent_covered build/bitcoin/coverage/bats/coverage.json)
+              printf -- "- line coverage: **%s%%**\n" "$pct"
+            else
+              echo "- coverage.json not produced; check the run-coverage step output"
+            fi
+            echo "- HTML report uploaded as artifact \`coverage-html\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: upload coverage HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build/bitcoin/coverage/
+          retention-days: 14
 
   lint:
     name: shellcheck + cmd-names
@@ -78,14 +168,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       # Gating: catches the BUG-013/014/016 family (command:<name> calls
-      # with no matching definition). Verified clean on the tree.
+      # with no matching definition).
       - name: lint-cmd-names
         run: tools/lint-cmd-names
 
       # Advisory for now (FEAT-049): the tree is not yet clean under
-      # `shellcheck -S warning` (e.g. bip350 has array-quoting findings),
-      # so this reports without failing the gate. Promote to blocking
-      # once swept clean — tracked as FEAT-052.
+      # `shellcheck -S warning`, so this reports without failing the gate.
       - name: shellcheck (advisory)
         continue-on-error: true
         run: shellcheck -S warning bin/* $(find libexec/bitcoin -type f)

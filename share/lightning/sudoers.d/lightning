@@ -1,0 +1,110 @@
+# Sudoers fragment for the FEAT-196 well-known JSON API.
+#
+# Apache (www-data) crosses into the operator's account to run
+# the narrow `lightning api-*` verbs. Each glob constrains
+# argument shape (lowercase user, numeric sat); the api-* verbs
+# enforce the same constraints again.
+#
+# Install with `make install-apache-bridge`. Do not edit
+# directly under /etc/sudoers.d/ — re-run the make target to
+# regenerate.
+#
+# Replace `alice` below with the operator account name.
+
+www-data ALL=(alice) NOPASSWD: \
+    /usr/local/bin/lightning api-recv    [a-z][a-zA-Z0-9_-]* [0-9]* *, \
+    /usr/local/bin/lightning api-send    [a-z][a-zA-Z0-9_-]* *@*.* [0-9]* * *, \
+    /usr/local/bin/lightning api-balance [a-z][a-zA-Z0-9_-]*, \
+    /usr/local/bin/lightning api-verify  [a-z][a-zA-Z0-9_-]* read *, \
+    /usr/local/bin/lightning api-verify  [a-z][a-zA-Z0-9_-]* write *, \
+    /usr/local/bin/lightning api-accounts-create, \
+    /usr/local/bin/lightning api-accounts-create --hint *, \
+    /usr/local/bin/lightning api-accounts-create --invite-code *, \
+    /usr/local/bin/lightning api-accounts-create --hint * --invite-code *, \
+    /usr/local/bin/lightning api-accounts-create --invite-code * --hint *, \
+    /usr/local/bin/lightning api-account-referrals     bc1*, \
+    /usr/local/bin/lightning api-account-referrals     tb1*, \
+    /usr/local/bin/lightning api-account-referrals     bcrt1*, \
+    /usr/local/bin/lightning api-account-invite-codes  bc1*, \
+    /usr/local/bin/lightning api-account-invite-codes  tb1*, \
+    /usr/local/bin/lightning api-account-invite-codes  bcrt1*, \
+    /usr/local/bin/lightning api-account-transfer      bc1* * [0-9]*, \
+    /usr/local/bin/lightning api-account-transfer      tb1* * [0-9]*, \
+    /usr/local/bin/lightning api-account-transfer      bcrt1* * [0-9]*, \
+    /usr/local/bin/lightning api-account-invoice       bc1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-invoice       tb1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-invoice       bcrt1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-invoice-get   bc1* *, \
+    /usr/local/bin/lightning api-account-invoice-get   tb1* *, \
+    /usr/local/bin/lightning api-account-invoice-get   bcrt1* *, \
+    /usr/local/bin/lightning api-account-standing-order bc1* *, \
+    /usr/local/bin/lightning api-account-standing-order tb1* *, \
+    /usr/local/bin/lightning api-account-standing-order bcrt1* *, \
+    /usr/local/bin/lightning api-account-mandate       bc1* *, \
+    /usr/local/bin/lightning api-account-mandate       tb1* *, \
+    /usr/local/bin/lightning api-account-mandate       bcrt1* *, \
+    /usr/local/bin/lightning api-account-mandate-pull  bc1* *, \
+    /usr/local/bin/lightning api-account-mandate-pull  tb1* *, \
+    /usr/local/bin/lightning api-account-mandate-pull  bcrt1* *, \
+    /usr/local/bin/lightning api-account-charge        bc1* *, \
+    /usr/local/bin/lightning api-account-charge        tb1* *, \
+    /usr/local/bin/lightning api-account-charge        bcrt1* *, \
+    /usr/local/bin/lightning export tax-data           bc1* *, \
+    /usr/local/bin/lightning export tax-data           tb1* *, \
+    /usr/local/bin/lightning export tax-data           bcrt1* *, \
+    /usr/local/bin/lightning price now --base [A-Z]*, \
+    /usr/local/bin/lightning api-account-verify        bc1* *, \
+    /usr/local/bin/lightning api-account-verify        tb1* *, \
+    /usr/local/bin/lightning api-account-verify        bcrt1* *, \
+    /usr/local/bin/lightning api-account-balance       bc1*, \
+    /usr/local/bin/lightning api-account-balance       tb1*, \
+    /usr/local/bin/lightning api-account-balance       bcrt1*, \
+    /usr/local/bin/lightning api-account-topup         bc1* [0-9]*, \
+    /usr/local/bin/lightning api-account-topup         tb1* [0-9]*, \
+    /usr/local/bin/lightning api-account-topup         bcrt1* [0-9]*, \
+    /usr/local/bin/lightning api-account-topup         bc1*, \
+    /usr/local/bin/lightning api-account-topup         tb1*, \
+    /usr/local/bin/lightning api-account-topup         bcrt1*, \
+    /usr/local/bin/lightning api-account-close         bc1*, \
+    /usr/local/bin/lightning api-account-close         tb1*, \
+    /usr/local/bin/lightning api-account-close         bcrt1*, \
+    /usr/local/bin/lightning api-account-recv          bc1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-recv          tb1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-recv          bcrt1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-recv-reusable bc1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-recv-reusable tb1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-recv-reusable bcrt1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-recv-reusable bc1* any *, \
+    /usr/local/bin/lightning api-account-recv-reusable tb1* any *, \
+    /usr/local/bin/lightning api-account-recv-reusable bcrt1* any *, \
+    /usr/local/bin/lightning api-account-pay           bc1* * *, \
+    /usr/local/bin/lightning api-account-pay           tb1* * *, \
+    /usr/local/bin/lightning api-account-pay           bcrt1* * *, \
+    /usr/local/bin/lightning api-account-withdraw      bc1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-withdraw      tb1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-withdraw      bcrt1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-history       bc1* *, \
+    /usr/local/bin/lightning api-account-history       tb1* *, \
+    /usr/local/bin/lightning api-account-history       bcrt1* *, \
+    /usr/local/bin/lightning api-account-apikey        bc1*, \
+    /usr/local/bin/lightning api-account-apikey        tb1*, \
+    /usr/local/bin/lightning api-account-apikey        bcrt1*, \
+    /usr/local/bin/lightning api-node-info, \
+    /usr/local/bin/lightning api-account-history-note  bc1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-history-note  tb1* [0-9]* *, \
+    /usr/local/bin/lightning api-account-history-note  bcrt1* [0-9]* *, \
+    /usr/local/bin/lightning api-channel-list, \
+    /usr/local/bin/lightning invoice-decode *, \
+    /usr/local/bin/lightning node-funds, \
+    /usr/local/bin/lightning api-price, \
+    /usr/local/bin/lightning api-price --base *, \
+    /usr/local/bin/lightning api-fee-list, \
+    /usr/local/bin/lightning api-forward-stats, \
+    /usr/local/bin/lightning api-peer-summary, \
+    /usr/local/bin/lightning api-node-health, \
+    /usr/local/bin/lightning api-node-peers-score, \
+    /usr/local/bin/lightning api-payment-status *, \
+    /usr/local/bin/lightning api-invoice-status *, \
+    /usr/local/bin/lightning api-account-describe bc1* *, \
+    /usr/local/bin/lightning api-account-describe tb1* *, \
+    /usr/local/bin/lightning api-account-describe bcrt1* *

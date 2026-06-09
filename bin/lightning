@@ -1,0 +1,231 @@
+#!/bin/bash
+
+############################################################################
+# Configuration section
+############################################################################
+
+# This should always be the first line of code to facilitate debugging.
+[ -n "$SELF_DEBUG" ] && set -vx
+
+# VERSION source of truth: the root VERSION file (dev tree) or
+# $PREFIX/share/lightning/version (installed, copied from VERSION at
+# package time).  The hardcoded value is the last resort if every file
+# is missing.
+__d="$(cd "$(dirname "$0")" && pwd)"; __s="$(basename "$0")"
+# FEAT-170: when invoked as `lightning.sh` (symlink), present as `lightning`.
+__s="${__s%.sh}"
+VERSION=$(cat "$__d/../VERSION" 2>/dev/null \
+	|| cat "$__d/../share/$__s/version" 2>/dev/null \
+	|| echo '2.0.0')
+unset __d
+SELF=$__s
+export SELF
+unset __s
+
+# Resolve $SELF_LIBEXEC (FEAT-001 libexec convention).
+if [ -z "$SELF_LIBEXEC" ]; then
+	for _d in \
+		"$(cd "$(dirname "$0")/../libexec" 2>/dev/null && pwd)" \
+		"$HOME/.local/libexec" \
+		"/usr/local/libexec" \
+		"/usr/libexec"; do
+		[ -d "$_d/$SELF" ] && SELF_LIBEXEC="$_d" && break
+	done
+	unset _d
+fi
+# Export so sub-verbs can chain into sibling verbs (e.g. `channel list`
+# delegating to `channels`, `invoice --qr` reaching `qr`).
+export SELF_LIBEXEC
+
+# Logging — rpk convention: "$SELF - <level>: <msg>" with ANSI colors.
+# Levels (see also rpk's skills/logging.md):
+#   fatal  red    — unrecoverable, exits 1
+#   error  red    — recoverable failure, doesn't exit
+#   warn   yellow — degraded but continuing (honours -q unless -v)
+#   info   green  — normal outcomes (honours -q unless -v)
+#   debug  grey   — internal diagnostics (only under -d or -v)
+fatal() {
+	# Always exits 1 (rpk convention). For other exit codes, use
+	# `error "..."; exit N` — keeps fatal's signature unambiguous.
+	echo -e "$SELF - fatal: \033[31;m$*\033[0m" >&2
+	exit 1
+}
+
+error() {
+	echo -e "$SELF - error: \033[31;m$*\033[0m" >&2
+}
+
+debug() {
+	# Activates under both -d (which also flips bash xtrace) and -v.
+	if [ -n "$SELF_DEBUG" ] || [ -n "$SELF_VERBOSE" ]; then
+		echo -e "$SELF - debug: \033[90;m$*\033[0m" >&2
+	fi
+}
+
+info() {
+	# -q suppresses, -v overrides -q.
+	if [ -n "$SELF_VERBOSE" ] || [ -z "$SELF_QUIET" ]; then
+		echo -e "$SELF - info:  \033[32;m$*\033[0m" >&2
+	fi
+}
+
+warn() {
+	if [ -n "$SELF_VERBOSE" ] || [ -z "$SELF_QUIET" ]; then
+		echo -e "$SELF - warn:  \033[33;1;m$*\033[0m" >&2
+	fi
+}
+
+# Kept for back-compat with old call sites — equivalent to bare echo+exit.
+die() {
+	echo "$1" >&2
+	exit "${2:-1}"
+}
+
+fatal() {
+	echo "$SELF: fatal - $1" >&2
+	exit "${2:-1}"
+}
+
+# Checks if a certain function exists.
+has() {
+	local KIND=$1
+	local NAME=$2
+	type -t $KIND:$NAME | grep -q function
+}
+
+# Export the helpers so libexec verbs inherit them across exec. Bash
+# encodes exported functions via BASH_FUNC_* env entries; the child
+# shell re-evaluates them on startup. Means each libexec script can
+# call info/warn/fatal/etc. without sourcing this file.
+export -f fatal error debug info warn die has
+
+############################################################################
+# Commands
+############################################################################
+
+# shellcheck disable=SC2120  # callers may pass a verb name; the no-arg form prints global help.
+command:help() {
+	# `lightning help <verb>` routes to help:<verb> (rpk convention).
+	if [[ $# -gt 0 ]]; then
+		local verb=$1
+		if has command "$verb"; then
+			if has help "$verb"; then
+				help:$verb
+			else
+				echo "No help found for '$verb' — try '$SELF $verb --help'." >&2
+				return 3
+			fi
+		elif [ -x "$SELF_LIBEXEC/$SELF/$verb" ]; then
+			# Delegate to the object dispatcher's own --help.
+			exec "$SELF_LIBEXEC/$SELF/$verb" --help
+		else
+			echo "'$verb' is not a $SELF command. Run '$SELF help'." >&2
+			return 2
+		fi
+		return 0
+	fi
+
+	cat >&2 <<ENDHELP
+$SELF version $VERSION
+
+A Lightning Network command-line interface for clightning (Core Lightning).
+
+Usage:
+  $SELF [options] <command> [args]
+  $SELF help <command>
+
+Options:
+  -d                Debug mode (bash xtrace + verbose)
+  -v                Verbose mode
+  -q                Quiet mode (warnings suppressed)
+  -f                Force mode (bypass safety checks)
+
+Commands:
+  Node & daemon:
+    node            Node identity, Tor, watchtower
+    daemon          Start/stop/install lightningd
+    statistics      Node stats, gossip, funds, forwarding summaries
+    plugin          Plugin management (reckless) + runtime load/stop
+
+  Channels & peers:
+    channel         Open/close, fees, fee-policy, rebalance, liquidity
+    peer            Connect, list, score peers
+
+  Payments:
+    pay             Send payments (BOLT-11, BOLT-12, keysend)
+    req             Request payments (invoice, offer, decode, QR)
+
+  Wallet & accounts:
+    wallet          Balance, keys, backup, history, compliance
+    account         Virtual accounts
+    address         Lightning Address + LNURL
+
+  Other:
+    price           Sat/fiat price oracle
+    help            Show this help
+
+Run '$SELF help <command>' or '$SELF <command> --help' for details,
+and see lightning(1) for environment variables and standards docs.
+ENDHELP
+}
+
+help:help() {
+	cat >&2 <<ENDHELP
+usage: $SELF help [<command>]
+
+Print the top-level help, or, when <command> is given, print the
+detailed help for that command. For object dispatchers this is
+equivalent to '$SELF <command> --help'.
+ENDHELP
+}
+
+command:version() {
+	echo "$VERSION"
+}
+
+help:version() {
+	cat >&2 <<ENDHELP
+usage: $SELF version
+
+Print the $SELF version string. Source of truth: the root VERSION file
+in the dev tree, or share/$SELF/version in an installed bundle.
+ENDHELP
+}
+
+############################################################################
+# Command-line processing
+############################################################################
+
+# FEAT-170: source-mode guard. When sourced (via `. lightning.sh`),
+# define functions but do not execute the dispatcher.
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
+
+while getopts "dqvf" _flag; do
+	case "$_flag" in
+		d) SELF_DEBUG=1; SELF_VERBOSE=1 ;;
+		q) SELF_QUIET=1 ;;
+		v) SELF_VERBOSE=1 ;;
+		f) SELF_FORCE=1 ;;
+		*) command:help; exit 1 ;;
+	esac
+done
+export SELF_DEBUG SELF_VERBOSE SELF_QUIET SELF_FORCE
+shift $((OPTIND - 1))
+unset _flag
+
+if [[ $# == 0 ]]; then
+	command:help
+	exit
+fi
+
+if has command "$1"; then
+	debug "executing command:$1 ${*:2}"
+	command:"$1" "${@:2}"
+	exit $?
+elif test -x "$SELF_LIBEXEC/$SELF/$1"; then
+	verb=$1; shift
+	debug "executing libexec/$SELF/$verb $*"
+	exec "$SELF_LIBEXEC/$SELF/$verb" "$@"
+fi
+
+fatal "unknown command $1 ${*:2}" 1
