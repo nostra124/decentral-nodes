@@ -17,8 +17,10 @@ verbosity from the same command.
 These are the remaining `FulcrumAdmin` commands beyond the inspection
 core (FEAT-058). They are genuinely supported by the admin RPC but are
 operational moderation controls with limited educational value, so
-they are split out at low priority and **not** assigned to a milestone
-yet. Builds on the `admin:_call` client from FEAT-058.
+they are kept at low priority. They are **scheduled for the 2.1.0
+milestone** (see `issues/ROADMAP-2.1.0.md`) so the `fulcrum` admin
+surface ships complete in one release. Builds on the `admin:_call`
+client from FEAT-058.
 
 ## Implementation
 
