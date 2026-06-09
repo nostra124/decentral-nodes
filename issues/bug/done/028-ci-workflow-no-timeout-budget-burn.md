@@ -2,7 +2,7 @@
 id: BUG-028
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # tests workflow has no timeout/concurrency guards — hung jobs burn the Actions budget
