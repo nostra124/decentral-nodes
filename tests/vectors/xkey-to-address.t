@@ -2,7 +2,7 @@
 
 # examples extracted from https://learnmeabitcoin.com/technical/derivation-paths
 
-. bitcoin.sh
+. bitcoin
 
 echo "1..60"
 

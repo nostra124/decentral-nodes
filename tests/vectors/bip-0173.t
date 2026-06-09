@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-. bitcoin.sh
+. bitcoin
 # FEAT-024: shared vectors live in _bech32_common.sh (single source
 # of truth across bip-0173.t and bip-0350.t).
 . "$(dirname "$BASH_SOURCE")/_bech32_common.sh"

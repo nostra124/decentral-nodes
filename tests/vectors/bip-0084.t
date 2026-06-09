@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 LANG=C
-. bitcoin.sh
+. bitcoin
 
 declare -i n=0
 

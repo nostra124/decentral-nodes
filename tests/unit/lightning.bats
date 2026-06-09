@@ -2,7 +2,7 @@
 #
 # Unit tests for bin/lightning — the educational Lightning Network
 # frontend on clightning (FEAT-170..206). Covers the 0.2.0–0.7.0
-# surface: dispatcher, lightning.sh source-mode guard, and the
+# surface: dispatcher, source-mode guard, and the
 # libexec object dispatchers (wallet / channel / daemon / account /
 # ledger / invoice / offer / address / lnurl / liquidity / plugin /
 # peer / fee / alert). As of 0.5.x the CLI is purely object-oriented:
@@ -167,17 +167,11 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# FEAT-170: source-mode guard + bin/lightning.sh symlink
+# FEAT-170: source-mode guard
 # ---------------------------------------------------------------------------
 
-@test "FEAT-170: bin/lightning.sh symlink resolves to lightning" {
-	local sh="$(dirname "$LIGHTNING_BIN")/lightning.sh"
-	[ -L "$sh" ]
-	[ "$(readlink "$sh")" = "lightning" ]
-}
-
-@test "FEAT-170: sourcing lightning.sh defines functions without dispatch" {
-	local sh="$(dirname "$LIGHTNING_BIN")/lightning.sh"
+@test "FEAT-170: sourcing the dispatcher defines functions without dispatch" {
+	local sh="$LIGHTNING_BIN"
 	# Source in a subshell; should NOT print help (the dispatcher must
 	# return early) but should define `command:version`.
 	run bash -c ". '$sh'; type -t command:version"
@@ -1721,7 +1715,7 @@ EOF
 	[ -f "$f" ]
 	grep -q "_lightning()" "$f"
 	grep -q "^complete -F _lightning lightning$" "$f"
-	grep -q "^complete -F _lightning lightning.sh$" "$f"
+	grep -q "^complete -F _lightning lightning$" "$f"
 }
 
 @test "FEAT-177: bash completion sources cleanly" {
@@ -2696,10 +2690,10 @@ EOF
 
 # --- bin/lightning dispatcher edge cases -----------------------------------
 
-@test "1.2.0 ext: sourced lightning.sh doesn't run getopts on host's argv" {
+@test "1.2.0 ext: sourced dispatcher doesn't run getopts on host's argv" {
 	# Regression: getopts in a sourced script can chew host's argv.
 	# After sourcing, $1 should still be whatever the host had.
-	local sh="$(dirname "$LIGHTNING_BIN")/lightning.sh"
+	local sh="$LIGHTNING_BIN"
 	run bash -c "set -- foo bar; . '$sh'; echo \"\$1\""
 	[ "$status" -eq 0 ]
 	[ "$output" = "foo" ]

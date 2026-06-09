@@ -31,8 +31,8 @@ whole-chain indexing external to bitcoin, consistent with the scope
 note in CLAUDE.md §1 (bitcoin delegates to an indexer rather than
 reimplementing one — exactly as it already does with mempool.space).
 
-Depends on the 1.35.0 milestone (a runnable Fulcrum server). Targets
-the 1.36.0 milestone.
+Depends on the 2.1.0 milestone (a runnable Fulcrum server). Targets
+the 2.2.0 milestone.
 
 ## Implementation
 
