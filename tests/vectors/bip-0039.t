@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 LANG=C
-. bitcoin.sh
+. bitcoin
 
 shorten()
   if (( ${#1} > 12 ))

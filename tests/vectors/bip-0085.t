@@ -5,7 +5,7 @@
 # anchored `grep -q "^...$"` against piped output so a longer string
 # that contains the expected one can't pass falsely.
 
-. bitcoin.sh
+. bitcoin
 
 rootxprv=xprv9s21ZrQH143K2LBWUUQRFXhucrQqBpKdRRxNVq2zBqsx8HVqFk2uYo8kmbaLLHRdqtQpUm98uKfu3vca1LqdGhUtyoFnCNkfmXRyPXLjbKb
 

@@ -39,7 +39,6 @@ done
 
 cp -a bin/* "$TARGET/bin/"
 for cmd in $COMMANDS; do
-    [ -e "bin/$cmd" ] && ln -sf "$cmd" "$TARGET/bin/$cmd.sh"
     if [ -d "libexec/$cmd" ]; then
         cp -a "libexec/$cmd/"* "$TARGET/libexec/$cmd/"
     fi

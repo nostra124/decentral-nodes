@@ -60,11 +60,6 @@ install:
 		         $(BUILD_DIR)$(DATADIR)/$$p; \
 	done
 	@cp -a bin/* $(BUILD_DIR)$(BINDIR)/
-	# FEAT-006: install a `<cmd>.sh` symlink alongside each binary so
-	# vector tests can `. <cmd>.sh` from PATH. The source tree stays clean.
-	@for p in $(PACKAGES); do \
-		[ -e bin/$$p ] && ln -sf $$p $(BUILD_DIR)$(BINDIR)/$$p.sh; \
-	done
 	@for p in $(PACKAGES); do \
 		if [ -d libexec/$$p ]; then \
 			cp -a libexec/$$p/* $(BUILD_DIR)$(LIBEXECDIR)/$$p/; \
@@ -147,7 +142,6 @@ check-vectors:
 	fi; \
 	if [ -d tests/vectors ] && command -v prove >/dev/null 2>&1; then \
 		d=$$(mktemp -d); \
-		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin.sh; \
 		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin; \
 		for p in libexec/bitcoin/*; do \
 			[ -e "$$p" ] && ln -s $$(pwd)/$$p $$d/$$(basename $$p); \

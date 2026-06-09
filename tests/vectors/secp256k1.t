@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-. bitcoin.sh
+. bitcoin
 
 declare -i t
 
