@@ -1,0 +1,77 @@
+.TH FULCRUM 1 "2026" "bitcoin stack" "User Commands"
+.SH NAME
+fulcrum \- manage a Fulcrum Electrum server alongside bitcoin
+.SH SYNOPSIS
+.B fulcrum
+.RI [ options ]
+.I command
+.RI [ args ]
+.SH DESCRIPTION
+.B fulcrum
+is a peer command to
+.BR bitcoin (1),
+shipped from the same package. It stands up, configures, inspects, and
+moderates a Fulcrum Electrum server that indexes the local bitcoind.
+Fulcrum is an independent daemon, not a wallet feature \(em hence a
+separate top-level command sharing one package and one version.
+.SH COMMANDS
+.SS Server lifecycle (FEAT-056)
+.TP
+.B install " [--from brew|apt|source|docker]"
+Install the Fulcrum server binary.
+.TP
+.B enable " [--user|--system]"
+Render and install a systemd/launchd unit and start the server. Fails
+if the local bitcoind RPC is unreachable.
+.TP
+.B disable " [--user|--system]"
+Stop the service and remove its unit; the index is preserved.
+.TP
+.BR start ", " stop ", " monitor " [--user|--system]"
+Start, stop, or follow the running service.
+.TP
+.B space " [--user|--system]"
+Show the Fulcrum index disk usage.
+.SS Configuration (FEAT-057)
+.TP
+.B config init " [--ssl|--no-ssl]"
+Write a curated
+.I fulcrum.conf
+wired to the local node (cookie auth by default, or rpcuser/rpcpassword
+from the secret store when rpcauth is configured).
+.TP
+.BR "config show" ", " "config get " \fIkey\fR ", " "config set " "\fIkey val\fR"
+Inspect or edit a curated allow-list of keys.
+.TP
+.B config validate
+Check node reachability, cert presence, and free ports.
+.TP
+.B cert " [--force]"
+Generate the self-signed TLS cert+key the SSL port requires.
+.SS Admin inspection (FEAT-058)
+.TP
+.BR info ", " sync ", " stats ", " clients ", " "logs [-f]"
+Query the Fulcrum admin port: server info, sync progress vs the node
+tip, raw stats, connected clients, and the service journal.
+.SS Admin moderation (FEAT-060)
+.TP
+.BR peers ", " "addpeer " \fIhost\fR ", " "rmpeer " \fIhost\fR
+List and manage peers.
+.TP
+.BR "ban " \fIid|ip\fR ", " "unban " \fIip\fR ", " banlist ", " "kick " \fIid|ip\fR
+Ban, unban, list bans, and disconnect clients.
+.TP
+.B loglevel " normal|debug|trace"
+Set the server's runtime log verbosity.
+.SH FILES
+.TP
+.I ~/.config/fulcrum/fulcrum.conf
+Default per-user configuration file.
+.TP
+.I ~/.fulcrum
+Default per-user index data directory.
+.SH SEE ALSO
+.BR bitcoin (1),
+.BR lightning (1)
+.SH HISTORY
+Added in the 2.1.0 release (FEAT-055..058, FEAT-060).

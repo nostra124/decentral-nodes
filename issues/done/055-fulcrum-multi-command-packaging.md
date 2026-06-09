@@ -2,7 +2,7 @@
 id: FEAT-055
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # Ship a second command (`bin/fulcrum`) from the bitcoin package

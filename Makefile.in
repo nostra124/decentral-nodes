@@ -27,7 +27,7 @@ MANDIR    = @MANDIR@
 
 # The commands this one package ships. Each has bin/<cmd>, libexec/<cmd>/,
 # share/<cmd>/, share/doc/<cmd>/. Add fulcrum here when it lands.
-PACKAGES = bitcoin lightning
+PACKAGES = bitcoin lightning fulcrum
 
 BUILD_DIR = build/$(PACKAGE)
 

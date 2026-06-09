@@ -9,7 +9,7 @@ VERSION=$1
 # bin/<cmd>, libexec/<cmd>/, share/<cmd>/, share/doc/<cmd>/). bitcoin is
 # the rpk identity; lightning was merged in from nostra124/lightning. A
 # future fulcrum command (FEAT-055..060) slots into this same list.
-COMMANDS="bitcoin lightning"
+COMMANDS="bitcoin lightning fulcrum"
 
 test -z "$VERSION" && VERSION=$(rpk versions | tail -1)
 
