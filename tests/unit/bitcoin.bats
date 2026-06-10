@@ -2797,3 +2797,119 @@ FEAT047_PUBKEY="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"generate"* ]]
 }
+
+# ---------------------------------------------------------------------------
+# FEAT-059 — fulcrum (Electrum protocol) backend. The Electrum client
+# lives inside bin/bitcoin (no shelling out to the `fulcrum` command,
+# CLAUDE.md §4). The socket is stubbed with canned JSON via
+# $BITCOIN_FULCRUM_FIXTURE (a dir of <electrum.method>.json files).
+# ---------------------------------------------------------------------------
+
+# Accumulate a canned reply for one Electrum method into the fixture dir.
+fulcrum_fixture() {
+	: "${FULCRUM_FX:=$BATS_TMPDIR/ffx-$BATS_TEST_NUMBER}"
+	mkdir -p "$FULCRUM_FX"
+	printf '%s' "$2" > "$FULCRUM_FX/$1.json"
+	export BITCOIN_FULCRUM_FIXTURE="$FULCRUM_FX"
+}
+
+@test "FEAT-059 AC1 — backend set fulcrum then backend reports fulcrum active" {
+	setup_backend_env
+	run "$BITCOIN_BIN" backend set fulcrum
+	[ "$status" -eq 0 ]
+	[ "$(cat "$XDG_CONFIG_HOME/bitcoin/backend")" = "fulcrum" ]
+	run "$BITCOIN_BIN" backend
+	[ "$output" = "fulcrum" ]
+}
+
+@test "FEAT-059 AC2 — get-address-utxos reshapes listunspent; summed .value matches" {
+	setup_backend_env
+	export BITCOIN_BACKEND=fulcrum
+	fulcrum_fixture blockchain.scripthash.listunspent \
+		'{"id":1,"result":[{"tx_hash":"aa","tx_pos":0,"value":50000,"height":800000},{"tx_hash":"bb","tx_pos":1,"value":25000,"height":0}]}'
+	run "$BITCOIN_BIN" backend get-address-utxos bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+	[ "$status" -eq 0 ]
+	# Same shape the mempool backend emits (.value per utxo).
+	[ "$(printf '%s' "$output" | jq '[.[].value] | add')" = "75000" ]
+	[[ "$output" == *'"txid":"aa"'* ]]
+}
+
+@test "FEAT-059 AC3 — chain-height returns headers.subscribe height" {
+	setup_backend_env
+	export BITCOIN_BACKEND=fulcrum
+	fulcrum_fixture blockchain.headers.subscribe '{"id":1,"result":{"height":800123}}'
+	run "$BITCOIN_BIN" backend chain-height
+	[ "$status" -eq 0 ]
+	[ "$output" = "800123" ]
+}
+
+@test "FEAT-059 AC3 — get-address-txs returns get_history entries" {
+	setup_backend_env
+	export BITCOIN_BACKEND=fulcrum
+	fulcrum_fixture blockchain.scripthash.get_history \
+		'{"id":1,"result":[{"tx_hash":"cc","height":799000}]}'
+	run "$BITCOIN_BIN" backend get-address-txs bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4
+	[ "$status" -eq 0 ]
+	[[ "$output" == *'"txid":"cc"'* ]]
+}
+
+@test "FEAT-059 AC3 — estimate-fee converts BTC/kvB to sat/vB" {
+	setup_backend_env
+	export BITCOIN_BACKEND=fulcrum
+	fulcrum_fixture blockchain.estimatefee '{"id":1,"result":0.00002}'
+	run "$BITCOIN_BIN" backend estimate-fee 3
+	[ "$status" -eq 0 ]
+	[ "$output" = "2" ]
+}
+
+@test "FEAT-059 AC4 — broadcast returns the txid from the reply" {
+	setup_backend_env
+	export BITCOIN_BACKEND=fulcrum
+	fulcrum_fixture blockchain.transaction.broadcast '{"id":1,"result":"deadbeeftxid"}'
+	run "$BITCOIN_BIN" backend broadcast 0200000001abcd
+	[ "$status" -eq 0 ]
+	[ "$output" = "deadbeeftxid" ]
+}
+
+@test "FEAT-059 AC4 — broadcast surfaces a server error as error + non-zero" {
+	setup_backend_env
+	export BITCOIN_BACKEND=fulcrum
+	fulcrum_fixture blockchain.transaction.broadcast \
+		'{"id":1,"error":{"message":"bad-txns-inputs-missingorspent"}}'
+	run "$BITCOIN_BIN" backend broadcast 0200000001abcd
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"bad-txns-inputs-missingorspent"* ]]
+}
+
+@test "FEAT-059 AC5 — a connection failure errors (naming the host) and exits non-zero" {
+	setup_backend_env
+	export BITCOIN_BACKEND=fulcrum
+	unset BITCOIN_FULCRUM_FIXTURE
+	export BITCOIN_FULCRUM_ADDR=127.0.0.1:65533    # closed port, no fixture
+	run "$BITCOIN_BIN" backend chain-height
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"65533"* ]]
+	[ -z "$output" ] && { echo "expected non-empty error"; return 1; } || true
+}
+
+@test "FEAT-059 AC6 — wallet balance sums correctly with the fulcrum backend" {
+	setup_wallet_derive_env
+	export BITCOIN_BACKEND=fulcrum
+	"$BITCOIN_BIN" wallet derive alice >/dev/null
+	# One queried address; listunspent totals 12345 + 6789 = 19134.
+	fulcrum_fixture blockchain.scripthash.listunspent \
+		'{"id":1,"result":[{"tx_hash":"aa","tx_pos":0,"value":12345,"height":800000},{"tx_hash":"bb","tx_pos":1,"value":6789,"height":800001}]}'
+	run "$BITCOIN_BIN" wallet balance alice
+	[ "$status" -eq 0 ]
+	[ "$output" = "19134" ]
+}
+
+@test "FEAT-059 AC7 — the fulcrum backend never invokes the 'fulcrum' command" {
+	# Boundary: bin/bitcoin must not shell out to the fulcrum/fulcrumd
+	# command (the backend speaks Electrum directly). Function names like
+	# backend:fulcrum:... are fine; a bare 'fulcrum '/'fulcrumd ' command
+	# at statement start or in $(...) is the violation.
+	script="$BITCOIN_BIN"
+	! grep -qE "^[[:space:]]*fulcrumd?[[:space:]]" "$script"
+	! grep -qE "\\\$\\([[:space:]]*fulcrumd?[[:space:]]" "$script"
+}
