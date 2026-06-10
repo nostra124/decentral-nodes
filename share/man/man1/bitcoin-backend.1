@@ -36,12 +36,26 @@ inherited from
 
 .SH DESCRIPTION
 .B bitcoin backend
-abstracts the chain-data source. Three backends are scaffolded:
+abstracts the chain-data source. Four backends are registered:
 .BR mempool " (mempool.space REST API),"
+.BR fulcrum " (a local Fulcrum Electrum server, FEAT-059),"
 .BR bitcoind " (local Bitcoin Core JSON-RPC), and"
 .BR blockstream " (blockstream.info REST API)."
-Only the mempool implementation is wired in this release; calling
-the others' verbs returns a clear "not implemented" error.
+The
+.B mempool
+and
+.B fulcrum
+implementations are wired in this release. The
+.B fulcrum
+backend speaks the Electrum protocol to the server's tcp/ssl port
+.RB ( $BITCOIN_FULCRUM_ADDR ", default 127.0.0.1:50001),"
+mapping each address to its scripthash; run the server with
+.BR fulcrum (1).
+.B bitcoind
+and
+.B blockstream
+are scaffolded; calling their verbs returns a clear "not implemented"
+error.
 
 The "active backend" is, in priority order, the
 .B BITCOIN_BACKEND

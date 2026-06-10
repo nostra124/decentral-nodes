@@ -2,7 +2,7 @@
 id: FEAT-059
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # `bitcoin backend set fulcrum` — query the local Electrum server
