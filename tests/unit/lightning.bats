@@ -97,10 +97,10 @@ EOF
 	[ -x "$LIGHTNING_BIN" ]
 }
 
-@test "lightning version returns 3.0.0" {
+@test "lightning version returns 3.1.0" {
 	run "$LIGHTNING_BIN" version
 	[ "$status" -eq 0 ]
-	[ "$output" = "3.0.0" ]
+	[ "$output" = "3.1.0" ]
 }
 
 @test "lightning version comes from the root VERSION file" {
@@ -285,10 +285,29 @@ EOF
 	fi
 	# Stub lightningd so enable's ExecStart resolves.
 	ln -sf /bin/true "$BIN_SHIM/lightningd"
-	run "$LIGHTNING_BIN" daemon enable
+	# FEAT-264: --user is now explicit (bare enable defaults to --system).
+	run "$LIGHTNING_BIN" daemon enable --user
 	[ "$status" -eq 0 ]
 	[ -f "$HOME/.config/systemd/user/lightning.service" ]
 	grep -q "Description=Lightning Network daemon" "$HOME/.config/systemd/user/lightning.service"
+}
+
+@test "FEAT-264: lightning daemon enable defaults to --system" {
+	# Bare enable now resolves to system mode. Prove it without root via the
+	# system-only migrate guard: with a user-mode ~/.lightning present the
+	# system installer refuses (exit 3). install_user has no such guard, so
+	# this would have written a user unit and exited 0 under the old default.
+	# Cross-platform: install_system (Linux) and install_macos_system share
+	# the guard, and it fires before any sudo/privileged step.
+	ln -sf /bin/true "$BIN_SHIM/lightningd"
+	mkdir -p "$HOME/.lightning"
+	run "$LIGHTNING_BIN" daemon enable
+	[ "$status" -eq 3 ]
+	# The refusal is error-level (the "pass --migrate" hint is a warn, which
+	# the test fixture's SELF_QUIET=1 suppresses). "user-mode install
+	# detected" is printed only by the system installers, never install_user.
+	[[ "$output" == *"user-mode install detected"* ]]
+	[[ "$output" == *"refusing"* ]]
 }
 
 @test "FEAT-183: lightning daemon enable writes a LaunchAgent plist (macOS)" {
@@ -296,7 +315,7 @@ EOF
 		skip "macOS-only — Linux uses systemd"
 	fi
 	ln -sf /bin/true "$BIN_SHIM/lightningd"
-	run "$LIGHTNING_BIN" daemon enable
+	run "$LIGHTNING_BIN" daemon enable --user
 	[ "$status" -eq 0 ]
 	local plist="$HOME/Library/LaunchAgents/network.lightning.lightningd.plist"
 	[ -f "$plist" ]
@@ -435,7 +454,7 @@ EOF
 	fi
 	printf '#!/bin/sh\nexit 0\n' > "$BIN_SHIM/lightningd"
 	chmod +x "$BIN_SHIM/lightningd"
-	run "$LIGHTNING_BIN" daemon enable
+	run "$LIGHTNING_BIN" daemon enable --user
 	[ "$status" -eq 0 ]
 	local plist="$HOME/Library/LaunchAgents/network.lightning.lightningd.plist"
 	grep -q "<key>ThrottleInterval</key>" "$plist"
@@ -446,7 +465,7 @@ EOF
 	printf '#!/bin/sh\nexit 0\n' > "$BIN_SHIM/lightningd"
 	chmod +x "$BIN_SHIM/lightningd"
 	_stub_trustedcoin_curl
-	run "$LIGHTNING_BIN" daemon enable --trustedcoin
+	run "$LIGHTNING_BIN" daemon enable --user --trustedcoin
 	[ "$status" -eq 0 ]
 	[ -f "$HOME/.lightning/config" ]
 	grep -q "disable-plugin=bcli" "$HOME/.lightning/config"
@@ -465,7 +484,7 @@ EOF
 	# Fail loudly if curl gets called.
 	printf '#!/bin/sh\necho "curl should not be called" >&2; exit 99\n' > "$BIN_SHIM/curl"
 	chmod +x "$BIN_SHIM/curl"
-	run "$LIGHTNING_BIN" -v daemon enable --trustedcoin
+	run "$LIGHTNING_BIN" -v daemon enable --user --trustedcoin
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"already present"* ]]
 	[[ "$output" != *"fetching trustedcoin"* ]]
@@ -479,7 +498,7 @@ EOF
 	chmod +x "$BIN_SHIM/lightningd"
 	printf '#!/bin/sh\nexit 22\n' > "$BIN_SHIM/curl"
 	chmod +x "$BIN_SHIM/curl"
-	run "$LIGHTNING_BIN" daemon enable --trustedcoin
+	run "$LIGHTNING_BIN" daemon enable --user --trustedcoin
 	# Config is still written; download failure is surfaced.
 	grep -q "disable-plugin=bcli" "$HOME/.lightning/config"
 	[[ "$output" == *"failed to download"* ]]
@@ -494,7 +513,7 @@ EOF
 	chmod +x "$BIN_SHIM/lightningd"
 	# Hide go from PATH.
 	export PATH="$BIN_SHIM:/usr/bin:/bin"
-	run "$LIGHTNING_BIN" daemon enable --trustedcoin
+	run "$LIGHTNING_BIN" daemon enable --user --trustedcoin
 	grep -q "disable-plugin=bcli" "$HOME/.lightning/config"
 	[[ "$output" == *"doesn't ship a prebuilt macOS binary"* ]]
 	[[ "$output" == *"go install"* ]]
@@ -505,10 +524,10 @@ EOF
 	chmod +x "$BIN_SHIM/lightningd"
 	_stub_trustedcoin_curl
 	# First enable trustedcoin.
-	"$LIGHTNING_BIN" daemon enable --trustedcoin >/dev/null 2>&1
+	"$LIGHTNING_BIN" daemon enable --user --trustedcoin >/dev/null 2>&1
 	grep -q "disable-plugin=bcli" "$HOME/.lightning/config"
 	# Then disable.
-	run "$LIGHTNING_BIN" daemon enable --bitcoind
+	run "$LIGHTNING_BIN" daemon enable --user --bitcoind
 	[ "$status" -eq 0 ]
 	! grep -q "disable-plugin=bcli" "$HOME/.lightning/config"
 	! grep -q "lightning backend" "$HOME/.lightning/config"
@@ -518,9 +537,9 @@ EOF
 	printf '#!/bin/sh\nexit 0\n' > "$BIN_SHIM/lightningd"
 	chmod +x "$BIN_SHIM/lightningd"
 	_stub_trustedcoin_curl
-	"$LIGHTNING_BIN" daemon enable --trustedcoin >/dev/null 2>&1
-	"$LIGHTNING_BIN" daemon enable --trustedcoin >/dev/null 2>&1
-	"$LIGHTNING_BIN" daemon enable --trustedcoin >/dev/null 2>&1
+	"$LIGHTNING_BIN" daemon enable --user --trustedcoin >/dev/null 2>&1
+	"$LIGHTNING_BIN" daemon enable --user --trustedcoin >/dev/null 2>&1
+	"$LIGHTNING_BIN" daemon enable --user --trustedcoin >/dev/null 2>&1
 	# Exactly one block, not three.
 	local count; count=$(grep -c "lightning backend" "$HOME/.lightning/config" || true)
 	[ "$count" -eq 2 ]   # begin + end markers
@@ -540,7 +559,7 @@ disable-plugin=bcli
 sauron-api-endpoint=https://blockstream.info/api
 # <<< lightning esplora
 EOF
-	run "$LIGHTNING_BIN" daemon enable --trustedcoin
+	run "$LIGHTNING_BIN" daemon enable --user --trustedcoin
 	[ "$status" -eq 0 ]
 	# Legacy block is gone; user setting preserved; new block present.
 	! grep -q "lightning esplora" "$HOME/.lightning/config"
@@ -1986,7 +2005,7 @@ EOF
 @test "1.2.0: -q flag parses + version still prints" {
 	run "$LIGHTNING_BIN" -q version
 	[ "$status" -eq 0 ]
-	[ "$output" = "3.0.0" ]
+	[ "$output" = "3.1.0" ]
 }
 
 @test "1.2.0: -q -d flags compose (getopts handles both)" {
@@ -1996,7 +2015,7 @@ EOF
 	# second flag was lost or the verb was treated as a flag.
 	run "$LIGHTNING_BIN" -q -d version
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"3.0.0"* ]]
+	[[ "$output" == *"3.1.0"* ]]
 }
 
 @test "1.2.0: unknown flag exits non-zero" {
@@ -3743,18 +3762,24 @@ _openrc_common_setup() {
 	grep -qF "pidfile=\"$LIGHTNING_OPENRC_STATE/lightningd-bitcoin.pid\"" "$LIGHTNING_INIT_D/clightningd"
 }
 
-@test "FEAT-207: OpenRC enable --system is silent (no warning), --bare is the warning" {
+@test "FEAT-207/264: OpenRC enable is silent for --system and for a bare (now system) enable" {
 	_openrc_common_setup
-	run "$LIGHTNING_BIN" daemon enable --system
+	run "$LIGHTNING_BIN" -v daemon enable --system
 	[ "$status" -eq 0 ]
-	# Without --system on OpenRC the verb informs the operator that
-	# user-mode isn't an option.  With --system it just proceeds.
+	! [[ "$output" == *"no per-user mode"* ]]
+	# FEAT-264: bare enable defaults to system, which is what OpenRC always
+	# does — so there is nothing to flag. (Re-uses the same setup; enable is
+	# idempotent.)
+	run "$LIGHTNING_BIN" -v daemon enable
+	[ "$status" -eq 0 ]
 	! [[ "$output" == *"no per-user mode"* ]]
 }
 
-@test "FEAT-207: OpenRC enable without --system warns about no user-mode" {
+@test "FEAT-207/264: OpenRC enable --user warns it cannot honor per-user mode" {
 	_openrc_common_setup
-	run "$LIGHTNING_BIN" -v daemon enable
+	# Only an explicit --user is flagged now (OpenRC has no per-user mode);
+	# it still proceeds with the system-wide install.
+	run "$LIGHTNING_BIN" -v daemon enable --user
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"no per-user mode"* ]]
 }
@@ -3896,7 +3921,7 @@ EOF2
 		skip "Linux-only — checks the systemd timer files"
 	fi
 	# Don't trigger the systemd-system path; user-mode only.
-	run "$LIGHTNING_BIN" daemon enable --autopilot --no-keepalive --no-alert
+	run "$LIGHTNING_BIN" daemon enable --user --autopilot --no-keepalive --no-alert
 	[ "$status" -eq 0 ]
 	[ -f "$HOME/.config/systemd/user/lightning-autopilot.service" ]
 	[ -f "$HOME/.config/systemd/user/lightning-autopilot.timer" ]
@@ -3906,7 +3931,7 @@ EOF2
 
 @test "FEAT-205: daemon enable (no --autopilot) does NOT write the sidecar" {
 	# The autopilot sidecar is opt-in, unlike keepalive/alert.
-	run "$LIGHTNING_BIN" daemon enable --no-keepalive --no-alert
+	run "$LIGHTNING_BIN" daemon enable --user --no-keepalive --no-alert
 	[ "$status" -eq 0 ]
 	[ ! -e "$HOME/.config/systemd/user/lightning-autopilot.service" ]
 	[ ! -e "$HOME/.config/systemd/user/lightning-autopilot.timer" ]
@@ -4706,7 +4731,7 @@ _acct212pr4_teardown() {
 	if [ "$(uname -s)" = "Darwin" ]; then
 		skip "Linux-only — checks the systemd timer files"
 	fi
-	run "$LIGHTNING_BIN" daemon enable --reconcile --no-keepalive --no-alert
+	run "$LIGHTNING_BIN" daemon enable --user --reconcile --no-keepalive --no-alert
 	[ "$status" -eq 0 ]
 	[ -f "$HOME/.config/systemd/user/lightning-reconcile.service" ]
 	[ -f "$HOME/.config/systemd/user/lightning-reconcile.timer" ]
@@ -4716,7 +4741,7 @@ _acct212pr4_teardown() {
 
 @test "FEAT-244: daemon enable (no --reconcile) does NOT write the sidecar" {
 	# Opt-in, like the other watcher sidecars.
-	run "$LIGHTNING_BIN" daemon enable --no-keepalive --no-alert
+	run "$LIGHTNING_BIN" daemon enable --user --no-keepalive --no-alert
 	[ "$status" -eq 0 ]
 	[ ! -e "$HOME/.config/systemd/user/lightning-reconcile.timer" ]
 }

@@ -52,9 +52,12 @@ cli() { lightning-cli --lightning-dir="$LIGHTNING_DIR" --network="$LIGHTNING_NET
 
 is_macos() { [ "$(uname -s)" = "Darwin" ]; }
 
-# Resolve --user (default) or --system from the argument list.
-# Returns "user" or "system".  When not specified, auto-detects
-# from the installed supervisor state.
+# Resolve --user or --system from the argument list for the operate
+# verbs (start/stop/status/monitor/restart). Returns "user" or "system".
+# When not specified, auto-detects from the installed supervisor state
+# (system unit enabled → system; otherwise user). NOTE: the *install*
+# default (cmd_enable) is system since FEAT-264; this resolver is left
+# auto-detecting so operate verbs follow whatever is actually installed.
 daemon:_mode() {
 	local mode=""
 	while [ $# -gt 0 ]; do
@@ -132,7 +135,8 @@ usage() {
 usage: lightning daemon <subcommand> [args]
 
    Lifecycle of the underlying clightningd process.
-   All sub-commands accept --user (default) or --system.
+   enable defaults to --system (--user is the rootless opt-in);
+   operate verbs auto-detect the installed mode.
 
    lifecycle:
      start [--user|--system]    bring up lightningd (background)
@@ -144,8 +148,8 @@ usage: lightning daemon <subcommand> [args]
 
    setup:
      install [--from <src>]     install lightningd (brew|apt|apk|source)
-     enable [--user|--system]   install + start launchd/systemd unit
-     disable [--user|--system]  stop service and remove unit
+     enable [--system|--user]   install + start unit (default: system)
+     disable [--system|--user]  stop service and remove unit
 
    see 'lightning daemon help <subcommand>' for detailed usage.
 EOF
@@ -717,11 +721,14 @@ cmd_enable() {
 	#   -1  leave backend config alone
 	#    1  enable trustedcoin (multi-explorer fallback)
 	#    0  disable any managed backend block (back to bitcoind/bcli)
-	local system=0 migrate=0 backend=-1 keepalive=1 alert=1 lsps=0 autopilot=0 topup_watcher=0 account_gc=0 fee_autotune=0 price_oracle=0 standing_orders=0 reconcile=0
+	# FEAT-264: default to system mode (completes the 3.0.0 rollout).
+	# user_explicit tracks an explicit --user so OpenRC can flag that it
+	# can't honor it (bare enable is system there, which OpenRC always was).
+	local system=1 user_explicit=0 migrate=0 backend=-1 keepalive=1 alert=1 lsps=0 autopilot=0 topup_watcher=0 account_gc=0 fee_autotune=0 price_oracle=0 standing_orders=0 reconcile=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--system)      system=1; shift ;;
-			--user)        system=0; shift ;;
+			--user)        system=0; user_explicit=1; shift ;;
 			--migrate)     migrate=1; shift ;;
 			--trustedcoin) backend=1; shift ;;
 			--bitcoind|--bcli|--no-public-backend)
@@ -761,8 +768,10 @@ cmd_enable() {
 		fi
 	elif [ "$(init_system)" = "openrc" ]; then
 		# OpenRC has no per-user mode — Alpine operators install system-wide.
-		# Treat --system as implied; warn but proceed if it wasn't passed.
-		if [ $system -eq 0 ]; then
+		# Bare enable is already system (FEAT-264), so only an explicit
+		# --user needs flagging: we can't honor it here, so say so and
+		# proceed system-wide.
+		if [ "$user_explicit" -eq 1 ]; then
 			info "OpenRC has no per-user mode — installing system-wide"
 		fi
 		install_openrc_system "$migrate"
