@@ -13,7 +13,7 @@ bitcoin\-daemon \- install, enable, disable, start, stop, monitor, and inspect t
 .B bitcoin daemon
 .RI [ options ]
 .B enable
-.RI [ --user " | " --system ]
+.RI [ --system " | " --user ]
 .br
 .B bitcoin daemon
 .RI [ options ]
@@ -108,7 +108,7 @@ On success the installed
 .B bitcoind --version
 is printed.
 .TP
-.BR enable " [" --user " | " --system ]
+.BR enable " [" --system " | " --user ]
 Render a service unit from the templates under
 .I share/bitcoin/units/
 .RB ( bitcoind.service
@@ -117,18 +117,20 @@ for systemd,
 for launchd), install it, and bring
 .B bitcoind
 up so it survives reboots.
-.B --user
-(default) installs a per-user service with no root
-.RB ( "systemctl --user"
-on Linux,
-.B launchctl bootstrap gui/$UID
-on macOS).
 .B --system
-installs a system-wide service running as a dedicated
+(default) installs a system-wide service running as a dedicated
 .B bitcoin
 account (created on first enable if missing) with its data dir
 under
 .IR /var/lib/bitcoin .
+It needs root (or
+.BR sudo ).
+.B --user
+is the explicit opt-in for a rootless per-user service with no root
+.RB ( "systemctl --user"
+on Linux,
+.B launchctl bootstrap gui/$UID
+on macOS) \(em for personal, educational, macOS, or CI use.
 The
 .BR @BITCOIND@ ", " @DATADIR@ ", and " @USER@
 template markers are substituted at enable time;
