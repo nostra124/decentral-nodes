@@ -8,7 +8,7 @@ lightning-daemon \- lightningd lifecycle management
 .nf
 lightning daemon — lightningd lifecycle management.
 
-All sub-commands accept --user (default) or --system.
+enable defaults to --system (--user is the rootless opt-in); operate verbs auto-detect the installed mode.
 
 lifecycle:
   start    — bring up lightningd (background)
@@ -28,7 +28,7 @@ setup:
 usage: lightning daemon <subcommand> [args]
 
    Lifecycle of the underlying clightningd process.
-   All sub-commands accept --user (default) or --system.
+   enable defaults to --system (--user is the rootless opt-in); operate verbs auto-detect the installed mode.
 
    lifecycle:
      start [--user|--system]    bring up lightningd (background)
@@ -40,8 +40,8 @@ usage: lightning daemon <subcommand> [args]
 
    setup:
      install [--from <src>]     install lightningd (brew|apt|apk|source)
-     enable [--user|--system]   install + start launchd/systemd unit
-     disable [--user|--system]  stop service and remove unit
+     enable [--system|--user]   install + start unit (default: system)
+     disable [--system|--user]  stop service and remove unit
 
    see 'lightning daemon help <subcommand>' for detailed usage.
 .fi

@@ -45,16 +45,16 @@ Out of scope for the `bitcoin` command: Lightning
 transaction-history indexing for the whole network
 (out of scope for an educational tool).
 
-**Daemon posture (3.0.0, FEAT-261/262).** The default
-daemon mode for `bitcoin daemon` and `fulcrum` is
-`--system` — a boot-persistent service under a dedicated
-account, the reliable substrate other software builds
-on. `--user` is retained as the explicit rootless opt-in
-for personal/educational, macOS, and CI use. The flip is
-phased: `lightning`'s default is unchanged until its own
-milestone (3.1.0), because its daemon layer (auto-detect,
-OpenRC/podman/macOS, three-user model, the FEAT-183/207
-user-mode test family) needs dedicated rework.
+**Daemon posture (3.0.0/3.1.0, FEAT-261/262/264).** The
+default daemon mode for `bitcoin daemon`, `fulcrum`, and
+`lightning daemon` is `--system` — a boot-persistent
+service under a dedicated account, the reliable substrate
+other software builds on. `--user` is retained as the
+explicit rootless opt-in for personal/educational, macOS,
+and CI use. bitcoin/fulcrum flipped in 3.0.0; lightning
+flipped in 3.1.0 (only the `enable` install default —
+its operate verbs keep auto-detecting the installed mode,
+and its user-mode sidecars stay `--user`-only).
 
 ## 2. Repo conventions
 
