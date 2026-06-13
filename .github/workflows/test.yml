@@ -26,7 +26,12 @@ jobs:
     # lightning) takes a few minutes; 30 bounds a true hang.
     timeout-minutes: 30
     steps:
+      # fetch-depth: 0 — the BUG-029 ledger test resolves a .rpk/versions
+      # SHA to its VERSION file via `git show <sha>:VERSION`, which needs
+      # the commit object, not just shallow HEAD.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: install deps
         run: |
