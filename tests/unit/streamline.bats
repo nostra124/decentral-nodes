@@ -1185,12 +1185,26 @@ feat034_env() {
 	grep -q 'launchctl bootstrap system' "$FEAT034_CALLS"
 }
 
-@test "FEAT-034 — enable defaults to --user when no mode is given" {
+@test "FEAT-261 — enable defaults to --system when no mode is given" {
 	feat034_env linux
 	run "$BITCOIN_BIN" daemon enable
 	[ "$status" -eq 0 ]
-	[ -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
-	grep -q 'systemctl --user' "$FEAT034_CALLS"
+	# FEAT-261 flipped the default from --user to --system: a bare enable
+	# now installs the privileged system unit under a dedicated account
+	# and must NOT touch the per-user bus.
+	[ -f "$BITCOIN_DAEMON_ROOT/etc/systemd/system/bitcoind.service" ]
+	[ ! -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
+	grep -q '^User=bitcoin' "$BITCOIN_DAEMON_ROOT/etc/systemd/system/bitcoind.service"
+	grep -q 'useradd .* bitcoin' "$FEAT034_CALLS"
+	grep -q 'systemctl enable --now bitcoind' "$FEAT034_CALLS"
+	! grep -q 'systemctl --user' "$FEAT034_CALLS"
+}
+
+@test "FEAT-261 — daemon enable help names --system as the default" {
+	run "$BITCOIN_BIN" daemon enable --help
+	[ "$status" -eq 0 ]
+	# help:enable writes to stderr; bats `run` folds it into $output.
+	echo "$output" | grep -q -- '--system (default)'
 }
 
 @test "FEAT-034 — enable is idempotent (second call succeeds, unit refreshed)" {
@@ -1394,9 +1408,18 @@ bug015_env() {
 
 @test "BUG-015 — start --user drives systemctl --user (linux)" {
 	bug015_env
-	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon start
+	# FEAT-261: --user is now explicit (the bare default is --system).
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon start --user
 	[ "$status" -eq 0 ]
 	grep -q 'systemctl --user start bitcoind' "$BUG015_CALLS"
+}
+
+@test "FEAT-261 — start defaults to --system (linux)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon start
+	[ "$status" -eq 0 ]
+	grep -q 'systemctl start bitcoind' "$BUG015_CALLS"
+	! grep -q 'systemctl --user' "$BUG015_CALLS"
 }
 
 @test "BUG-015 — start --system drives system systemctl (linux)" {
@@ -1409,14 +1432,14 @@ bug015_env() {
 
 @test "BUG-015 — stop --user drives systemctl --user (linux)" {
 	bug015_env
-	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon stop
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon stop --user
 	[ "$status" -eq 0 ]
 	grep -q 'systemctl --user stop bitcoind' "$BUG015_CALLS"
 }
 
 @test "BUG-015 — start --user kickstarts the LaunchAgent (macos)" {
 	bug015_env
-	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon start
+	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon start --user
 	[ "$status" -eq 0 ]
 	# BUG-019 fix #4: plain `launchctl kickstart` (the -k force-kill
 	# raced with KeepAlive and caused the crash loop).
@@ -1425,14 +1448,14 @@ bug015_env() {
 
 @test "BUG-015 — stop --user signals the LaunchAgent (macos)" {
 	bug015_env
-	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon stop
+	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon stop --user
 	[ "$status" -eq 0 ]
 	grep -q 'launchctl kill SIGTERM gui/.*/org.bitcoin.bitcoind' "$BUG015_CALLS"
 }
 
 @test "BUG-015 — monitor follows the journal (linux)" {
 	bug015_env
-	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon monitor
+	BITCOIN_DAEMON_OS=linux run "$BITCOIN_BIN" daemon monitor --user
 	[ "$status" -eq 0 ]
 	grep -q 'journalctl --user -u bitcoind -f' "$BUG015_CALLS"
 }
@@ -1442,7 +1465,7 @@ bug015_env() {
 	# setup() gives a fresh $HOME with no ~/.bitcoin, so the user-mode
 	# datadir (daemon:_datadir → $HOME/.bitcoin since 0d2d7d1) is absent
 	# and the error path is hit.
-	run --separate-stderr "$BITCOIN_BIN" daemon space
+	run --separate-stderr "$BITCOIN_BIN" daemon space --user
 	[ "$status" -ne 0 ]
 	echo "$stderr" | grep -q "data dir '.*' does not exist"
 }
@@ -1451,7 +1474,7 @@ bug015_env() {
 	bug015_env
 	mkdir -p "$HOME/.bitcoin"
 	head -c 4096 /dev/zero > "$HOME/.bitcoin/blk"
-	run "$BITCOIN_BIN" daemon space
+	run "$BITCOIN_BIN" daemon space --user
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -qE '^[0-9.]+[KMG]?'
 }

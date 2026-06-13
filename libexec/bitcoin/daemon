@@ -114,8 +114,8 @@ usage: $SELF <options> <command>
 
 commands:
    install [--from <src>]    install bitcoind (brew|apt|apk|source)
-   enable [--user|--system]  install + start launchd/systemd unit
-   disable [--user|--system] stop service and remove unit
+   enable [--system|--user]  install + start unit (default: system)
+   disable [--system|--user] stop service and remove unit
    start [--user|--system]   start bitcoind
    stop [--user|--system]    stop bitcoind
    monitor [--user|--system] tail the bitcoind log
@@ -136,12 +136,14 @@ shopt -s extglob
 # BUG-015 (branch c): the legacy start / stop / monitor / space
 # verbs are folded onto the same systemd / launchd service that
 # `enable` installs, sharing daemon:_os / daemon:_datadir and the
-# --user (default) / --system mode split. They are thin shims over
+# --system (default) / --user mode split. They are thin shims over
 # the init system: systemctl [--user] on Linux, launchctl on macOS.
 
-# Resolve [--user|--system] from a bare argument list (default user).
+# Resolve [--user|--system] from a bare argument list. Default is
+# --system (FEAT-261): the deployment-ready posture survives logout/
+# reboot; --user is the explicit rootless / personal / CI opt-in.
 daemon:_mode() {
-	local mode=user a
+	local mode=system a
 	for a in "$@"; do
 		case "$a" in
 			--system) mode=system ;;
@@ -333,12 +335,12 @@ daemon:_render() {
 
 help:enable() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF enable [--user | --system] [--public --allow <cidr>]
+	usage: $SELF enable [--system | --user] [--public --allow <cidr>]
 
 	  Install a bitcoind service unit and bring the daemon up so it
-	  survives reboots. --user (default) installs a per-user service
-	  with no root; --system installs a system-wide service running
-	  as a dedicated 'bitcoin' account. Idempotent.
+	  survives reboots. --system (default) installs a system-wide
+	  service running as a dedicated 'bitcoin' account (needs root);
+	  --user installs a rootless per-user service. Idempotent.
 
 	  --public  Expose RPC on all interfaces. Requires --system and
 	            --allow. Uses rpcauth (hash-based) instead of cookie
@@ -392,7 +394,7 @@ help:space() {
 }
 
 command:enable() {
-	local mode=user public= allow=
+	local mode=system public= allow=
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--user)         mode=user ;;

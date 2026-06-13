@@ -153,9 +153,11 @@ service:_node_reachable() {
 	return 1
 }
 
-# Resolve [--user|--system] from an argument list (default user).
+# Resolve [--user|--system] from an argument list. Default is --system
+# (FEAT-262): the deployment-ready posture; --user is the explicit
+# rootless / personal / CI opt-in.
 service:_mode() {
-	local mode=user a
+	local mode=system a
 	for a in "$@"; do
 		case "$a" in
 			--system) mode=system ;;
@@ -220,18 +222,18 @@ command:install() {
 
 help:enable() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF enable [--user | --system]
+	usage: $SELF enable [--system | --user]
 
 	  Render a Fulcrum service unit from share/bitcoin/units/, install
-	  it, and bring the server up. --user (default) installs a per-user
-	  service with no root; --system runs it as a dedicated 'fulcrum'
-	  account. Fails if the local bitcoind RPC is unreachable — Fulcrum
-	  cannot index without it.
+	  it, and bring the server up. --system (default) runs it as a
+	  dedicated 'fulcrum' account (needs root); --user installs a
+	  rootless per-user service. Fails if the local bitcoind RPC is
+	  unreachable — Fulcrum cannot index without it.
 	ENDHELP
 }
 
 command:enable() {
-	local mode=user
+	local mode=system
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--user)         mode=user ;;
@@ -314,7 +316,7 @@ command:enable() {
 
 help:disable() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF disable [--user | --system]
+	usage: $SELF disable [--system | --user]
 
 	  Stop the Fulcrum service and remove its unit. The index data
 	  directory is preserved.
@@ -322,7 +324,7 @@ help:disable() {
 }
 
 command:disable() {
-	local mode=user
+	local mode=system
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--user)         mode=user ;;

@@ -157,6 +157,36 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	! grep -q "@FULCRUMD@" "$unit"
 }
 
+@test "FEAT-262: enable defaults to --system when no mode is given (linux)" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	run "$FULCRUM" enable
+	[ "$status" -eq 0 ]
+	# FEAT-262 flipped the default to --system: a bare enable installs the
+	# privileged system unit (dedicated 'fulcrum' account), not the per-user bus.
+	local sys="$FULCRUM_ROOT/etc/systemd/system/fulcrumd.service"
+	[ -f "$sys" ]
+	grep -q "^User=fulcrum" "$sys"
+	[ ! -f "$XDG_CONFIG_HOME/systemd/user/fulcrumd.service" ]
+	! grep -q "systemctl --user" "$CALLLOG"
+}
+
+@test "FEAT-262: disable defaults to --system (linux)" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	"$FULCRUM" enable >/dev/null 2>&1     # default (system) install
+	local sys="$FULCRUM_ROOT/etc/systemd/system/fulcrumd.service"
+	[ -f "$sys" ]
+	run "$FULCRUM" disable
+	[ "$status" -eq 0 ]
+	[ ! -f "$sys" ]
+	! grep -q "systemctl --user disable" "$CALLLOG"
+}
+
+@test "FEAT-262: enable help names --system as the default" {
+	run "$FULCRUM" enable --help
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q -- '--system (default)'
+}
+
 @test "FEAT-056 AC1: enable --user (macos) writes a LaunchAgent plist" {
 	export FULCRUM_OS=macos FULCRUM_NODE_OK=yes
 	run "$FULCRUM" enable --user

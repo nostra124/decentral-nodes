@@ -139,6 +139,18 @@ assert_sections() {
 	assert_sections "$MAN_DIR/bitcoin-daemon.1"
 }
 
+@test "FEAT-263 — bitcoin-daemon.1 documents --system as the enable default" {
+	# Inspect the roff source (man -l doesn't render under macOS mandoc).
+	# The "(default)" marker must follow --system, and no longer --user.
+	grep -A1 -- '--system' "$MAN_DIR/bitcoin-daemon.1" | grep -q '(default)'
+	! { grep -A1 -- '--user' "$MAN_DIR/bitcoin-daemon.1" | grep -q '(default)'; }
+}
+
+@test "FEAT-263 — fulcrum.1 documents --system as the enable default" {
+	grep -A1 -- '--system' "$MAN_DIR/fulcrum.1" | grep -q '(default)'
+	! { grep -A1 -- '--user' "$MAN_DIR/fulcrum.1" | grep -q '(default)'; }
+}
+
 @test "bitcoin-mnemonic-to-seed.1 was removed in 1.24.0" {
 	# FEAT-035 alias-removal sweep: the .so-include page is gone
 	# alongside its underlying shim. Users land on bitcoin-bip39(1)

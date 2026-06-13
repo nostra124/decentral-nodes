@@ -20,17 +20,23 @@ separate top-level command sharing one package and one version.
 .B install " [--from brew|apt|source|docker]"
 Install the Fulcrum server binary.
 .TP
-.B enable " [--user|--system]"
-Render and install a systemd/launchd unit and start the server. Fails
+.B enable " [--system|--user]"
+Render and install a systemd/launchd unit and start the server.
+.B --system
+(default) runs Fulcrum as a dedicated
+.B fulcrum
+account (needs root);
+.B --user
+is the explicit opt-in for a rootless per-user service. Fails
 if the local bitcoind RPC is unreachable.
 .TP
-.B disable " [--user|--system]"
+.B disable " [--system|--user]"
 Stop the service and remove its unit; the index is preserved.
 .TP
-.BR start ", " stop ", " monitor " [--user|--system]"
+.BR start ", " stop ", " monitor " [--system|--user]"
 Start, stop, or follow the running service.
 .TP
-.B space " [--user|--system]"
+.B space " [--system|--user]"
 Show the Fulcrum index disk usage.
 .SS Configuration (FEAT-057)
 .TP
