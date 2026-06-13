@@ -48,6 +48,31 @@ teardown() {
 	[ "$output" = "$expected" ]
 }
 
+@test "BUG-029 — newest .rpk/versions entry maps to a commit whose VERSION matches its label" {
+	# BUG-029: the 2.2.0 ledger line recorded its parent merge
+	# (3baeebc, VERSION=2.1.0) instead of the bump commit (f70209c,
+	# VERSION=2.2.0). `rpk update` installs `command:versions | tail -1`
+	# and resolves the SHA via `command:commit`, so a wrong SHA makes
+	# `rpk install bitcoin:<latest>` package the wrong tree — the binary
+	# then self-reports a stale version. Mirror rpk's own selection so
+	# this guards exactly what an install would package.
+	repo="$BATS_TEST_DIRNAME/../.."
+	ledger="$repo/.rpk/versions"
+	# command:versions → grep -v '^#' | cut -f1 | sort -u -V ; update picks tail -1
+	label="$(grep -v '^#' "$ledger" | cut -f1 | grep -vE '^[[:space:]]*$' \
+	         | sort -u -V | tail -1)"
+	[ -n "$label" ]
+	# command:commit → first exact label match, second (tab) field
+	sha="$(awk -F'\t' -v v="$label" '$1==v{print $2; exit}' "$ledger")"
+	[ -n "$sha" ]
+	[ "$sha" != "TBD" ]
+	# The recorded commit must exist in history and its VERSION must
+	# equal the label (CI checks out fetch-depth:0 so the object is present).
+	run git -C "$repo" show "$sha:VERSION"
+	[ "$status" -eq 0 ]
+	[ "$(printf '%s' "$output" | tr -d '[:space:]')" = "$label" ]
+}
+
 @test "bitcoin help prints usage" {
 	run "$BITCOIN_BIN" help
 	[ "$status" -eq 0 ]
