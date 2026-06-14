@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 
 ############################################################################
-# fulcrum config (FEAT-057) — render and tweak fulcrum.conf.
+# fulcrum config (FEAT-057, FEAT-273) — render and tweak fulcrum.conf.
 #
 #   config init [--ssl|--no-ssl]   write a curated fulcrum.conf
 #   config show                    print the effective file
-#   config get <key>               read one key
+#   config list                    keys explicitly set (FEAT-273)
+#   config get <key>               read one key (conf value, else errors)
 #   config set <key> <val>         edit one key (curated allow-list)
+#   config unset <key>             remove a key (FEAT-273)
+#   config path                    print the config file path (FEAT-273)
 #   config validate                sanity-check the deployment
+#
+# Fulcrum has no '--help'-style default dump and may not be installed, so
+# 'get' has NO default fallback: a key not in the conf is an error
+# ("not set (no default source for Fulcrum)"). set/unset write through
+# install -m 0640 under sudo, preserving owner:group (daemon group model).
 #
 # fulcrum.conf lives in the config dir ($FULCRUM_CONFIG_DIR, else the
 # per-user/system default). The curated subset keeps an educational
@@ -28,7 +36,9 @@ error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
 has() { type -t "$1:$2" | grep -q function; }
 
 # Curated set of keys `config set` will touch.
-CONFIG_ALLOW="db_mem fast-sync max_history peering announce hostname banner tcp ssl"
+# BUG-034: 'fast-sync' dropped — removed in Fulcrum 2.x (fulcrumd refuses
+# to start if it appears in the conf).
+CONFIG_ALLOW="db_mem max_history peering announce hostname banner tcp ssl"
 
 config:_os() {
 	local os="${FULCRUM_OS:-}"
@@ -46,10 +56,35 @@ config:_dir() {
 
 config:_file() { printf '%s/fulcrum.conf\n' "$(config:_dir "${1:-user}")"; }
 
-# Index data dir (the `datadir =` line written into fulcrum.conf).
+# Service account owning a system-mode config (matches daemon:_user). macOS
+# uses the '_'-prefixed hidden account; both OSes get a same-named group.
+config:_user() {
+	local mode=$1
+	if [ "$mode" != system ]; then printf '%s\n' "${USER:-$(id -un)}"
+	elif [ "$(config:_os)" = macos ]; then printf '_fulcrum\n'
+	else printf 'fulcrum\n'; fi
+}
+
+# Index data dir (the `datadir =` line written into fulcrum.conf). Branches
+# on mode: system mode writes the boot-persistent /var/lib/fulcrum the
+# service account owns; user mode keeps the per-user ~/.fulcrum. $FULCRUM_DATADIR
+# wins (test harness / explicit override). Mirrors daemon:_datadir (BUG-034).
 config:_datadir() {
+	local mode="${1:-user}"
 	if [ -n "${FULCRUM_DATADIR:-}" ]; then printf '%s\n' "$FULCRUM_DATADIR"; return 0; fi
-	printf '%s/.fulcrum\n' "$HOME"
+	if [ "$mode" = system ]; then printf '%s/var/lib/fulcrum\n' "${FULCRUM_ROOT:-}"
+	else printf '%s/.fulcrum\n' "$HOME"; fi
+}
+
+# bitcoind cookie path for a mode. System mode reads the system bitcoind's
+# group-readable cookie under /var/lib/bitcoin (FEAT-274); user mode the
+# per-user ~/.bitcoin/.cookie. $FULCRUM_NODE_DATADIR overrides the dir.
+# Mirrors the system bitcoind datadir (BUG-034).
+config:_cookie() {
+	local mode="${1:-user}"
+	if [ -n "${FULCRUM_NODE_DATADIR:-}" ]; then printf '%s/.cookie\n' "$FULCRUM_NODE_DATADIR"; return 0; fi
+	if [ "$mode" = system ]; then printf '%s/var/lib/bitcoin/.cookie\n' "${FULCRUM_ROOT:-}"
+	else printf '%s/.bitcoin/.cookie\n' "$HOME"; fi
 }
 
 # bitcoind RPC reachable? $FULCRUM_NODE_OK forces the answer for tests.
@@ -72,6 +107,30 @@ config:_port_in_use() {
 config:_get_raw() {
 	local key="$1" file="$2"
 	sed -n -E "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$file" | head -1
+}
+
+# Owner:group of the conf (preserve on write). Tries GNU stat (-c) first —
+# coreutils may shadow BSD stat on macOS, and BSD '-f' under GNU stat
+# silently prints filesystem info instead — then BSD stat (-f).
+config:_owner() {
+	stat -c '%U:%G' "$1" 2>/dev/null || stat -f '%Su:%Sg' "$1" 2>/dev/null
+}
+
+# Install new conf content (stdin) to $file at 0640, preserving its
+# owner:group, via $SUDO when the file isn't writable by us (the daemon
+# group model: a privileged step does the write, the operator can read).
+config:_install_conf() {
+	local file="$1" tmp og SUDO=""
+	tmp="$(mktemp)" || { error "cannot create temp file"; return 1; }
+	cat > "$tmp"
+	[ -e "$file" ] && og="$(config:_owner "$file")"
+	if [ -e "$file" ]; then [ -w "$file" ] || SUDO=sudo
+	else [ -w "$(dirname "$file")" ] || SUDO=sudo; fi
+	if ! $SUDO install -m 0640 "$tmp" "$file"; then
+		rm -f "$tmp"; error "cannot write '$file'"; return 1
+	fi
+	[ -n "$og" ] && $SUDO chown "$og" "$file" 2>/dev/null
+	rm -f "$tmp"
 }
 
 # ---------------------------------------------------------------------------
@@ -102,10 +161,15 @@ command:init() {
 		shift
 	done
 
-	local dir file datadir
+	local dir file datadir user group SUDO=""
 	dir="$(config:_dir "$mode")"; file="$(config:_file "$mode")"
-	datadir="$(config:_datadir)"
-	mkdir -p "$dir" || { error "init: cannot create config dir '$dir'"; return 1; }
+	datadir="$(config:_datadir "$mode")"
+	user="$(config:_user "$mode")"; group="$user"
+	# BUG-031: the system config dir is owned by the dedicated 'fulcrum'
+	# service account, so privileged steps route through sudo and the file
+	# is installed (not bare-redirected) with group-readable perms.
+	[ "$mode" = system ] && SUDO=sudo
+	$SUDO mkdir -p "$dir" || { error "init: cannot create config dir '$dir'"; return 1; }
 
 	# Auth: rpcuser/rpcpassword from secret when present, else cookie.
 	local rpcpass auth
@@ -114,9 +178,16 @@ command:init() {
 		auth="rpcuser = bitcoin"$'\n'"rpcpassword = $rpcpass"
 		info "init: using rpcuser/rpcpassword from secret store"
 	else
-		auth="rpccookie = ${FULCRUM_NODE_DATADIR:-$HOME/.bitcoin}/.cookie"
+		# BUG-034: in --system mode the cookie is the system bitcoind's
+		# group-readable one under /var/lib/bitcoin, not the operator's
+		# ~/.bitcoin cookie (which the service account can't read).
+		auth="rpccookie = $(config:_cookie "$mode")"
 	fi
 
+	# Render to a temp file first, then install through $SUDO. A bare
+	# redirect into the service-owned config dir fails with EACCES yet would
+	# still fall through to a false "wrote" (BUG-031): fail loudly instead.
+	local tmp; tmp="$(mktemp)" || { error "init: cannot create temp file"; return 1; }
 	{
 		echo "# fulcrum.conf — generated by 'fulcrum config init'"
 		echo "datadir = $datadir"
@@ -130,9 +201,16 @@ command:init() {
 		fi
 		echo "admin = 127.0.0.1:8000"
 		echo "db_mem = 2048"
-		echo "fast-sync = 1024"
+		# BUG-034: 'fast-sync' was removed in Fulcrum 2.x — fulcrumd refuses
+		# to start ("the conf file option `fast-sync` has been removed") if it
+		# is present, so it is no longer scaffolded. 'db_mem' is the tunable
+		# that remains.
 		echo "peering = false"
-	} > "$file" || { error "init: cannot write '$file'"; return 1; }
+	} > "$tmp" || { rm -f "$tmp"; error "init: cannot render config"; return 1; }
+	$SUDO install -m 0640 "$tmp" "$file" \
+		|| { rm -f "$tmp"; error "init: cannot write '$file'"; return 1; }
+	rm -f "$tmp"
+	[ "$mode" = system ] && $SUDO chown "$user:$group" "$file" 2>/dev/null
 	info "wrote $file"
 }
 
@@ -148,13 +226,44 @@ command:show() {
 	cat "$file"
 }
 
+help:list() {
+	cat >&2 <<-ENDHELP
+	usage: fulcrum config list
+	  Show the keys explicitly set in fulcrum.conf (source: conf). Use
+	  'fulcrum config get <key>' to read a single key's value.
+	ENDHELP
+}
+command:list() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:list; return 0 ;; esac; done
+	local file; file="$(config:_file)"
+	if [ ! -r "$file" ]; then
+		error "list: no readable config at '$file' (run 'fulcrum config init' first)"; return 1
+	fi
+	info "config: $file"
+	# Tolerant of both 'key = value' and 'key=value'.
+	awk '
+		/^[[:space:]]*[#;]/ || /^[[:space:]]*$/ { next }
+		{ line=$0; sub(/=.*/,"",line); sub(/^[[:space:]]+/,"",line); sub(/[[:space:]]+$/,"",line);
+		  val=$0; sub(/^[^=]*=/,"",val); sub(/^[[:space:]]+/,"",val); sub(/[[:space:]]+$/,"",val);
+		  printf "  %-24s = %s\n", line, val }
+	' "$file"
+}
+
+help:path() { echo "usage: fulcrum config path   — print the fulcrum.conf path" >&2; }
+command:path() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:path; return 0 ;; esac; done
+	config:_file
+}
+
 help:get() { echo "usage: fulcrum config get <key>" >&2; }
 command:get() {
 	case "${1:-}" in ""|-h|--help|help) help:get; [ -z "${1:-}" ] && return 1 || return 0 ;; esac
 	local key="$1" file val; file="$(config:_file)"
 	[ -f "$file" ] || { error "get: no config at '$file' (run 'fulcrum config init')"; return 1; }
 	val="$(config:_get_raw "$key" "$file")"
-	if [ -z "$val" ]; then error "get: key '$key' not set"; return 1; fi
+	if [ -z "$val" ]; then
+		error "get: '$key' is not set in $file (no default source for Fulcrum)"; return 1
+	fi
 	printf '%s\n' "$val"
 }
 
@@ -171,12 +280,49 @@ command:set() {
 		return 1
 	fi
 	[ -f "$file" ] || { error "set: no config at '$file' (run 'fulcrum config init')"; return 1; }
+	# Write back in fulcrum.conf's 'key = value' style, replacing an existing
+	# top-level line or appending. Routes through install -m 0640 under $SUDO,
+	# preserving the conf's owner:group (the daemon group model).
+	local new
 	if grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$file"; then
-		sed -i -E "s|^[[:space:]]*${key}[[:space:]]*=.*|${key} = ${val}|" "$file"
+		new="$(awk -v k="$key" -v val="$val" '
+			BEGIN{done=0}
+			!done {
+				line=$0; sub(/=.*/,"",line); sub(/^[[:space:]]+/,"",line); sub(/[[:space:]]+$/,"",line)
+				if ($0 !~ /^[[:space:]]*[#;]/ && line==k) { print k" = "val; done=1; next }
+			}
+			{ print }
+		' "$file")"
 	else
-		printf '%s = %s\n' "$key" "$val" >> "$file"
+		new="$(cat "$file"; printf '%s = %s\n' "$key" "$val")"
 	fi
+	printf '%s\n' "$new" | config:_install_conf "$file" || return 1
 	info "set $key = $val"
+	warn "restart the daemon for this to take effect: fulcrum stop && fulcrum start"
+}
+
+help:unset() {
+	cat >&2 <<-ENDHELP
+	usage: fulcrum config unset <key>
+	  Remove <key> from fulcrum.conf. Routes through install -m 0640 under
+	  \$SUDO, preserving the conf's owner:group. Warns that a restart is needed.
+	ENDHELP
+}
+command:unset() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:unset; return 0 ;; esac; done
+	local key="${1:-}" file; file="$(config:_file)"
+	[ -n "$key" ] || { error "unset: usage: config unset <key>"; return 2; }
+	[ -f "$file" ] || { error "unset: no config at '$file' (run 'fulcrum config init')"; return 1; }
+	if ! grep -qE "^[[:space:]]*${key}[[:space:]]*=" "$file"; then
+		warn "unset: '$key' is not set in $file"; return 0
+	fi
+	awk -v k="$key" '
+		{ line=$0; sub(/=.*/,"",line); sub(/^[[:space:]]+/,"",line); sub(/[[:space:]]+$/,"",line)
+		  if ($0 !~ /^[[:space:]]*[#;]/ && line==k) next }
+		{ print }
+	' "$file" | config:_install_conf "$file" || return 1
+	info "unset $key in $file"
+	warn "restart the daemon for this to take effect: fulcrum stop && fulcrum start"
 }
 
 # ---------------------------------------------------------------------------
@@ -238,12 +384,15 @@ command:validate() {
 
 command:help() {
 	cat >&2 <<-ENDHELP
-	usage: fulcrum config <init|show|get|set|validate> [args]
+	usage: fulcrum config <init|show|list|get|set|unset|path|validate> [args]
 
 	  init [--ssl|--no-ssl]   write a curated fulcrum.conf
 	  show                    print the effective file
-	  get <key>               read one key
+	  list                    keys explicitly set in fulcrum.conf
+	  get <key>               read one key (conf value, else errors)
 	  set <key> <value>       edit one key (allow-list: $CONFIG_ALLOW)
+	  unset <key>             remove a key
+	  path                    print the config file path
 	  validate                check node / cert / ports
 	ENDHELP
 }

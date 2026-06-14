@@ -124,11 +124,11 @@ generic commands:
    modules                 list available libexec plugins
 
 server lifecycle (FEAT-056):
-   service                 install / enable / disable / start / stop /
+   daemon                  install / enable / disable / start / stop /
                            monitor / space the Fulcrum service
 
 configuration (FEAT-057):
-   config                  init / show / get / set / validate fulcrum.conf
+   config                  list / get / set / unset / path / init fulcrum.conf
    cert                    generate the self-signed TLS cert+key
 
 admin inspection (FEAT-058):
