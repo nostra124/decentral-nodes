@@ -35,6 +35,14 @@ bitcoin-cli -regtest generatetoaddress 101 "$(bitcoin-cli -regtest getnewaddress
 
 lightning daemon start
 lightning version
+# Wait until lightningd has caught up to bitcoind. Channel opens and funding
+# need a synced node; exec'ing the bats suites while getinfo still reports a
+# sync warning makes the channel/pay suites flake (BUG-038 SIT harness).
+for _ in $(seq 1 30); do
+	gi=$(lightning-cli --lightning-dir="$HOME/.lightning" --network=regtest getinfo 2>/dev/null) || { sleep 1; continue; }
+	echo "$gi" | jq -e '(.warning_lightningd_sync // .warning_bitcoind_sync) | not' >/dev/null 2>&1 && break
+	sleep 1
+done
 echo "alice: lightningd up — $(lightning daemon status 2>/dev/null | head -1)"
 ALICE
 

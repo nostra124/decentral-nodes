@@ -1839,13 +1839,14 @@ wallet_set_network() {
 	[ ! -e "$BATS_TEST_DIRNAME/../../skills/bitcoin-wallet/opencode.md" ]
 }
 
-@test "FEAT-019 — Makefile install installs SKILL.md and opencode.md" {
+@test "FEAT-019 — Makefile install stages .rpk/skills to claude/raven/opencode" {
 	mk="$BATS_TEST_DIRNAME/../../Makefile.in"
-	# The install target must reference both skill artefacts;
-	# pre-existing install-skills-user only consumes what install puts
-	# under share/, so the install target is the gate.
+	# Skills are sourced from the rpk-native flat files .rpk/skills/<name>.md
+	# (BUG-040), installed as SKILL.md for Claude/Raven and as <name>.md for
+	# opencode. install-skills-user only symlinks what install stages under
+	# share/, so the install target is the gate.
+	grep -q '.rpk/skills' "$mk"
 	grep -q 'SKILL.md' "$mk"
-	grep -q 'opencode.md' "$mk"
 	# Destination paths the agent dirs are symlinked from.
 	grep -q 'share/claude/skills\|claude/skills' "$mk"
 	grep -q 'opencode/commands' "$mk"
@@ -1889,8 +1890,14 @@ wallet_set_network() {
 	HOME="$fake_home" make -C "$repo" install-skills-user >/dev/null
 	count2="$(find $dirs -maxdepth 1 -type l | wc -l)"
 
-	# Each agent gets exactly one symlink for the bitcoin-wallet skill,
-	# named correctly per agent layout.
+	# Skills are the rpk-native flat files .rpk/skills/<name>.md (BUG-040);
+	# the combined stack ships several (bitcoin-* + lightning-*). Each is
+	# installed to all three agents, so the expected link count is
+	# 3 * (number of skills).
+	nskills="$(ls "$repo"/.rpk/skills/*.md 2>/dev/null | wc -l)"
+
+	# bitcoin-wallet specifically must land in each agent, named correctly
+	# per agent layout.
 	claude_link="$fake_home/.claude/skills/bitcoin-wallet"
 	raven_link="$fake_home/.raven/workspace/skills/bitcoin-wallet"
 	oc_link="$fake_home/.config/opencode/commands/bitcoin-wallet.md"
@@ -1902,7 +1909,8 @@ wallet_set_network() {
 	rm -rf "$fake_home"
 
 	[ "$count1" -eq "$count2" ]
-	[ "$count1" -eq 3 ]
+	[ "$nskills" -ge 1 ]
+	[ "$count1" -eq $((nskills * 3)) ]
 	[ "$have_links" -eq 1 ]
 }
 

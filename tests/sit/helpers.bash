@@ -145,9 +145,12 @@ sit_setup_alice_bob() {
 	# alice is the operator's lightningd (already running via
 	# the container CMD); bob is a fresh second instance.
 	BOB_DIR=$(mktemp -d /tmp/bob.XXXXXX)
+	# CLN 24.11 refuses `--daemon` without `--log-file` ("--daemon needs
+	# --log-file"), so give bob an explicit log (BUG-038 SIT harness).
 	lightningd --lightning-dir="$BOB_DIR" --network="$LIGHTNING_NETWORK" \
 	           --bitcoin-rpcuser=test --bitcoin-rpcpassword=test \
-	           --addr="127.0.0.1:$BOB_PORT" --daemon
+	           --addr="127.0.0.1:$BOB_PORT" --daemon \
+	           --log-file="$BOB_DIR/log"
 	# Wait for both nodes to reach getinfo.
 	for _ in 1 2 3 4 5 6 7 8 9 10; do
 		cli_alice getinfo >/dev/null 2>&1 \

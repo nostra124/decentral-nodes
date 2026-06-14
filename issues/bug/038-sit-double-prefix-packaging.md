@@ -94,28 +94,37 @@ the same pass so `make check-sit` actually exercises the stack:
    stack is up (`exec "$@"` instead of `exec tail -F /dev/null`); the default
    `CMD` keeps the bare `podman run` interactive-idle.
 
-### Known residual (SIT harness, not packaging)
+### Harness fixes that followed (so the live suite actually runs)
 
-With the above, the image builds, the suites load + execute, and the entrypoint
-brings the stack up (log: `SIT stack up: bitcoind + lightningd (alice) +
-apache`). The live two-node suite (`ok=3 notok=23 skip=3`) still fails, but on
-genuine **harness** issues that are out of scope for a packaging repair and
-want their own follow-up:
+With the packaging fix the image builds; getting the live suite to *run* then
+needed four more harness fixes, all applied here:
 
-1. **operator context.** The bats run executes as the container `bitcoin`
-   user, but the daemon under test is `alice`'s, so `lightning daemon
-   status`/`start` operate on the wrong (absent) daemon. The suites need to run
-   in alice's context (or the verbs need an operator selector).
-2. **sync timing.** The entrypoint exec's bats as soon as `lightning daemon
-   start` returns, while lightningd is still "Still loading latest blocks from
-   bitcoind" — `daemon status` is not yet healthy. The bring-up should block
-   until lightningd reports synced.
-3. **bob's plugins.** `sit_setup_alice_bob` starts a second lightningd whose
-   bundled `clnrest` plugin aborts with `No module named 'gevent'`; the image
-   needs the plugin's python deps (or to disable clnrest) for the
-   channel/pay/walkthrough suites.
+1. **operator context.** The bats run executed as the container `bitcoin` user,
+   but the daemon under test is `alice`'s, so `lightning daemon status`/`start`
+   hit the wrong (absent) daemon. Fix: `check-sit` runs the suites as
+   `sudo -u alice -i env LIGHTNING_NETWORK=regtest bash -lc 'bats …'`. The
+   daemon-lifecycle "status reports healthy" test passes after this.
+2. **sync timing.** The entrypoint exec'd bats as soon as `lightning daemon
+   start` returned, while lightningd was still "loading latest blocks". Fix: the
+   entrypoint now waits (up to 30 s) until `getinfo` clears its sync warnings;
+   the bring-up banner now reads `lightningd up — healthy (… block 101 …)`
+   instead of `syncing`.
+3. **bob can't daemonize.** `sit_setup_alice_bob` started bob's lightningd with
+   `--daemon` but no `--log-file`; CLN 24.11 rejects that (`--daemon needs
+   --log-file`). Fix: pass `--log-file="$BOB_DIR/log"`. (The `clnrest`/`wss-proxy`
+   "No module named …" lines are non-fatal self-disables, not the blocker.)
+4. **hang guard.** `check-sit` wraps the `podman run` in `timeout` (if present)
+   so a hung live-flow test fails the target fast instead of blocking CI.
 
-These are tracked here but not fixed in this packaging change.
+### Known residual (live-flow reliability, tracked)
+
+The stack now comes up healthy as the operator and the daemon-status test
+passes, but the full live two-node suite is not yet green: `lightning daemon
+stop` → `lightning daemon start` (the restart round-trip) hangs, and the
+channel/pay flows need their funding/confirmation timing made deterministic.
+This is live-flow harness reliability — separate from the packaging/infra
+repairs above — and wants its own follow-up. The `timeout` guard keeps it from
+hanging CI in the meantime.
 
 ## Regression test
 
