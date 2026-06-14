@@ -105,11 +105,18 @@ fixdir() {  # create a fixture dir with one <method>.json; echo its path
 	command -v stow >/dev/null 2>&1 || skip "stow not installed"
 	local prefix="$FROOT/prefix"; mkdir -p "$prefix"
 	( cd "$REPO" && ./configure --prefix="$prefix" >/dev/null 2>&1 && make install >/dev/null 2>&1 )
-	# Staged build tree (stow source) carries every command.
-	[ -f "$REPO/build/bitcoin$prefix/bin/bitcoin" ]
-	[ -f "$REPO/build/bitcoin$prefix/bin/fulcrum" ]
-	[ -d "$REPO/build/bitcoin$prefix/libexec/bitcoin" ]
-	[ -d "$REPO/build/bitcoin$prefix/libexec/fulcrum" ]
+	# Staged build tree (stow source) mirrors $PREFIX *relative* —
+	# build/bitcoin/bin, not build/bitcoin$prefix/bin. The latter was the
+	# double-prefix packaging bug (BUG-038): absolute staging + `stow -t
+	# $PREFIX` left files at $PREFIX$PREFIX/… and never on PATH.
+	[ -f "$REPO/build/bitcoin/bin/bitcoin" ]
+	[ -f "$REPO/build/bitcoin/bin/fulcrum" ]
+	[ -d "$REPO/build/bitcoin/libexec/bitcoin" ]
+	[ -d "$REPO/build/bitcoin/libexec/fulcrum" ]
+	# …and `stow -t $PREFIX` installs directly into $PREFIX.
+	[ -x "$prefix/bin/bitcoin" ]
+	[ -x "$prefix/bin/fulcrum" ]
+	[ -f "$prefix/share/lightning/apache/lnurlp.conf" ]
 	( cd "$REPO" && make uninstall >/dev/null 2>&1; rm -rf build Makefile )
 }
 

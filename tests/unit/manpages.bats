@@ -278,29 +278,41 @@ assert_sections() {
 # will accept it.
 # ---------------------------------------------------------------------------
 
-@test "man -l renders every per-verb page without error" {
-	# `man -l` (BSD-style "local file" mode, supported by both
-	# man-db and mandoc) parses the file as a manpage. If the macro
-	# usage is malformed, man exits non-zero.
+# Render a manpage *file* portably. GNU man-db renders a local file with
+# `man -l <file>`; BSD/macOS man has no -l flag (it's a man-db extension),
+# but both man-db and BSD man render a path argument directly when it
+# contains a slash. Prefer -l where supported, else the bare path, so the
+# render smoke-tests pass on macOS too (BUG-039 tooling-portability).
+render_manfile() {
+	if man -l "$1" >/dev/null 2>&1; then
+		man -l "$1"
+	else
+		man "$1"
+	fi
+}
+
+@test "man renders every per-verb page without error" {
+	# Parse each file as a manpage; malformed macro usage makes man exit
+	# non-zero.
 	#
-	# Alias pages (`.so` includes) are NOT covered here: `man -l`
-	# resolves `.so man1/<file>` relative to MANDIR, which isn't
-	# set when invoking on an explicit source path. The earlier
-	# "resolve to canonical via .so" assertion already proves the
-	# include path is well-formed; the canonical's own `man -l`
-	# pass below proves the included file renders.
+	# Alias pages (`.so` includes) are NOT covered here: local-file mode
+	# resolves `.so man1/<file>` relative to MANDIR, which isn't set when
+	# invoking on an explicit source path. The earlier "resolve to
+	# canonical via .so" assertion already proves the include path is
+	# well-formed; the canonical's own render pass below proves the
+	# included file renders.
 	command -v man >/dev/null || skip "man not installed"
 	for v in $COMMAND_VERBS $LIBEXEC_VERBS; do
-		run man -l "$MAN_DIR/bitcoin-$v.1"
+		run render_manfile "$MAN_DIR/bitcoin-$v.1"
 		[ "$status" -eq 0 ] \
-			|| { echo "man -l failed for bitcoin-$v.1: $output"; return 1; }
+			|| { echo "render failed for bitcoin-$v.1: $output"; return 1; }
 		[ -n "$output" ]
 	done
 }
 
-@test "man -l renders parent bitcoin(1) without error" {
+@test "man renders parent bitcoin(1) without error" {
 	command -v man >/dev/null || skip "man not installed"
-	run man -l "$MAN_DIR/bitcoin.1"
+	run render_manfile "$MAN_DIR/bitcoin.1"
 	[ "$status" -eq 0 ]
 	[ -n "$output" ]
 }

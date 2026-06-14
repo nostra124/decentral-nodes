@@ -37,7 +37,13 @@ RUN a2enmod cgi headers rewrite setenvif
 # via build context).
 COPY . /opt/lightning
 WORKDIR /opt/lightning
-RUN ./configure --prefix=/usr/local && make install
+# `make install` stows symlinks from /usr/local into /opt/lightning/build,
+# whose files inherit the dev tree's owner/group-only modes (0750/0640).
+# The container runs the verbs as the unprivileged `bitcoin`/`alice` users,
+# so make the installed tree world-readable/executable — otherwise
+# /usr/local/bin/lightning is "Permission denied" (126) for them (BUG-038).
+RUN ./configure --prefix=/usr/local && make install \
+    && chmod -R a+rX /opt/lightning/build /opt/lightning/share
 
 # Operator user — runs `lightning` from this shell and
 # owns the wallet repo. Apache (www-data) sudo's into this
@@ -78,4 +84,9 @@ RUN chmod 0755 /usr/local/bin/sit-entrypoint
 USER bitcoin
 WORKDIR /home/bitcoin
 
-CMD ["/usr/local/bin/sit-entrypoint"]
+# ENTRYPOINT (not CMD) so the stack is brought up even when `podman run`
+# passes a command: `make check-sit` runs the bats suites as that command,
+# and the entrypoint execs them only after bitcoind + lightningd are up.
+# Default CMD keeps the bare `podman run` interactive-idle behaviour.
+ENTRYPOINT ["/usr/local/bin/sit-entrypoint"]
+CMD ["tail", "-F", "/dev/null"]

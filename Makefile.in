@@ -25,6 +25,20 @@ SYSCONFDIR = @SYSCONFDIR@
 DATADIR   = @DATADIR@
 MANDIR    = @MANDIR@
 
+# Stow stages a $PREFIX-relative tree under $(BUILD_DIR), then
+# `stow -t $(PREFIX)` symlinks it into place. The configure dir vars are
+# absolute ($PREFIX/bin, …), so strip the prefix here: the stow source
+# must mirror $PREFIX *relative* (build/bitcoin/bin), not $PREFIX/$PREFIX
+# (build/bitcoin/usr/local/bin) — the latter is the old double-prefix
+# packaging bug that left files at $PREFIX$PREFIX/… and never on PATH
+# (BUG-038). Dirs configured outside $PREFIX keep their absolute path and
+# are not stow-relocatable; that was never supported.
+REL_BINDIR     = $(patsubst $(PREFIX)/%,%,$(BINDIR))
+REL_LIBEXECDIR = $(patsubst $(PREFIX)/%,%,$(LIBEXECDIR))
+REL_SYSCONFDIR = $(patsubst $(PREFIX)/%,%,$(SYSCONFDIR))
+REL_DATADIR    = $(patsubst $(PREFIX)/%,%,$(DATADIR))
+REL_MANDIR     = $(patsubst $(PREFIX)/%,%,$(MANDIR))
+
 # The commands this one package ships. Each has bin/<cmd>, libexec/<cmd>/,
 # share/<cmd>/, share/doc/<cmd>/. Add fulcrum here when it lands.
 PACKAGES = bitcoin lightning fulcrum
@@ -51,32 +65,32 @@ help:
 # the one $(BUILD_DIR) tree, then stowed once under the $(PACKAGE) identity.
 install:
 	@command -v stow >/dev/null || { echo "stow not installed"; exit 1; }
-	@mkdir -p $(BUILD_DIR)$(BINDIR) \
-	          $(BUILD_DIR)$(SYSCONFDIR)/bash_completion.d \
-	          $(BUILD_DIR)$(MANDIR)/man1
+	@mkdir -p $(BUILD_DIR)/$(REL_BINDIR) \
+	          $(BUILD_DIR)/$(REL_SYSCONFDIR)/bash_completion.d \
+	          $(BUILD_DIR)/$(REL_MANDIR)/man1
 	@for p in $(PACKAGES); do \
-		mkdir -p $(BUILD_DIR)$(LIBEXECDIR)/$$p \
-		         $(BUILD_DIR)$(DATADIR)/doc/$$p \
-		         $(BUILD_DIR)$(DATADIR)/$$p; \
+		mkdir -p $(BUILD_DIR)/$(REL_LIBEXECDIR)/$$p \
+		         $(BUILD_DIR)/$(REL_DATADIR)/doc/$$p \
+		         $(BUILD_DIR)/$(REL_DATADIR)/$$p; \
 	done
-	@cp -a bin/* $(BUILD_DIR)$(BINDIR)/
+	@cp -a bin/* $(BUILD_DIR)/$(REL_BINDIR)/
 	@for p in $(PACKAGES); do \
 		if [ -d libexec/$$p ]; then \
-			cp -a libexec/$$p/* $(BUILD_DIR)$(LIBEXECDIR)/$$p/; \
+			cp -a libexec/$$p/* $(BUILD_DIR)/$(REL_LIBEXECDIR)/$$p/; \
 		fi; \
 		if [ -d share/doc/$$p ]; then \
-			cp -a share/doc/$$p/* $(BUILD_DIR)$(DATADIR)/doc/$$p/; \
+			cp -a share/doc/$$p/* $(BUILD_DIR)/$(REL_DATADIR)/doc/$$p/; \
 		fi; \
 		if [ -d share/$$p ]; then \
-			cp -a share/$$p/* $(BUILD_DIR)$(DATADIR)/$$p/; \
+			cp -a share/$$p/* $(BUILD_DIR)/$(REL_DATADIR)/$$p/; \
 		fi; \
 	done
 	@if [ -d etc/bash_completion.d ]; then \
 		cp -a etc/bash_completion.d/* \
-		      $(BUILD_DIR)$(SYSCONFDIR)/bash_completion.d/; \
+		      $(BUILD_DIR)/$(REL_SYSCONFDIR)/bash_completion.d/; \
 	fi
 	@if [ -d share/man/man1 ]; then \
-		cp -a share/man/man1/* $(BUILD_DIR)$(MANDIR)/man1/; \
+		cp -a share/man/man1/* $(BUILD_DIR)/$(REL_MANDIR)/man1/; \
 	fi
 	# FEAT-019 / FEAT-048: agent skills, following the rpk skill
 	# convention (https://github.com/nostra124/rpk, docs/PACKAGING.md).
@@ -89,17 +103,17 @@ install:
 			[ -d "$$skill" ] || continue; \
 			name=$$(basename $$skill); \
 			if [ -f "$$skill/SKILL.md" ]; then \
-				mkdir -p $(BUILD_DIR)$(DATADIR)/claude/skills/$$name; \
+				mkdir -p $(BUILD_DIR)/$(REL_DATADIR)/claude/skills/$$name; \
 				install -m 644 "$$skill/SKILL.md" \
-				    $(BUILD_DIR)$(DATADIR)/claude/skills/$$name/SKILL.md; \
-				mkdir -p $(BUILD_DIR)$(DATADIR)/raven/skills/$$name; \
+				    $(BUILD_DIR)/$(REL_DATADIR)/claude/skills/$$name/SKILL.md; \
+				mkdir -p $(BUILD_DIR)/$(REL_DATADIR)/raven/skills/$$name; \
 				install -m 644 "$$skill/SKILL.md" \
-				    $(BUILD_DIR)$(DATADIR)/raven/skills/$$name/SKILL.md; \
+				    $(BUILD_DIR)/$(REL_DATADIR)/raven/skills/$$name/SKILL.md; \
 			fi; \
 			if [ -f "$$skill/opencode.md" ]; then \
-				mkdir -p $(BUILD_DIR)$(DATADIR)/opencode/commands; \
+				mkdir -p $(BUILD_DIR)/$(REL_DATADIR)/opencode/commands; \
 				install -m 644 "$$skill/opencode.md" \
-				    $(BUILD_DIR)$(DATADIR)/opencode/commands/$$name.md; \
+				    $(BUILD_DIR)/$(REL_DATADIR)/opencode/commands/$$name.md; \
 			fi; \
 		done; \
 	fi
@@ -108,7 +122,7 @@ install:
 	# when invoked as the installed entry, and to ./VERSION in a dev tree.
 	@if [ -f VERSION ]; then \
 		for p in $(PACKAGES); do \
-			install -m 644 VERSION $(BUILD_DIR)$(DATADIR)/$$p/version; \
+			install -m 644 VERSION $(BUILD_DIR)/$(REL_DATADIR)/$$p/version; \
 		done; \
 	fi
 	@stow -d build -t $(PREFIX) $(PACKAGE)
@@ -166,10 +180,13 @@ check-sit:
 	@echo "==> building lightning-clightning (with the local working tree)"
 	@podman build -t lightning-clightning -f tests/sit/podman/Dockerfile.clightning .
 	@echo "==> running lightning bats suites inside the container"
+	@# Mount the whole tests/sit tree (not just suites/) so each suite's
+	@# `load ../helpers` resolves to /sit/helpers.bash — mounting suites/
+	@# alone left the relative include dangling (BUG-038).
 	@podman run --rm \
-		-v $(PWD)/tests/sit/suites:/suites:ro \
+		-v $(PWD)/tests/sit:/sit:ro \
 		lightning-clightning \
-		/bin/bash -lc 'bats /suites/0[1-9]_*lightning* /suites/1[0-4]_*.bats 2>/dev/null || bats /suites/*daemon* /suites/*channel* /suites/*invoice* /suites/*offer* /suites/*lnurl* /suites/*wellknown* /suites/*walkthrough* /suites/*softdep* /suites/*tower* /suites/*fee*'
+		/bin/bash -lc 'bats /sit/suites/0[1-9]_*lightning* /sit/suites/1[0-4]_*.bats 2>/dev/null || bats /sit/suites/*daemon* /sit/suites/*channel* /sit/suites/*invoice* /sit/suites/*offer* /sit/suites/*lnurl* /sit/suites/*wellknown* /sit/suites/*walkthrough* /sit/suites/*softdep* /sit/suites/*tower* /sit/suites/*fee*'
 	@echo "==> running bitcoin host-side suites"
 	@bats tests/sit/suites/*wallet* tests/sit/suites/*derive* tests/sit/suites/*send* tests/sit/suites/*psbt* tests/sit/suites/*push_pull* 2>/dev/null || true
 

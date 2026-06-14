@@ -40,4 +40,13 @@ ALICE
 
 sudo apache2ctl start
 echo "SIT stack up: bitcoind + lightningd (alice) + apache (CGI)"
-exec tail -F /dev/null
+
+# If a command was passed (the check-sit bats run), exec it now that the
+# stack is up — the suites assume alice's lightningd is already running
+# (helpers.bash spins up bob as the second node). With no command, idle so
+# `podman run` keeps the stack alive for interactive use (BUG-038).
+if [ "$#" -gt 0 ]; then
+	exec "$@"
+else
+	exec tail -F /dev/null
+fi
