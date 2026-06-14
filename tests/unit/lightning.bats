@@ -48,6 +48,82 @@ setup() {
 	mkdir -p "$BIN_SHIM"
 	ln -sf "$FIXTURES/lightning-cli-mock" "$BIN_SHIM/lightning-cli"
 	export PATH="$BIN_SHIM:$PATH"
+
+	# BUG-037 — C locale. The dev box runs a UTF-8 locale (e.g. de_DE.UTF-8)
+	# under which `case "$x" in [a-z]…` GLOB RANGES collate uppercase letters
+	# into the lowercase range, so input validators that reject capitalised
+	# usernames (api-recv/api-verify: `[a-z][a-z0-9_-]*`) wrongly accept them.
+	# CI runs in C; pin it here so the range tests are locale-independent.
+	export LC_ALL=C
+	export LANG=C
+
+	# BUG-037 — hide a host-installed lightningd. On a box that actually runs
+	# the stack, `lightningd` is on PATH (e.g. /opt/homebrew/bin/lightningd).
+	# That makes `daemon install` hit its idempotency guard ("already on PATH")
+	# and short-circuits the auto-unlock probe in `daemon start`. Every test
+	# that needs lightningd stubs its OWN copy into $BIN_SHIM (which stays
+	# first on PATH), so the real one is never wanted. Drop the directories
+	# that carry a real lightningd from PATH, but first preserve any external
+	# tool that lives ONLY in such a dir (openssl is the only one on macOS —
+	# /opt/homebrew/bin) by symlinking it into $BIN_SHIM.
+	local _lnd_dirs="" _d
+	local _oldifs="$IFS"; IFS=:
+	for _d in $PATH; do
+		[ "$_d" = "$BIN_SHIM" ] && continue
+		[ -x "$_d/lightningd" ] && _lnd_dirs="$_lnd_dirs $_d"
+	done
+	IFS="$_oldifs"
+	if [ -n "$_lnd_dirs" ]; then
+		# Preserve tools that would otherwise vanish with the dropped dirs.
+		for _t in openssl; do
+			if [ ! -e "$BIN_SHIM/$_t" ]; then
+				local _tp; _tp=$(command -v "$_t" 2>/dev/null) || true
+				[ -n "$_tp" ] && ln -sf "$_tp" "$BIN_SHIM/$_t"
+			fi
+		done
+		local _newpath=""
+		IFS=:
+		for _d in $PATH; do
+			case " $_lnd_dirs " in *" $_d "*) continue ;; esac
+			_newpath="${_newpath:+$_newpath:}$_d"
+		done
+		IFS="$_oldifs"
+		export PATH="$_newpath"
+		hash -r 2>/dev/null || true
+	fi
+
+	# BUG-037 — launchd plist directories are seams (LIGHTNING_LAUNCHAGENTS_DIR
+	# / LIGHTNING_LAUNCHD_DIR). On a host that actually runs the stack (a real
+	# /Library/LaunchDaemons/network.lightning.lightningd.plist installed), the
+	# daemon's launchd_plist() would otherwise SEE that real system plist and
+	# route user-mode installs / operate verbs at it. Pin BOTH dirs under the
+	# per-test tmp tree so no test ever reads or writes the real Apple paths.
+	# LaunchAgents already defaults to $HOME/Library/LaunchAgents (tmp HOME);
+	# pin it explicitly too so the value is independent of HOME games a test
+	# might play. Individual system-mode tests (e.g. _bug033_system_setup)
+	# re-export LIGHTNING_LAUNCHD_DIR to their own assertable tmp dir.
+	export LIGHTNING_LAUNCHAGENTS_DIR="$HOME/Library/LaunchAgents"
+	export LIGHTNING_LAUNCHD_DIR="$BATS_TMPDIR/launchd.$$"
+	rm -rf "$LIGHTNING_LAUNCHD_DIR"
+
+	# BUG-037 — `id <username>` stub. The system installers probe whether the
+	# service account already exists; on a live host a real _lightning /
+	# clightning account makes that probe succeed, so the account-creation
+	# branch (and the assertions that depend on it) would be skipped. Stub a
+	# username lookup to "not found" so the create path always fires, while
+	# the numeric/flag forms (id -u / -g / -G / id with no args) pass through
+	# to the real /usr/bin/id so unrelated callers keep working.
+	cat > "$BIN_SHIM/id" <<'EOF'
+#!/bin/sh
+# Flag forms and the no-arg form: delegate to the real id.
+case "$1" in
+	-*|"") exec /usr/bin/id "$@" ;;
+esac
+# A bare username argument → report "no such user".
+echo "id: $1: no such user" >&2
+exit 1
+EOF
+	chmod +x "$BIN_SHIM/id"
 }
 
 teardown() {
@@ -526,6 +602,12 @@ EOF
 EOF
 	printf '#!/bin/sh\nexit 0\n' > "$BIN_SHIM/lightningd"
 	chmod +x "$BIN_SHIM/lightningd"
+	# BUG-037 — scrub PATH (as the sibling bitcoin-cli test does) so a real
+	# `secret` on the host's PATH can't trigger cmd_start's auto-unlock hook,
+	# which would `wallet unlock --stored` (a no-op success) and return 0
+	# BEFORE the post-start probe runs. On CI `secret` is absent, so the hook
+	# is skipped and the probe fires; pin the same condition here.
+	export PATH="$BIN_SHIM:/usr/bin:/bin"
 	run "$LIGHTNING_BIN" -v daemon start
 	# Exit 2 = post-start probe found the daemon down.
 	[ "$status" -eq 2 ]
@@ -2767,10 +2849,24 @@ EOF
 exec /usr/bin/uname "$@"
 EOF
 	chmod +x "$BIN_SHIM/uname"
+	# BUG-037 — on a host that actually runs the stack, the REAL system log at
+	# /var/lib/lightning/log exists, so the daemon would tail it (exit 0) and
+	# the "no log → exit 2" expectation would never hold. Redirect the system
+	# state dir to an empty tmp dir via LIGHTNING_SYSTEM_STATE (the same seam
+	# the installer uses) so the probe finds no log regardless of host state.
+	export LIGHTNING_SYSTEM_STATE="$BATS_TMPDIR/sysstate.$$"
+	rm -rf "$LIGHTNING_SYSTEM_STATE"
 	run "$LIGHTNING_BIN" daemon monitor --system
 	[ "$status" -eq 2 ]
-	[[ "$output" == *"/var/lib/lightning"* ]]
+	# The resolved path is the (redirected) system state dir, never the
+	# Intel-Homebrew clightning path — the regression this test guards.
+	[[ "$output" == *"$LIGHTNING_SYSTEM_STATE/log"* ]]
 	[[ "$output" != *"/usr/local/var/clightning"* ]]
+	# And the production default really is /var/lib/lightning (not the Intel
+	# path) — assert against the daemon source so the default can't regress.
+	local daemon_src="$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	grep -q 'LIGHTNING_SYSTEM_STATE:-/var/lib/lightning' "$daemon_src"
+	! grep -q '/usr/local/var/clightning' "$daemon_src"
 }
 
 @test "BUG-032: daemon monitor (system, Linux) tails lightningd.service via journalctl" {
@@ -3002,6 +3098,10 @@ EOF
 
 @test "FEAT-207: install-core --from rpk errors when rpk not on PATH" {
 	# No rpk shim — the BIN_SHIM is clean by default.
+	# BUG-037 — scrub PATH so a real `rpk` on the host (this IS an rpk box:
+	# ~/.local/bin/rpk) can't satisfy the on-PATH check we're asserting is
+	# absent. On CI rpk isn't installed, so this matches that condition.
+	export PATH="$BIN_SHIM:/usr/bin:/bin"
 	run "$LIGHTNING_BIN" daemon install --from rpk
 	[ "$status" -eq 1 ]
 	[[ "$output" == *"rpk not on PATH"* ]]
@@ -3026,7 +3126,11 @@ EOF
 }
 
 @test "FEAT-207: install-core --from brew off-macOS exits with a clear hint" {
-	# bats CI runs Linux — is_macos returns false here, so --from brew errors.
+	# bats CI runs Linux — is_macos returns false there, so --from brew errors.
+	# BUG-037 — on a macOS host is_macos() is true and brew would be ACCEPTED,
+	# so stub `uname -s` -> Linux to exercise the off-macOS rejection path the
+	# same way CI does.
+	_stub_uname_linux
 	_stub_brew 0 1
 	run "$LIGHTNING_BIN" daemon install --from brew
 	[ "$status" -eq 1 ]
@@ -3150,6 +3254,22 @@ EOF
 	chmod +x "$BIN_SHIM/id"
 }
 
+# BUG-037 — pretend `uname -s` reports Linux. On a real macOS host the
+# daemon's is_macos()/platform_id() short-circuit to darwin/launchd BEFORE
+# they ever read LIGHTNING_OS_RELEASE, so the faked /etc/os-release was
+# ignored and the apk/source install paths were unreachable. Stubbing uname
+# lets those Linux package-manager paths actually run (every external tool
+# they touch — apk/apt-get/git/make/doas/sudo — is already stubbed in
+# $BIN_SHIM), so the tests exercise real logic instead of erroring out.
+_stub_uname_linux() {
+	cat > "$BIN_SHIM/uname" <<'EOF'
+#!/bin/sh
+[ "$1" = "-s" ] && { echo Linux; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+	chmod +x "$BIN_SHIM/uname"
+}
+
 # Fake /etc/os-release pointing platform_id() at Alpine.
 _fake_alpine_os_release() {
 	local f="$BATS_TMPDIR/os-release.$$"
@@ -3159,6 +3279,8 @@ VERSION_ID=3.20.0
 PRETTY_NAME="Alpine Linux v3.20"
 EOF
 	export LIGHTNING_OS_RELEASE="$f"
+	# So platform_id() doesn't short-circuit to darwin on a macOS host.
+	_stub_uname_linux
 }
 
 @test "FEAT-207: install-core --from apk runs apk add lightningd via doas" {
@@ -3344,6 +3466,9 @@ VERSION_ID=24.04
 PRETTY_NAME="Ubuntu 24.04"
 EOF
 	export LIGHTNING_OS_RELEASE="$f"
+	# BUG-037 — so platform_id() reads the override instead of short-circuiting
+	# to darwin on a macOS host (the source/apt path is otherwise unreachable).
+	_stub_uname_linux
 }
 
 # Common setup for source-backend tests.
@@ -3699,6 +3824,17 @@ _podman_lifecycle_setup() {
 	# Skip it for the lifecycle tests — peer-graph wiring isn't part of
 	# what we're testing here.
 	export LIGHTNING_NO_BOOTSTRAP=1
+	# BUG-037 — on a macOS host that runs the live stack, launchctl has the
+	# REAL network.lightning.lightningd job loaded, so cmd_stop/cmd_status see
+	# launchd_loaded=true and pick the launchd branch BEFORE podman. Stub
+	# launchctl so `launchctl list <label>` reports no loaded job (exit 1),
+	# matching the no-launchd CI baseline; the podman branch then wins.
+	cat > "$BIN_SHIM/launchctl" <<'EOF'
+#!/bin/sh
+# `launchctl list <label>` -> not loaded; everything else is a no-op.
+exit 1
+EOF
+	chmod +x "$BIN_SHIM/launchctl"
 	_stub_podman_lifecycle
 }
 
@@ -3831,7 +3967,19 @@ EOF
 }
 
 _openrc_common_setup() {
-	_fake_alpine_os_release
+	_fake_alpine_os_release   # also stubs uname -s -> Linux (BUG-037)
+	# BUG-037 — init_system() picks OpenRC when `openrc` is on PATH (or
+	# /etc/init.d exists) AND platform_id is alpine. On a macOS host neither
+	# /etc/init.d nor a real openrc exists, so without this stub `daemon
+	# enable` would route to the macOS launchd installer and the OpenRC
+	# assertions could never run. Stub openrc so the Alpine/OpenRC code path
+	# is reachable; everything it shells out to is stubbed below or seam-routed
+	# (LIGHTNING_INIT_D / LIGHTNING_OPENRC_STATE).
+	cat > "$BIN_SHIM/openrc" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$BIN_SHIM/openrc"
 	export LIGHTNING_INIT_D="$BATS_TMPDIR/init.d.$$"
 	export LIGHTNING_OPENRC_STATE="$BATS_TMPDIR/lightning-state.$$"
 	rm -rf "$LIGHTNING_INIT_D" "$LIGHTNING_OPENRC_STATE"

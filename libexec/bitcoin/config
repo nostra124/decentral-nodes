@@ -68,7 +68,10 @@ config:_bitcoind() {
 # handles multi-line defaults). Empty + non-zero if none/unknown.
 config:_default() {
 	local key="$1"
-	config:_dump_help 2>/dev/null | awk -F'\t' -v k="$key" '$1==k{print $2; f=1; exit} END{exit !f}'
+	# Non-zero for a key with no default (incl. unknown). f flag + single
+	# `END { exit !f }` (gawk runs END after a mid-rule exit).
+	config:_dump_help 2>/dev/null | awk -F'\t' -v k="$key" '
+		$1==k { if ($2!="") { print $2; f=1 } exit } END { exit !f }'
 }
 
 # Dump every documented bitcoind option as NAME<TAB>DEFAULT<TAB>DESCRIPTION,

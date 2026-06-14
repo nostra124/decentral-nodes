@@ -1238,6 +1238,21 @@ feat034_env() {
 		STUB
 		chmod +x "$stub/$c"
 	done
+	# BUG-035: on a host that already runs the live stack a real
+	# 'bitcoin'/'_bitcoin' account exists, so daemon:_ensure_account's
+	# `id "$user"` short-circuits and the account-creation branch never
+	# runs. This stub makes any *username* lookup report not-found (so the
+	# creation path is always exercised) while passing the option forms
+	# (-u / -un / -g …) through to the real id (daemon:_domain needs them).
+	cat > "$stub/id" <<-'STUB'
+		#!/usr/bin/env bash
+		case "$1" in
+			-*) exec /usr/bin/id "$@" ;;
+			"") exec /usr/bin/id ;;
+			*)  exit 1 ;;
+		esac
+	STUB
+	chmod +x "$stub/id"
 	# Transparent sudo, but it records its invocation so tests can assert
 	# that privileged steps (e.g. installing bitcoin.conf into the root-
 	# owned datadir, BUG-030) actually route through sudo.
@@ -1443,10 +1458,37 @@ feat034_env() {
 @test "FEAT-034 — enable errors clearly when bitcoind is absent" {
 	feat034_env linux
 	unset BITCOIN_BITCOIND
+	# BUG-035: daemon:_bitcoind_candidates also probes the absolute
+	# MacPorts / Homebrew dirs, which exist on a host running the live
+	# stack. Empty the $BITCOIN_SYSTEM_BINDIRS seam (and keep
+	# BITCOIN_BITCOIND unset) so the absolute-dir probe finds nothing,
+	# and pin PATH to the stub dir + the system bindirs (no bitcoind on
+	# any of them) so the PATH probe finds nothing either → the
+	# absent-error path runs.
+	export BITCOIN_SYSTEM_BINDIRS=""
+	export PATH="$HOME/daemon-stub:/usr/bin:/bin:/usr/sbin:/sbin"
 	run --separate-stderr "$BITCOIN_BIN" daemon enable --user
 	[ "$status" -ne 0 ]
-	echo "$stderr" | grep -q "no 'bitcoind' on PATH"
+	echo "$stderr" | grep -q "no 'bitcoind' found"
 	echo "$stderr" | grep -q 'bitcoin daemon install'
+}
+
+@test "BUG-035 — daemon honors the \$BITCOIN_SYSTEM_BINDIRS override" {
+	feat034_env linux
+	unset BITCOIN_BITCOIND
+	# Point the seam at a temp dir holding our own runnable bitcoind, and
+	# scrub PATH so the host's real binaries can't leak in. enable must
+	# discover the seam binary and wire it into the rendered unit.
+	local bindir="$HOME/seam-bin"
+	mkdir -p "$bindir"
+	printf '#!/usr/bin/env bash\n:\n' > "$bindir/bitcoind"
+	chmod +x "$bindir/bitcoind"
+	export BITCOIN_SYSTEM_BINDIRS="$bindir"
+	export PATH="$HOME/daemon-stub:/usr/bin:/bin:/usr/sbin:/sbin"
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	grep -q "ExecStart=$bindir/bitcoind " \
+		"$XDG_CONFIG_HOME/systemd/user/bitcoind.service"
 }
 
 @test "FEAT-034 — disable --user removes the unit and tears the service down" {
@@ -1518,7 +1560,11 @@ feat033_env() {
 		exit 0
 	STUB
 	chmod +x "$stub/bitcoind"
-	export PATH="$stub:$PATH"
+	# BUG-035: pin PATH to the stub dir + the system bindirs only — NOT the
+	# inherited PATH — so a real brew / port / bitcoind on the host (the live
+	# stack) can't leak in. The package-manager-absent test removes the stub
+	# 'brew' and must then see it as genuinely not-found.
+	export PATH="$stub:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 @test "FEAT-033 — install --from brew runs 'brew install bitcoin'" {
@@ -1712,6 +1758,11 @@ bug015_env() {
 
 @test "BUG-015 — space reports the data dir's disk usage" {
 	bug015_env
+	# BUG-035: pin the OS to linux so daemon:_datadir resolves to the
+	# $HOME/.bitcoin path this test populates (on a macOS host the user-mode
+	# datadir would otherwise be "$HOME/Library/Application Support/Bitcoin",
+	# leaving the created dir unseen and `space` hitting the absent-error).
+	export BITCOIN_DAEMON_OS=linux
 	mkdir -p "$HOME/.bitcoin"
 	head -c 4096 /dev/zero > "$HOME/.bitcoin/blk"
 	run "$BITCOIN_BIN" daemon space --user

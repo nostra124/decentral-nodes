@@ -293,12 +293,21 @@ daemon:_os() {
 # locked down by a tight umask), then PATH. $BITCOIN_BITCOIND overrides.
 daemon:_bitcoind_candidates() {
 	if [ -n "${BITCOIN_BITCOIND:-}" ]; then printf '%s\n' "$BITCOIN_BITCOIND"; return 0; fi
-	local c seen=" "
-	for c in /opt/local/bin/bitcoind /opt/homebrew/bin/bitcoind "$(command -v bitcoind 2>/dev/null)"; do
-		[ -n "$c" ] && [ -x "$c" ] || continue
-		case "$seen" in *" $c "*) continue ;; esac
-		seen="$seen$c "; printf '%s\n' "$c"
+	# $BITCOIN_SYSTEM_BINDIRS overrides the known-dir list (test harness);
+	# defaults to the world-readable MacPorts tree ahead of Homebrew. PATH
+	# is always probed last. Mirrors fulcrum's $FULCRUM_SYSTEM_BINDIRS seam.
+	local dirs="${BITCOIN_SYSTEM_BINDIRS-/opt/local/bin /opt/homebrew/bin}"
+	local c d cand seen=" "
+	for d in $dirs; do
+		cand="$d/bitcoind"
+		[ -x "$cand" ] || continue
+		case "$seen" in *" $cand "*) continue ;; esac
+		seen="$seen$cand "; printf '%s\n' "$cand"
 	done
+	c="$(command -v bitcoind 2>/dev/null)"
+	[ -n "$c" ] && [ -x "$c" ] || return 0
+	case "$seen" in *" $c "*) return 0 ;; esac
+	printf '%s\n' "$c"
 }
 
 # First candidate the daemon can run. In system mode each candidate is

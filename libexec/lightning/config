@@ -77,9 +77,11 @@ config:_lightningd() {
 config:_default() {
 	local key="$1"
 	# awk -F'\t' (not `read`, which collapses empty TSV fields) so a
-	# no-default option doesn't return its description.
+	# no-default option doesn't return its description. Use an `f` flag +
+	# a single `END { exit !f }` — gawk runs END after a mid-rule `exit`,
+	# so a bare `END { exit 1 }` would clobber the success code.
 	config:_dump_help 2>/dev/null | awk -F'\t' -v k="$key" '
-		$1==k { if ($2=="") exit 1; print $2; exit } END { exit 1 }'
+		$1==k { if ($2!="") { print $2; f=1 } exit } END { exit !f }'
 }
 
 # Dump every documented lightningd option as

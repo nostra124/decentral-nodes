@@ -47,6 +47,20 @@ setup() {
 	# du must still print a size for `space`.
 	printf '#!/usr/bin/env bash\necho "du $*" >> "%s"\necho "123M\t."\n' "$CALLLOG" > "$MOCKBIN/du"
 	chmod +x "$MOCKBIN/du"
+	# Hermeticity (BUG-036): a host that already has a real '_fulcrum' account
+	# (from a live --system deploy) would short-circuit daemon:_ensure_account's
+	# `id "$user"` existence check and skip the dscl account-creation branch the
+	# BUG-031 macos test asserts. Stub `id` so any *username* lookup reports
+	# "not found", while flag forms (`id -u`, `id -un`) pass through to real id.
+	cat > "$MOCKBIN/id" <<-STUB
+		#!/usr/bin/env bash
+		case "\$1" in
+		  -*) exec /usr/bin/id "\$@" ;;
+		  "") exec /usr/bin/id ;;
+		  *) exit 1 ;;
+		esac
+	STUB
+	chmod +x "$MOCKBIN/id"
 	# sudo logs then execs its args (so 'sudo systemctl' still records
 	# systemctl). It strips a leading '-u <user>' so the enable preflight's
 	# `sudo -u <svc> <bin> --version` execs the binary directly under the

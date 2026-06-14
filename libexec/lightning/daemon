@@ -23,6 +23,14 @@ LIGHTNING_NETWORK="${LIGHTNING_NETWORK:-bitcoin}"
 NETWORK_DIR="$LIGHTNING_DIR/$LIGHTNING_NETWORK"
 RPC_FILE="$NETWORK_DIR/lightning-rpc"
 LAUNCHD_LABEL="network.lightning.lightningd"
+# BUG-037 — launchd plist directories are overridable seams so the unit
+# tests (and any sandbox) never read or write the real system paths.
+#   LIGHTNING_LAUNCHAGENTS_DIR  per-user LaunchAgents  (default ~/Library/LaunchAgents)
+#   LIGHTNING_LAUNCHD_DIR       system LaunchDaemons   (default /Library/LaunchDaemons)
+# Every install/operate/disable path routes through these two vars; no
+# function hardcodes the literal Apple paths.
+LIGHTNING_LAUNCHAGENTS_DIR="${LIGHTNING_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+LIGHTNING_LAUNCHD_DIR="${LIGHTNING_LAUNCHD_DIR:-/Library/LaunchDaemons}"
 # FEAT-269 — systemd unit / launchd-label base name for the main
 # lightningd service. mainnet (CLN calls it 'bitcoin') keeps the bare
 # names for backward compatibility; other networks get a -<net> suffix
@@ -180,8 +188,8 @@ launchd_plist() {
 	# Per-user LaunchAgent first; fall back to the system path if a
 	# LaunchDaemon plist exists (running as the operator usually
 	# means the per-user one; --system install writes the other).
-	local user_plist="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
-	local sys_plist="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+	local user_plist="$LIGHTNING_LAUNCHAGENTS_DIR/${LAUNCHD_LABEL}.plist"
+	local sys_plist="$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist"
 	if [ -f "$user_plist" ]; then
 		echo "$user_plist"
 	elif [ -f "$sys_plist" ]; then
@@ -563,7 +571,7 @@ cmd_start() {
 	# `lightningd --daemon` is for users who skipped `daemon enable`.
 	if [ "$mode" = "system" ]; then
 		if is_macos; then
-			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			local plist=$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
 			info "sudo launchctl load -w $plist"
 			sudo launchctl load -w "$plist"
 		else
@@ -696,7 +704,7 @@ cmd_stop() {
 	fi
 	if [ "$mode" = "system" ]; then
 		if is_macos; then
-			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			local plist=$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
 			info "sudo launchctl unload $plist"
 			sudo launchctl unload "$plist"
 		else
@@ -790,7 +798,13 @@ cmd_monitor() {
 		if is_macos; then
 			local sys_suffix=""
 			[ "$LIGHTNING_NETWORK" != bitcoin ] && sys_suffix="-$LIGHTNING_NETWORK"
-			local logfile="/var/lib/lightning/log${sys_suffix}"
+			# /var/lib/lightning is the macOS system state dir (the same
+			# /var/lib/<product> the bitcoin/fulcrum daemons use), NOT the
+			# old Intel-Homebrew clightning prefix that breaks on Apple
+			# Silicon. Overridable via LIGHTNING_SYSTEM_STATE for testability
+			# (mirrors the install path; BUG-033/BUG-037).
+			local state_dir="${LIGHTNING_SYSTEM_STATE:-/var/lib/lightning}"
+			local logfile="$state_dir/log${sys_suffix}"
 			[ -f "$logfile" ] || { error "system log not found at $logfile"; exit 2; }
 			exec tail "${passthrough[@]}" "$logfile"
 		else
@@ -969,7 +983,7 @@ cmd_disable() {
 
 	if [ "$mode" = "system" ]; then
 		if is_macos; then
-			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			local plist=$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
 			if [ -f "$plist" ]; then
 				sudo launchctl unload "$plist" 2>/dev/null || true
 				sudo rm "$plist"
@@ -993,7 +1007,7 @@ cmd_disable() {
 		fi
 	else
 		if is_macos; then
-			local plist="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+			local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${LAUNCHD_LABEL}.plist"
 			if [ -f "$plist" ]; then
 				launchctl unload "$plist" 2>/dev/null || true
 				rm "$plist"
@@ -1072,7 +1086,7 @@ install_keepalive_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${KEEPALIVE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${KEEPALIVE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1161,7 +1175,7 @@ install_alert_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${ALERT_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${ALERT_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1247,7 +1261,7 @@ install_autopilot_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${AUTOPILOT_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${AUTOPILOT_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1335,7 +1349,7 @@ install_topup_watcher_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${TOPUP_WATCHER_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${TOPUP_WATCHER_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1420,7 +1434,7 @@ install_reconcile_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${RECONCILE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${RECONCILE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1502,7 +1516,7 @@ install_account_gc_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${ACCOUNT_GC_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${ACCOUNT_GC_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1586,7 +1600,7 @@ install_fee_autotune_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${FEE_AUTOTUNE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${FEE_AUTOTUNE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1673,7 +1687,7 @@ install_price_oracle_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${PRICE_ORACLE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${PRICE_ORACLE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1756,7 +1770,7 @@ install_standing_orders_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${STANDING_ORDER_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${STANDING_ORDER_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
