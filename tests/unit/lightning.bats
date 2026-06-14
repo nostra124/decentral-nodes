@@ -9420,6 +9420,35 @@ feat272_env() {
 }
 
 # ---------------------------------------------------------------------------
+# FEAT-298: lightning config list = TSV (NAME<TAB>VALUE<TAB>DESCRIPTION)
+# with compiled-in defaults from `lightningd --help`, mirroring bitcoin's
+# FEAT-271. Reuses feat272_env's stubbed lightningd + temp config dir, so
+# it's hermetic (LIGHTNING_CONFIG_DIR override) and never touches /etc.
+# ---------------------------------------------------------------------------
+@test "FEAT-298 — config list is TSV (name/value/description) with effective values + defaults" {
+	feat272_env
+	run "$LIGHTNING_BIN" config list
+	[ "$status" -eq 0 ]
+	echo "$output" | head -1 | grep -q 'NAME'
+	# conf value overrides the default (log-level set to debug in conf):
+	echo "$output" | awk -F'\t' '$1=="log-level"&&$2=="debug"{f=1} END{exit !f}'
+	# an unset option shows its compiled-in default + description:
+	echo "$output" | awk -F'\t' '$1=="alias"&&$2=="SILLY-NAME"&&$3~/alias for node/{f=1} END{exit !f}'
+	# a conf-only key (not in --help) still appears:
+	echo "$output" | awk -F'\t' '$1=="network"&&$2=="bitcoin"{f=1} END{exit !f}'
+}
+
+@test "FEAT-298 — config list --set shows only the conf-set keys" {
+	feat272_env
+	run "$LIGHTNING_BIN" config list --set
+	[ "$status" -eq 0 ]
+	echo "$output" | awk -F'\t' '$1=="network"&&$2=="bitcoin"{f=1} END{exit !f}'
+	echo "$output" | awk -F'\t' '$1=="log-level"&&$2=="debug"{f=1} END{exit !f}'
+	# alias is a default-only key → excluded by --set
+	! echo "$output" | awk -F'\t' '$1=="alias"{f=1} END{exit !f}'
+}
+
+# ---------------------------------------------------------------------------
 # BUG-033 — `daemon enable --system` must produce a WORKING node on a
 # fresh machine with no manual steps. Three fixes, all in the system
 # installers (install_system / install_macos_system / install_openrc_system):
@@ -9449,7 +9478,10 @@ _bug033_system_setup() {
 	export LIGHTNING_SYSTEM_STATE="$BATS_TMPDIR/lnsys-state.$$"
 	export LIGHTNING_SYSTEMD_DIR="$BATS_TMPDIR/lnsys-systemd.$$"
 	export LIGHTNING_LAUNCHD_DIR="$BATS_TMPDIR/lnsys-launchd.$$"
-	rm -rf "$LIGHTNING_SYSTEM_STATE" "$LIGHTNING_SYSTEMD_DIR" "$LIGHTNING_LAUNCHD_DIR"
+	# FEAT-298: the system config now lives under /etc (FHS). Redirect it to
+	# a temp dir so the installer's writes stay hermetic (no real /etc leak).
+	export LIGHTNING_CONFIG_DIR="$BATS_TMPDIR/lnsys-etc.$$"
+	rm -rf "$LIGHTNING_SYSTEM_STATE" "$LIGHTNING_SYSTEMD_DIR" "$LIGHTNING_LAUNCHD_DIR" "$LIGHTNING_CONFIG_DIR"
 	export BIN_SHIM_CALLS_DIR="$BIN_SHIM"
 
 	_stub_sudo
@@ -9558,7 +9590,8 @@ EOF
 	_bug033_system_setup
 	run "$LIGHTNING_BIN" daemon enable --system
 	[ "$status" -eq 0 ]
-	local cfg="$LIGHTNING_SYSTEM_STATE/config"
+	# FEAT-298: config under /etc (here redirected via LIGHTNING_CONFIG_DIR).
+	local cfg="$LIGHTNING_CONFIG_DIR/config"
 	[ -f "$cfg" ]
 	grep -q "^bitcoin-cli=" "$cfg"
 	grep -q "^bitcoin-datadir=/var/lib/bitcoin$" "$cfg"
@@ -9571,7 +9604,8 @@ EOF
 	_bug033_stub_dscl
 	run "$LIGHTNING_BIN" daemon enable --system
 	[ "$status" -eq 0 ]
-	local cfg="$LIGHTNING_SYSTEM_STATE/config"
+	# FEAT-298: config under /etc (here redirected via LIGHTNING_CONFIG_DIR).
+	local cfg="$LIGHTNING_CONFIG_DIR/config"
 	[ -f "$cfg" ]
 	grep -q "^bitcoin-cli=" "$cfg"
 	grep -q "^bitcoin-datadir=/var/lib/bitcoin$" "$cfg"

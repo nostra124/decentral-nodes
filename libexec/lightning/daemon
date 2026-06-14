@@ -1909,6 +1909,13 @@ install_macos_system() {
 	# operator (added to the group) can reach the RPC socket.
 	sudo install -d -o $svc_user -g $svc_user -m 0750 "$state_dir"
 
+	# Config dir under /etc (FHS: config in /etc, state in /var/lib).
+	# 0755 so the service account can traverse it; the config file itself
+	# is 0640 owned by the service account (written below).
+	# Overridable via LIGHTNING_CONFIG_DIR for testability.
+	local conf_dir="${LIGHTNING_CONFIG_DIR:-/etc/lightning}"
+	sudo install -d -o $svc_user -g $svc_user -m 0755 "$conf_dir"
+
 	# Add the current user to the lightning group so they can talk
 	# to the RPC socket without sudo.
 	sudo dseditgroup -o edit -a "$USER" -t user "$svc_user"
@@ -1929,9 +1936,10 @@ install_macos_system() {
 	# plugin dies ("Bitcoin backend died"). Also disable cln-grpc, an
 	# "important" plugin that crashes lightningd if it can't bind its
 	# gRPC port and which the combined stack doesn't need.
+	# Config under /etc (FHS); log stays under the state dir.
 	local cfg_suffix="" cfg log_file bitcoin_cli
 	[ "$LIGHTNING_NETWORK" != bitcoin ] && cfg_suffix="-$LIGHTNING_NETWORK"
-	cfg="$state_dir/config${cfg_suffix}"
+	cfg="$conf_dir/config${cfg_suffix}"
 	log_file="$state_dir/log${cfg_suffix}"
 	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
 	sudo tee "$cfg" >/dev/null <<EOF
@@ -1943,6 +1951,7 @@ bitcoin-datadir=/var/lib/bitcoin
 disable-plugin=cln-grpc
 EOF
 	sudo chown $svc_user:$svc_user "$cfg"
+	sudo chmod 0640 "$cfg"
 
 	# LaunchDaemon plist running as the service user. BUG-033 — point at
 	# the RESOLVED lightningd, not the brew symlink, or CLN can't find
@@ -2044,6 +2053,13 @@ install_system() {
 	# 2. State dir.
 	sudo install -d -o lightning -g lightning -m 0750 "$state_dir"
 
+	# 2b. Config dir under /etc (FHS: config in /etc, state in /var/lib).
+	# 0755 so the service account can traverse it; the config file is 0640
+	# owned by the service account (written below). Overridable via
+	# LIGHTNING_CONFIG_DIR for testability.
+	local conf_dir="${LIGHTNING_CONFIG_DIR:-/etc/lightning}"
+	sudo install -d -o lightning -g lightning -m 0755 "$conf_dir"
+
 	# 3. Add the operator to the lightning group.
 	sudo usermod -a -G lightning "$USER"
 
@@ -2065,9 +2081,10 @@ install_system() {
 	# plugin dies ("Bitcoin backend died"). Also disable cln-grpc (an
 	# "important" plugin that crashes lightningd if it can't bind its
 	# gRPC port; the combined stack doesn't need it).
+	# Config under /etc (FHS); log stays under the state dir.
 	local cfg_suffix="" cfg log_file bitcoin_cli
 	[ "$LIGHTNING_NETWORK" != bitcoin ] && cfg_suffix="-$LIGHTNING_NETWORK"
-	cfg="$state_dir/config${cfg_suffix}"
+	cfg="$conf_dir/config${cfg_suffix}"
 	log_file="$state_dir/log${cfg_suffix}"
 	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
 	sudo tee "$cfg" >/dev/null <<EOF
@@ -2079,6 +2096,7 @@ bitcoin-datadir=/var/lib/bitcoin
 disable-plugin=cln-grpc
 EOF
 	sudo chown lightning:lightning "$cfg"
+	sudo chmod 0640 "$cfg"
 
 	# 5. Systemd unit (FEAT-269: per-network unit name so non-mainnet
 	# networks install side by side with the bare mainnet unit).

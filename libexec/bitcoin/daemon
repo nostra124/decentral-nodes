@@ -354,6 +354,14 @@ daemon:_datadir() {
 	fi
 }
 
+# Directory holding bitcoin.conf. FHS: system config lives under /etc
+# (config in /etc, data in /var/lib); user mode keeps it in the datadir.
+daemon:_confdir() {
+	local mode=$1
+	if [ "$mode" = system ]; then printf '%s/etc/bitcoin\n' "$(daemon:_root)"
+	else daemon:_datadir "$mode"; fi
+}
+
 # Service account the daemon runs as. macOS uses the '_'-prefixed
 # hidden-account convention; both OSes get a dedicated same-named group
 # (the account's primary group), so files the daemon writes are reachable
@@ -446,14 +454,16 @@ daemon:_render() {
 	if [ "$os" = macos ]; then tmpl="$(daemon:_units_dir)/bitcoind.plist"
 	else tmpl="$(daemon:_units_dir)/bitcoind.service"; fi
 	[ -r "$tmpl" ] || { error "template not found: $tmpl"; return 1; }
-	local label log pidfile chain
+	local label log pidfile chain conf
 	label="$(daemon:_label "$net")"
 	log="$datadir/$(daemon:_logname "$net")"
 	pidfile="$datadir/$(daemon:_svcname "$net").pid"
 	chain="$(daemon:_chain "$net")"
+	conf="$(daemon:_confdir "$mode")/bitcoin.conf"
 	rendered="$(sed \
 		-e "s|@BITCOIND@|$bitcoind|g" \
 		-e "s|@DATADIR@|$datadir|g" \
+		-e "s|@CONF@|$conf|g" \
 		-e "s|@USER@|$user|g" \
 		-e "s|@LABEL@|$label|g" \
 		-e "s|@LOG@|$log|g" \
@@ -606,6 +616,13 @@ command:enable() {
 		$SUDO chown "$user:$group" "$datadir" 2>/dev/null
 	fi
 
+	# Config dir (FHS: /etc/bitcoin in system mode). World-traversable so the
+	# service account reaches bitcoin.conf; the conf itself stays 0640.
+	local confdir; confdir="$(daemon:_confdir "$mode")"
+	$SUDO mkdir -p "$confdir" \
+		|| { error "enable: cannot create config dir '$confdir'"; return 1; }
+	[ "$mode" = system ] && $SUDO chmod 0755 "$confdir" 2>/dev/null
+
 	# Select the bitcoind the service account can actually run (MacPorts
 	# first, then Homebrew, then PATH; system mode verifies each as the
 	# service account so a non-runnable Homebrew keg is skipped here
@@ -616,7 +633,7 @@ command:enable() {
 	# because launchd / systemd already manages the process — with
 	# daemon=1 bitcoind forks, the original PID exits, KeepAlive
 	# spawns another instance, and they collide on the datadir lock.
-	local conf="$datadir/bitcoin.conf"
+	local conf="$confdir/bitcoin.conf"
 	if [ -n "$public" ]; then
 		local rpcuser password salt_hex hmac tmpconf
 		rpcuser="bitcoin"
@@ -907,8 +924,7 @@ command:password() {
 	done
 	local mode
 	mode="$(daemon:_mode "$@")"
-	local datadir; datadir="$(daemon:_datadir "$mode")"
-	local conf="$datadir/bitcoin.conf"
+	local conf="$(daemon:_confdir "$mode")/bitcoin.conf"
 	if [ ! -f "$conf" ]; then
 		error "password: no config at '$conf' (run 'bitcoin daemon enable' first)"
 		return 1

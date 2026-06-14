@@ -41,7 +41,17 @@ config:_datadir() {
 	local rec="$XDG_CONFIG_HOME/bitcoin/bitcoind-datadir"
 	if [ -s "$rec" ]; then cat "$rec"; else printf '/var/lib/bitcoin\n'; fi
 }
-config:_conf() { printf '%s/bitcoin.conf\n' "$(config:_datadir)"; }
+
+# Directory holding bitcoin.conf. The config lives under /etc (FHS:
+# config in /etc, data in /var/lib) — $BITCOIN_CONFIG_DIR overrides
+# (tests), then /etc/bitcoin if present, else the datadir (user-mode /
+# legacy layout).
+config:_confdir() {
+	if [ -n "${BITCOIN_CONFIG_DIR:-}" ]; then printf '%s\n' "$BITCOIN_CONFIG_DIR"; return 0; fi
+	if [ -f /etc/bitcoin/bitcoin.conf ]; then printf '/etc/bitcoin\n'; return 0; fi
+	config:_datadir
+}
+config:_conf() { printf '%s/bitcoin.conf\n' "$(config:_confdir)"; }
 
 # bitcoind candidates for parsing -help defaults: MacPorts, Homebrew,
 # PATH (mirrors the daemon's preference). $BITCOIN_BITCOIND overrides.
@@ -65,6 +75,31 @@ config:_default() {
 			print substr($0, RSTART + 10, RLENGTH - 11); found = 1; exit
 		}
 		END { if (!found) exit 1 }
+	'
+}
+
+# Dump every documented bitcoind option as NAME<TAB>DEFAULT<TAB>DESCRIPTION,
+# parsed from `bitcoind -help`. Used to show the effective config incl.
+# compiled-in defaults. Empty + non-zero if no bitcoind is available.
+config:_dump_help() {
+	local bin; bin="$(config:_bitcoind)" || return 1
+	"$bin" -help 2>/dev/null </dev/null | awk '
+		function flush() {
+			if (name != "") { gsub(/\t/," ",desc); printf "%s\t%s\t%s\n", name, def, desc }
+		}
+		/^  -[a-zA-Z0-9]/ {                       # option header: "  -name=<n>"
+			flush(); h=$0; sub(/^  -/,"",h); sub(/[=[ \t].*$/,"",h)
+			name=h; def=""; desc=""; next
+		}
+		name!="" && /^[ \t]/ {                    # indented continuation = description
+			d=$0; gsub(/^[ \t]+/,"",d); gsub(/[ \t]+$/,"",d)
+			if (d!="") desc=(desc==""?d:desc" "d)
+			if (match($0,/default: [^)]*\)/)) def=substr($0,RSTART+9,RLENGTH-10)
+			next
+		}
+		name!="" && /^[[:space:]]*$/ { next }     # blank line within a block
+		name!="" { flush(); name="" }             # non-indented line ends the block
+		END { flush() }
 	'
 }
 
@@ -103,24 +138,47 @@ config:_install_conf() {
 }
 
 help:list() { cat >&2 <<-EOF
-	usage: $SELF list
-	  Show the keys explicitly set in bitcoin.conf (source: conf). Use
-	  '$SELF get <key>' to see a key's effective value incl. defaults.
+	usage: $SELF list [--set]
+	  Show the EFFECTIVE configuration as TSV: NAME<TAB>VALUE<TAB>DESCRIPTION,
+	  one row per bitcoind option — VALUE is the bitcoin.conf value if set,
+	  otherwise bitcoind's compiled-in default. --set limits output to keys
+	  explicitly present in the config file. Pipe through
+	  \`column -t -s\$'\t'\` for aligned columns.
 	EOF
 }
 command:list() {
-	for a in "$@"; do case "$a" in -h|--help|help) help:list; return 0 ;; esac; done
+	local only_set=0 a
+	for a in "$@"; do case "$a" in
+		-h|--help|help) help:list; return 0 ;;
+		--set) only_set=1 ;;
+	esac; done
 	local conf; conf="$(config:_conf)"
-	if [ ! -r "$conf" ]; then
-		error "list: no readable config at '$conf' (run 'bitcoin daemon enable' first)"; return 1
-	fi
 	info "config: $conf"
-	awk -F= '
-		/^[ \t]*[#;]/ || /^[ \t]*$/ { next }
-		/^[ \t]*\[/ { print "  [" ; next }
-		{ k=$1; sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k); sub(/^[^=]*=/,"",$0);
-		  printf "  %-24s = %s\n", k, $0 }
-	' "$conf"
+	printf 'NAME\tVALUE\tDESCRIPTION\n'
+	local help_dump seen=" "
+	help_dump="$(config:_dump_help 2>/dev/null)"
+	if [ -n "$help_dump" ] && [ "$only_set" = 0 ]; then
+		# Every documented option, with conf value if set else the default.
+		local name def desc val
+		while IFS=$'\t' read -r name def desc; do
+			[ -n "$name" ] || continue
+			val="$(config:_conf_get "$name" "$conf" 2>/dev/null)" || val="$def"
+			printf '%s\t%s\t%s\n' "$name" "$val" "$desc"
+			seen="$seen$name "
+		done <<-DUMP
+		$help_dump
+		DUMP
+	fi
+	# Keys present only in the conf (custom / version-specific / --set).
+	if [ -r "$conf" ]; then
+		local k v
+		while IFS= read -r k; do
+			[ -n "$k" ] || continue
+			case "$seen" in *" $k "*) continue ;; esac
+			v="$(config:_conf_get "$k" "$conf")"
+			printf '%s\t%s\t%s\n' "$k" "$v" '(set in config)'
+		done < <(awk -F= '/^[ \t]*[#;]/||/^[ \t]*$/{next} /^[ \t]*\[/{exit} {k=$1;sub(/^[ \t]+/,"",k);sub(/[ \t]+$/,"",k);print k}' "$conf")
+	fi
 }
 
 help:get() { cat >&2 <<-EOF

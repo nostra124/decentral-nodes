@@ -711,6 +711,42 @@ feat273_env() {
 	[ "$output" = "$FULCRUM_CONFIG_DIR/fulcrum.conf" ]
 }
 
+# ---------------------------------------------------------------------------
+# FEAT-298: fulcrum config list = TSV (NAME<TAB>VALUE<TAB>DESCRIPTION),
+# mirroring bitcoin's FEAT-271. Fulcrum has no --help default dump, so
+# VALUE is always the conf value and DESCRIPTION comes from a built-in
+# map (empty for keys not in it). Hermetic via FULCRUM_CONFIG_DIR.
+# ---------------------------------------------------------------------------
+feat298_env() {
+	mkdir -p "$FULCRUM_CONFIG_DIR"
+	printf '# fulcrum.conf\ndb_mem = 2048\ntcp=0.0.0.0:50001\nsome_custom_key = 7\n' \
+		> "$FULCRUM_CONFIG_DIR/fulcrum.conf"
+}
+
+@test "FEAT-298 — config list is TSV (name/value/description) from the conf + desc map" {
+	feat298_env
+	# fulcrum's setup() doesn't export SELF_QUIET, so a stderr info line may
+	# merge into $output; the awk field tests skip it (it has no tabs).
+	run "$FULCRUM" config list
+	[ "$status" -eq 0 ]
+	# Header row is present, tab-separated:
+	echo "$output" | awk -F'\t' '$1=="NAME"&&$2=="VALUE"&&$3=="DESCRIPTION"{f=1} END{exit !f}'
+	# conf value + a description from the built-in map:
+	echo "$output" | awk -F'\t' '$1=="db_mem"&&$2=="2048"&&$3~/memory cache/{f=1} END{exit !f}'
+	# unspaced 'key=value' line is parsed the same way:
+	echo "$output" | awk -F'\t' '$1=="tcp"&&$2=="0.0.0.0:50001"{f=1} END{exit !f}'
+	# a key not in the map gets an empty description (3 fields, blank 3rd):
+	echo "$output" | awk -F'\t' '$1=="some_custom_key"&&$2=="7"&&$3==""{f=1} END{exit !f}'
+}
+
+@test "FEAT-298 — config list --set is accepted and lists the conf-set keys" {
+	feat298_env
+	run "$FULCRUM" config list --set
+	[ "$status" -eq 0 ]
+	echo "$output" | awk -F'\t' '$1=="NAME"{f=1} END{exit !f}'
+	echo "$output" | awk -F'\t' '$1=="db_mem"&&$2=="2048"{f=1} END{exit !f}'
+}
+
 # ===========================================================================
 # FEAT-058 — admin inspection
 # ===========================================================================

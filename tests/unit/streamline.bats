@@ -1026,6 +1026,10 @@ STUB
 # ---------------------------------------------------------------------------
 feat271_env() {
 	export BITCOIN_CONFIG_DATADIR="$HOME/cfgdir"
+	# Config lives under a dir now (FHS /etc on a real host); point the
+	# frontend at the tmp dir so the suite stays hermetic even when a real
+	# /etc/bitcoin/bitcoin.conf exists on the dev box.
+	export BITCOIN_CONFIG_DIR="$HOME/cfgdir"
 	mkdir -p "$BITCOIN_CONFIG_DATADIR"
 	printf '# bitcoin.conf\nserver=1\ndbcache=600\n' > "$BITCOIN_CONFIG_DATADIR/bitcoin.conf"
 	export BITCOIN_BITCOIND="$HOME/bitcoind-help-stub"
@@ -1041,12 +1045,27 @@ feat271_env() {
 	chmod +x "$BITCOIN_BITCOIND"
 }
 
-@test "FEAT-271 — config list shows the conf-set keys" {
+@test "FEAT-271 — config list is TSV (name/value/description) with effective values + defaults" {
 	feat271_env
 	run "$BITCOIN_BIN" config list
 	[ "$status" -eq 0 ]
-	echo "$output" | grep -q 'server'
-	echo "$output" | grep -q 'dbcache'
+	echo "$output" | head -1 | grep -q 'NAME'
+	# conf value overrides the default:
+	echo "$output" | awk -F'\t' '$1=="dbcache"&&$2=="600"{f=1} END{exit !f}'
+	# an unset option shows its compiled-in default + description:
+	echo "$output" | awk -F'\t' '$1=="maxconnections"&&$2=="125"&&$3~/Maintain at most/{f=1} END{exit !f}'
+	# a conf-only key (not in -help) still appears:
+	echo "$output" | awk -F'\t' '$1=="server"&&$2=="1"{f=1} END{exit !f}'
+}
+
+@test "FEAT-271 — config list --set shows only the conf-set keys" {
+	feat271_env
+	run "$BITCOIN_BIN" config list --set
+	[ "$status" -eq 0 ]
+	echo "$output" | awk -F'\t' '$1=="server"&&$2=="1"{f=1} END{exit !f}'
+	echo "$output" | awk -F'\t' '$1=="dbcache"&&$2=="600"{f=1} END{exit !f}'
+	# maxconnections is a default-only key → excluded by --set
+	! echo "$output" | awk -F'\t' '$1=="maxconnections"{f=1} END{exit !f}'
 }
 
 @test "FEAT-271 — config get returns the conf value (source: conf)" {
@@ -1329,7 +1348,7 @@ feat034_env() {
 	# `cat > "$conf"` would run as the invoking user and fail with EACCES
 	# while still printing "created". The write must route through sudo,
 	# at 0640 owned by the service group.
-	local conf="$BITCOIN_DAEMON_ROOT/var/lib/bitcoin/bitcoin.conf"
+	local conf="$BITCOIN_DAEMON_ROOT/etc/bitcoin/bitcoin.conf"
 	grep -Eq 'sudo install -m 0640 .*bitcoin\.conf' "$FEAT034_CALLS"
 	grep -q 'chown bitcoin:bitcoin .*bitcoin\.conf' "$FEAT034_CALLS"
 	[ -f "$conf" ]
@@ -1344,7 +1363,7 @@ feat034_env() {
 	run "$BITCOIN_BIN" daemon enable --system
 	[ "$status" -eq 0 ]
 	# Makes the .cookie group-readable so sibling daemons authenticate.
-	grep -q '^rpccookieperms=group' "$BITCOIN_DAEMON_ROOT/var/lib/bitcoin/bitcoin.conf"
+	grep -q '^rpccookieperms=group' "$BITCOIN_DAEMON_ROOT/etc/bitcoin/bitcoin.conf"
 }
 
 @test "FEAT-274 — enable omits rpccookieperms on a node that predates it" {
@@ -1352,7 +1371,7 @@ feat034_env() {
 	# default stub emits no -help output → option unsupported → not written.
 	run "$BITCOIN_BIN" daemon enable --system
 	[ "$status" -eq 0 ]
-	! grep -q 'rpccookieperms' "$BITCOIN_DAEMON_ROOT/var/lib/bitcoin/bitcoin.conf"
+	! grep -q 'rpccookieperms' "$BITCOIN_DAEMON_ROOT/etc/bitcoin/bitcoin.conf"
 }
 
 @test "BUG-030 — enable (system) provisions a dedicated group and joins the operator" {

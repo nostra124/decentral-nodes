@@ -38,16 +38,25 @@ warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
 error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
 has()   { type -t "$1:$2" | grep -q function; }
 
-# State directory holding the CLN config file. $LIGHTNING_CONFIG_DIR
-# overrides everything (tests use it); otherwise $LIGHTNING_DIR if the
-# operator exported it (user-mode), else the system default. The CLN
-# config file is always named 'config' inside that dir.
+# State directory (user-mode default / fallback for the config file).
+# $LIGHTNING_DIR if the operator exported it (user-mode), else the system
+# state default. The CLN config file is named 'config' inside the config
+# dir (see config:_confdir).
 config:_datadir() {
-	if [ -n "${LIGHTNING_CONFIG_DIR:-}" ]; then printf '%s\n' "$LIGHTNING_CONFIG_DIR"; return 0; fi
 	if [ -n "${LIGHTNING_DIR:-}" ]; then printf '%s\n' "$LIGHTNING_DIR"; return 0; fi
 	printf '/var/lib/lightning\n'
 }
-config:_conf() { printf '%s/config\n' "$(config:_datadir)"; }
+
+# Directory holding the CLN config file. The system config lives under
+# /etc (FHS: config in /etc, state in /var/lib) — $LIGHTNING_CONFIG_DIR
+# overrides everything (tests use it), then /etc/lightning if present,
+# else the state dir (user-mode / legacy layout).
+config:_confdir() {
+	if [ -n "${LIGHTNING_CONFIG_DIR:-}" ]; then printf '%s\n' "$LIGHTNING_CONFIG_DIR"; return 0; fi
+	if [ -f /etc/lightning/config ]; then printf '/etc/lightning\n'; return 0; fi
+	config:_datadir
+}
+config:_conf() { printf '%s/config\n' "$(config:_confdir)"; }
 
 # lightningd candidates for parsing --help defaults: MacPorts, Homebrew,
 # PATH (mirrors the daemon's preference). $LIGHTNING_LIGHTNINGD overrides.
@@ -61,20 +70,67 @@ config:_lightningd() {
 }
 
 # lightningd's compiled-in default for <key>, parsed from
-# `lightningd --help`. CLN prints options as `--key=<arg>` followed by a
-# description that may contain `(default: X)`, similar to bitcoind.
-# Echoes the default (empty + non-zero if none/unknown). If lightningd
-# isn't found, returns non-zero so 'get' falls back to conf-only.
+# `lightningd --help`. Looks the key up in config:_dump_help (which knows
+# the CLN help format). Echoes the default (empty + non-zero if
+# none/unknown). If lightningd isn't found, returns non-zero so 'get'
+# falls back to conf-only.
 config:_default() {
-	local key="$1" bin
+	local key="$1" name def desc
+	while IFS=$'\t' read -r name def desc; do
+		[ "$name" = "$key" ] || continue
+		[ -n "$def" ] || return 1
+		printf '%s\n' "$def"; return 0
+	done < <(config:_dump_help 2>/dev/null)
+	return 1
+}
+
+# Dump every documented lightningd option as
+# NAME<TAB>DEFAULT<TAB>DESCRIPTION, parsed from `lightningd --help`.
+# CLN's help format differs from bitcoind's: option headers sit in the
+# FIRST column (e.g. `--rpc-file <arg>`, `--name=<file>`, `--version|-V`,
+# or a bare `--flag`), the description begins on the same line after the
+# option token, and continuation lines are space-indented. Defaults
+# appear as `(default: X)` where X may be quoted (`"lightning-rpc"`).
+# Empty + non-zero if no lightningd is available.
+config:_dump_help() {
+	local bin
 	bin="$(config:_lightningd)" || return 1
-	"$bin" --help 2>/dev/null </dev/null | awk -v opt="--$key" '
-		/^[ \t]*--/ { cur = $1; sub(/=.*/, "", cur); inopt = (cur == opt) }
-		inopt && match($0, /\(default: [^)]*\)/) {
-			print substr($0, RSTART + 10, RLENGTH - 11); found = 1; exit
+	# CLN writes log noise to stderr and may pick up a stray ~/.lightning
+	# config; an isolated --lightning-dir keeps the help output clean.
+	local tmpdir; tmpdir="$(mktemp -d)"
+	"$bin" --help --lightning-dir="$tmpdir" 2>/dev/null </dev/null | awk '
+		function strip(s) { gsub(/^[ \t]+/,"",s); gsub(/[ \t]+$/,"",s); return s }
+		function flush() {
+			if (name != "") {
+				gsub(/\t/," ",desc)
+				if (match(desc, /\(default: [^)]*\)/)) {
+					def = substr(desc, RSTART+10, RLENGTH-11)
+					gsub(/^"/,"",def); gsub(/"$/,"",def)
+				}
+				printf "%s\t%s\t%s\n", name, def, strip(desc)
+			}
 		}
-		END { if (!found) exit 1 }
+		/^[ \t]*--/ {                            # option header (CLN: col 0;
+			flush()                              # stub: may be indented)
+			h = $0; sub(/^[ \t]+/, "", h)        # tolerate a leading indent
+			# the option token is the leading --... run, up to whitespace
+			tok = h; sub(/[ \t].*$/, "", tok)
+			d = h; sub(/^[^ \t]+[ \t]*/, "", d)   # rest of line = description start
+			sub(/^<[^>]*>[ \t]*/, "", d)          # drop a leading `<arg>` metavar
+			sub(/^--/, "", tok)
+			sub(/[=|].*$/, "", tok)               # cut at = (=<file>) or | (|-V)
+			name = tok; def = ""; desc = strip(d); next
+		}
+		name != "" && /^[ \t]/ {                 # indented continuation = description
+			d = strip($0)
+			if (d != "") desc = (desc=="" ? d : desc " " d)
+			next
+		}
+		name != "" && /^[[:space:]]*$/ { next }  # blank line within a block
+		name != "" { flush(); name="" }          # any other line ends the block
+		END { flush() }
 	'
+	rm -rf "$tmpdir"
 }
 
 # Last value set for <key> in the conf (top-level; later rows win).
@@ -112,24 +168,48 @@ config:_install_conf() {
 }
 
 help:list() { cat >&2 <<-EOF
-	usage: $SELF list
-	  Show the keys explicitly set in the lightningd config (source: conf).
-	  Use '$SELF get <key>' to see a key's effective value incl. defaults.
+	usage: $SELF list [--set]
+	  Show the EFFECTIVE configuration as TSV: NAME<TAB>VALUE<TAB>DESCRIPTION,
+	  one row per lightningd option — VALUE is the config value if set,
+	  otherwise lightningd's compiled-in default (parsed from
+	  \`lightningd --help\`). --set limits output to keys explicitly present
+	  in the config file. Pipe through \`column -t -s\$'\t'\` for aligned
+	  columns.
 	EOF
 }
 command:list() {
-	for a in "$@"; do case "$a" in -h|--help|help) help:list; return 0 ;; esac; done
+	local only_set=0 a
+	for a in "$@"; do case "$a" in
+		-h|--help|help) help:list; return 0 ;;
+		--set) only_set=1 ;;
+	esac; done
 	local conf; conf="$(config:_conf)"
-	if [ ! -r "$conf" ]; then
-		error "list: no readable config at '$conf' (run 'lightning daemon enable' first)"; return 1
-	fi
 	info "config: $conf"
-	awk -F= '
-		/^[ \t]*[#;]/ || /^[ \t]*$/ { next }
-		/^[ \t]*\[/ { print "  [" ; next }
-		{ k=$1; sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k); sub(/^[^=]*=/,"",$0);
-		  printf "  %-24s = %s\n", k, $0 }
-	' "$conf"
+	printf 'NAME\tVALUE\tDESCRIPTION\n'
+	local help_dump seen=" "
+	help_dump="$(config:_dump_help 2>/dev/null)"
+	if [ -n "$help_dump" ] && [ "$only_set" = 0 ]; then
+		# Every documented option, with conf value if set else the default.
+		local name def desc val
+		while IFS=$'\t' read -r name def desc; do
+			[ -n "$name" ] || continue
+			val="$(config:_conf_get "$name" "$conf" 2>/dev/null)" || val="$def"
+			printf '%s\t%s\t%s\n' "$name" "$val" "$desc"
+			seen="$seen$name "
+		done <<-DUMP
+		$help_dump
+		DUMP
+	fi
+	# Keys present only in the conf (custom / version-specific / --set).
+	if [ -r "$conf" ]; then
+		local k v
+		while IFS= read -r k; do
+			[ -n "$k" ] || continue
+			case "$seen" in *" $k "*) continue ;; esac
+			v="$(config:_conf_get "$k" "$conf")"
+			printf '%s\t%s\t%s\n' "$k" "$v" '(set in config)'
+		done < <(awk -F= '/^[ \t]*[#;]/||/^[ \t]*$/{next} /^[ \t]*\[/{exit} {k=$1;sub(/^[ \t]+/,"",k);sub(/[ \t]+$/,"",k);print k}' "$conf")
+	fi
 }
 
 help:get() { cat >&2 <<-EOF

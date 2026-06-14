@@ -8,7 +8,7 @@
 	<array>
 		<string>@BITCOIND@</string>
 		<string>-datadir=@DATADIR@</string>
-		<string>-conf=@DATADIR@/bitcoin.conf</string>
+		<string>-conf=@CONF@</string>
 		<string>@CHAIN@</string>
 	</array>
 	<key>UserName</key>

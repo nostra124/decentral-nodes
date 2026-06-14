@@ -40,6 +40,38 @@ has() { type -t "$1:$2" | grep -q function; }
 # to start if it appears in the conf).
 CONFIG_ALLOW="db_mem max_history peering announce hostname banner tcp ssl"
 
+# Short descriptions for `config list` (Fulcrum has no `--help` default
+# dump, so there are no compiled-in defaults — VALUE is the conf value
+# and DESCRIPTION comes from this built-in map). Covers the curated
+# CONFIG_ALLOW keys plus the wiring keys 'init' writes; unknown keys get
+# an empty description. NAME<TAB>DESCRIPTION, one per line.
+config:_descmap() {
+	cat <<-'ENDMAP'
+	db_mem	Database memory cache in MiB
+	max_history	Max address history entries returned to a client
+	peering	Connect to other ElectrumX/Fulcrum servers
+	announce	Announce this server to the peer network
+	hostname	Public hostname advertised to peers
+	banner	Path to (or text of) the connection banner
+	datadir	Index database directory
+	bitcoind	bitcoind RPC address (host:port)
+	rpccookie	Path to bitcoind's RPC cookie file
+	rpcuser	bitcoind RPC username
+	rpcpassword	bitcoind RPC password
+	tcp	Plaintext Electrum protocol bind address
+	ssl	TLS Electrum protocol bind address
+	cert	TLS certificate (PEM) path
+	key	TLS private key (PEM) path
+	admin	Admin RPC bind address (localhost only)
+	ENDMAP
+}
+
+# Description for a single key from config:_descmap (empty if unknown).
+config:_desc() {
+	local key="$1"
+	config:_descmap | awk -F'\t' -v k="$key" '$1==k{print $2; exit}'
+}
+
 config:_os() {
 	local os="${FULCRUM_OS:-}"
 	[ -n "$os" ] && { printf '%s\n' "$os"; return; }
@@ -228,24 +260,37 @@ command:show() {
 
 help:list() {
 	cat >&2 <<-ENDHELP
-	usage: fulcrum config list
-	  Show the keys explicitly set in fulcrum.conf (source: conf). Use
-	  'fulcrum config get <key>' to read a single key's value.
+	usage: fulcrum config list [--set]
+	  Show the configuration as TSV: NAME<TAB>VALUE<TAB>DESCRIPTION, one row
+	  per key set in fulcrum.conf. Fulcrum has no '--help' default dump, so
+	  VALUE is the conf value and DESCRIPTION comes from a built-in map for
+	  the curated/wiring keys (empty for unknown keys). --set is accepted
+	  for symmetry with the other daemons (Fulcrum has no defaults, so list
+	  already shows only conf-set keys). Pipe through
+	  \`column -t -s\$'\t'\` for aligned columns.
 	ENDHELP
 }
 command:list() {
-	for a in "$@"; do case "$a" in -h|--help|help) help:list; return 0 ;; esac; done
+	for a in "$@"; do case "$a" in
+		-h|--help|help) help:list; return 0 ;;
+		--set) : ;;  # no-op: Fulcrum has no defaults, list is conf-only already
+	esac; done
 	local file; file="$(config:_file)"
 	if [ ! -r "$file" ]; then
 		error "list: no readable config at '$file' (run 'fulcrum config init' first)"; return 1
 	fi
 	info "config: $file"
-	# Tolerant of both 'key = value' and 'key=value'.
-	awk '
+	printf 'NAME\tVALUE\tDESCRIPTION\n'
+	# Tolerant of both 'key = value' and 'key=value'. Description comes from
+	# the built-in map keyed by name (empty for keys not in the map).
+	local descmap; descmap="$(config:_descmap)"
+	awk -F'\t' -v descmap="$descmap" '
+		BEGIN { n=split(descmap, lines, "\n");
+			for (i=1;i<=n;i++){ split(lines[i], kv, "\t"); desc[kv[1]]=kv[2] } }
 		/^[[:space:]]*[#;]/ || /^[[:space:]]*$/ { next }
-		{ line=$0; sub(/=.*/,"",line); sub(/^[[:space:]]+/,"",line); sub(/[[:space:]]+$/,"",line);
+		{ name=$0; sub(/=.*/,"",name); sub(/^[[:space:]]+/,"",name); sub(/[[:space:]]+$/,"",name);
 		  val=$0; sub(/^[^=]*=/,"",val); sub(/^[[:space:]]+/,"",val); sub(/[[:space:]]+$/,"",val);
-		  printf "  %-24s = %s\n", line, val }
+		  printf "%s\t%s\t%s\n", name, val, desc[name] }
 	' "$file"
 }
 
