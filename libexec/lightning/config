@@ -75,13 +75,11 @@ config:_lightningd() {
 # none/unknown). If lightningd isn't found, returns non-zero so 'get'
 # falls back to conf-only.
 config:_default() {
-	local key="$1" name def desc
-	while IFS=$'\t' read -r name def desc; do
-		[ "$name" = "$key" ] || continue
-		[ -n "$def" ] || return 1
-		printf '%s\n' "$def"; return 0
-	done < <(config:_dump_help 2>/dev/null)
-	return 1
+	local key="$1"
+	# awk -F'\t' (not `read`, which collapses empty TSV fields) so a
+	# no-default option doesn't return its description.
+	config:_dump_help 2>/dev/null | awk -F'\t' -v k="$key" '
+		$1==k { if ($2=="") exit 1; print $2; exit } END { exit 1 }'
 }
 
 # Dump every documented lightningd option as
@@ -101,14 +99,16 @@ config:_dump_help() {
 	"$bin" --help --lightning-dir="$tmpdir" 2>/dev/null </dev/null | awk '
 		function strip(s) { gsub(/^[ \t]+/,"",s); gsub(/[ \t]+$/,"",s); return s }
 		function flush() {
-			if (name != "") {
-				gsub(/\t/," ",desc)
-				if (match(desc, /\(default: [^)]*\)/)) {
-					def = substr(desc, RSTART+10, RLENGTH-11)
-					gsub(/^"/,"",def); gsub(/"$/,"",def)
-				}
-				printf "%s\t%s\t%s\n", name, def, strip(desc)
+			if (name == "") return
+			gsub(/\t/," ",desc); def=""
+			# default: match anywhere (CLN may wrap it), then strip the (...)
+			if (match(desc, /default: [^)]*/)) {
+				def = substr(desc, RSTART+9, RLENGTH-9)
+				gsub(/^"/,"",def); gsub(/"$/,"",def)
 			}
+			gsub(/ *[(][^)]*default: [^)]*[)]/, "", desc)
+			gsub(/  +/," ",desc)
+			printf "%s\t%s\t%s\n", name, def, strip(desc)
 		}
 		/^[ \t]*--/ {                            # option header (CLN: col 0;
 			flush()                              # stub: may be indented)
@@ -189,16 +189,22 @@ command:list() {
 	local help_dump seen=" "
 	help_dump="$(config:_dump_help 2>/dev/null)"
 	if [ -n "$help_dump" ] && [ "$only_set" = 0 ]; then
-		# Every documented option, with conf value if set else the default.
-		local name def desc val
-		while IFS=$'\t' read -r name def desc; do
-			[ -n "$name" ] || continue
-			val="$(config:_conf_get "$name" "$conf" 2>/dev/null)" || val="$def"
-			printf '%s\t%s\t%s\n' "$name" "$val" "$desc"
-			seen="$seen$name "
-		done <<-DUMP
-		$help_dump
-		DUMP
+		# Every documented option, VALUE = conf value if set else the default.
+		# Merged in awk: `read` collapses consecutive TSV tabs (empty fields),
+		# losing the VALUE column for no-default options.
+		printf '%s\n' "$help_dump" | awk -F'\t' -v conffile="$conf" '
+			BEGIN {
+				while ((getline ln < conffile) > 0) {
+					if (ln ~ /^[ \t]*[#;]/ || ln ~ /^[ \t]*$/) continue
+					if (ln ~ /^[ \t]*\[/) break
+					e=index(ln,"="); if(e==0)continue
+					k=substr(ln,1,e-1); gsub(/[ \t]/,"",k)
+					cv[k]=substr(ln,e+1)
+				}
+			}
+			$1!="" { v=($1 in cv)?cv[$1]:$2; printf "%s\t%s\t%s\n", $1, v, $3 }
+		'
+		seen=" $(printf '%s\n' "$help_dump" | cut -f1 | tr '\n' ' ')"
 	fi
 	# Keys present only in the conf (custom / version-specific / --set).
 	if [ -r "$conf" ]; then

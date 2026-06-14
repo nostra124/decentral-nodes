@@ -1033,13 +1033,18 @@ feat271_env() {
 	mkdir -p "$BITCOIN_CONFIG_DATADIR"
 	printf '# bitcoin.conf\nserver=1\ndbcache=600\n' > "$BITCOIN_CONFIG_DATADIR/bitcoin.conf"
 	export BITCOIN_BITCOIND="$HOME/bitcoind-help-stub"
+	# Covers: a comma-form default "(4 to 16384, default: 450)", a multi-line
+	# wrapped description, and an option with NO default (alertnotify).
 	cat > "$BITCOIN_BITCOIND" <<-'STUB'
 		#!/usr/bin/env bash
 		[ "$1" = -help ] && printf '%s\n' \
 		  '  -maxconnections=<n>' \
 		  '       Maintain at most <n> connections (default: 125).' \
 		  '  -dbcache=<n>' \
-		  '       Database cache size (default: 450).'
+		  '       Maximum database cache size <n> MiB (4 to 16384, default:' \
+		  '       450). In addition, unused mempool memory is shared.' \
+		  '  -alertnotify=<cmd>' \
+		  '       Execute command when an alert is raised.'
 		exit 0
 	STUB
 	chmod +x "$BITCOIN_BITCOIND"
@@ -1056,6 +1061,11 @@ feat271_env() {
 	echo "$output" | awk -F'\t' '$1=="maxconnections"&&$2=="125"&&$3~/Maintain at most/{f=1} END{exit !f}'
 	# a conf-only key (not in -help) still appears:
 	echo "$output" | awk -F'\t' '$1=="server"&&$2=="1"{f=1} END{exit !f}'
+	# a no-default option shows an EMPTY value, not its description (the
+	# `read`-collapsing / multi-line-default bug the user hit):
+	echo "$output" | awk -F'\t' '$1=="alertnotify"&&$2==""&&$3~/Execute command/{f=1} END{exit !f}'
+	# the (4 to 16384, default: 450) clause is stripped from the description:
+	echo "$output" | awk -F'\t' '$1=="dbcache"&&$3!~/default:/{f=1} END{exit !f}'
 }
 
 @test "FEAT-271 — config list --set shows only the conf-set keys" {
