@@ -3,12 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>org.bitcoin.bitcoind</string>
+	<string>@LABEL@</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>@BITCOIND@</string>
 		<string>-datadir=@DATADIR@</string>
 		<string>-conf=@DATADIR@/bitcoin.conf</string>
+		<string>@CHAIN@</string>
 	</array>
 	<key>UserName</key>
 	<string>@USER@</string>
@@ -17,8 +18,8 @@
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>@DATADIR@/bitcoind.log</string>
+	<string>@LOG@</string>
 	<key>StandardErrorPath</key>
-	<string>@DATADIR@/bitcoind.log</string>
+	<string>@LOG@</string>
 </dict>
 </plist>

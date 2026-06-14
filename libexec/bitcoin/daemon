@@ -113,15 +113,18 @@ usage: $SELF <options> <command>
    see '$SELF help <command>' for detailed usage.
 
 commands:
-   install [--from <src>]    install bitcoind (brew|apt|apk|source)
-   enable [--system|--user]  install + start unit (default: system)
-   disable [--system|--user] stop service and remove unit
-   start [--user|--system]   start bitcoind
-   stop [--user|--system]    stop bitcoind
-   monitor [--user|--system] tail the bitcoind log
-   password [--user|--system] show RPC credentials from config
-   space [--user|--system]   show data-dir disk usage
-   help <command>            show detailed help for a command
+   install [--from <src>]   install bitcoind (brew|apt|apk|source)
+   enable [--user]          install + start unit (default: system)
+   disable [--user]         stop service and remove unit
+   start [--user]           start bitcoind
+   stop [--user]            stop bitcoind
+   monitor [--user]         tail the bitcoind log
+   password [--user]        show RPC credentials from config
+   space [--user]           show data-dir disk usage
+   help <command>           show detailed help for a command
+
+   The default mode is --system; pass --user for the rootless
+   per-user service.
 ENDHELP
 	fi
 }
@@ -158,19 +161,51 @@ daemon:_domain() {
 	if [ "$1" = system ]; then printf 'system\n'; else printf 'gui/%s\n' "$(id -u)"; fi
 }
 
+# Network (FEAT-268): mainnet (default) | testnet | signet | regtest.
+# Parsed from --network <net> / --network=<net>. mainnet keeps the bare
+# unit names (backward-compatible); other networks get a -<net> suffix
+# and run in PARALLEL via bitcoind's -chain (own data subdir + own
+# ports), so a regtest node coexists with the mainnet one. Echoes the
+# normalized name; 'invalid:<x>' + non-zero on an unknown network.
+daemon:_network() {
+	local net=mainnet want=0 a
+	for a in "$@"; do
+		if [ "$want" = 1 ]; then net="$a"; want=0; continue; fi
+		case "$a" in
+			--network)   want=1 ;;
+			--network=*) net="${a#--network=}" ;;
+		esac
+	done
+	case "$net" in
+		main|mainnet|bitcoin) printf 'mainnet\n' ;;
+		test|testnet)         printf 'testnet\n' ;;
+		signet)               printf 'signet\n' ;;
+		regtest)              printf 'regtest\n' ;;
+		*) printf 'invalid:%s\n' "$net"; return 1 ;;
+	esac
+}
+
+# launchd label / systemd unit base name / log / pidfile / -chain flag
+# for a network. mainnet is bare; other networks append -<net>.
+daemon:_label()   { [ "$1" = mainnet ] && printf 'org.bitcoin.bitcoind\n' || printf 'org.bitcoin.bitcoind-%s\n' "$1"; }
+daemon:_svcname() { [ "$1" = mainnet ] && printf 'bitcoind\n'             || printf 'bitcoind-%s\n' "$1"; }
+daemon:_logname() { [ "$1" = mainnet ] && printf 'bitcoind.log\n'         || printf 'bitcoind-%s.log\n' "$1"; }
+daemon:_chain()   { [ "$1" = mainnet ] || printf -- '-chain=%s\n' "$1"; }
+
 command:start() {
 	for a in "$@"; do
 		case "$a" in -h|--help|help) help:start; return 0 ;; esac
 	done
-	local mode os SUDO=""
+	local mode os net SUDO=""
 	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	net="$(daemon:_network "$@")" || { error "start: unknown network '${net#invalid:}'"; return 1; }
 	[ "$mode" = system ] && SUDO=sudo
 	case "$os" in
 		linux)
-			if [ "$mode" = system ]; then $SUDO systemctl start bitcoind
-			else systemctl --user start bitcoind; fi ;;
+			if [ "$mode" = system ]; then $SUDO systemctl start "$(daemon:_svcname "$net")"
+			else systemctl --user start "$(daemon:_svcname "$net")"; fi ;;
 		macos)
-			$SUDO launchctl kickstart "$(daemon:_domain "$mode")/org.bitcoin.bitcoind" || true ;;
+			$SUDO launchctl kickstart "$(daemon:_domain "$mode")/$(daemon:_label "$net")" || true ;;
 		*) error "start: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
 }
@@ -179,15 +214,16 @@ command:stop() {
 	for a in "$@"; do
 		case "$a" in -h|--help|help) help:stop; return 0 ;; esac
 	done
-	local mode os SUDO=""
+	local mode os net SUDO=""
 	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	net="$(daemon:_network "$@")" || { error "stop: unknown network '${net#invalid:}'"; return 1; }
 	[ "$mode" = system ] && SUDO=sudo
 	case "$os" in
 		linux)
-			if [ "$mode" = system ]; then $SUDO systemctl stop bitcoind
-			else systemctl --user stop bitcoind; fi ;;
+			if [ "$mode" = system ]; then $SUDO systemctl stop "$(daemon:_svcname "$net")"
+			else systemctl --user stop "$(daemon:_svcname "$net")"; fi ;;
 		macos)
-			$SUDO launchctl kill SIGTERM "$(daemon:_domain "$mode")/org.bitcoin.bitcoind" ;;
+			$SUDO launchctl kill SIGTERM "$(daemon:_domain "$mode")/$(daemon:_label "$net")" ;;
 		*) error "stop: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
 }
@@ -196,15 +232,17 @@ command:monitor() {
 	for a in "$@"; do
 		case "$a" in -h|--help|help) help:monitor; return 0 ;; esac
 	done
-	local mode os SUDO=""
+	local mode os net
 	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
-	[ "$mode" = system ] && SUDO=sudo
+	net="$(daemon:_network "$@")" || { error "monitor: unknown network '${net#invalid:}'"; return 1; }
 	case "$os" in
 		linux)
-			if [ "$mode" = system ]; then $SUDO journalctl -u bitcoind -f
-			else journalctl --user -u bitcoind -f; fi ;;
+			if [ "$mode" = system ]; then journalctl -u "$(daemon:_svcname "$net")" -f
+			else journalctl --user -u "$(daemon:_svcname "$net")" -f; fi ;;
 		macos)
-			tail -f "$(daemon:_datadir "$mode")/bitcoind.log" ;;
+			# BUG-030: the operator is in the service group and the datadir
+			# is group-readable, so the log is read directly (no sudo).
+			tail -f "$(daemon:_datadir "$mode")/$(daemon:_logname "$net")" ;;
 		*) error "monitor: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
 }
@@ -249,14 +287,47 @@ daemon:_os() {
 	printf '%s\n' "$os"
 }
 
-# Absolute path to the bitcoind binary. $BITCOIN_BITCOIND overrides
-# the PATH lookup; empty (non-zero return) when nothing is found.
-daemon:_bitcoind() {
-	if [ -n "${BITCOIN_BITCOIND:-}" ]; then
-		printf '%s\n' "$BITCOIN_BITCOIND"
-		return 0
+# bitcoind candidates in preference order: MacPorts (/opt/local — a
+# world-readable, root-owned tree, ideal for a dedicated service
+# account) ahead of Homebrew (/opt/homebrew, user-owned and easily
+# locked down by a tight umask), then PATH. $BITCOIN_BITCOIND overrides.
+daemon:_bitcoind_candidates() {
+	if [ -n "${BITCOIN_BITCOIND:-}" ]; then printf '%s\n' "$BITCOIN_BITCOIND"; return 0; fi
+	local c seen=" "
+	for c in /opt/local/bin/bitcoind /opt/homebrew/bin/bitcoind "$(command -v bitcoind 2>/dev/null)"; do
+		[ -n "$c" ] && [ -x "$c" ] || continue
+		case "$seen" in *" $c "*) continue ;; esac
+		seen="$seen$c "; printf '%s\n' "$c"
+	done
+}
+
+# First candidate the daemon can run. In system mode each candidate is
+# verified by running it as the service account (-datadir avoids probing
+# the operator's home, which the account can't read); a non-world-
+# readable Homebrew keg is skipped here instead of crash-looping under
+# launchd. Prints the chosen path; errors + non-zero if none qualifies.
+# $SUDO comes from the caller (dynamic scope).
+daemon:_select_bitcoind() {
+	local mode=$1 user=$2 datadir=$3 c found=""
+	while IFS= read -r c; do
+		found="$c"
+		if [ "$mode" != system ]; then printf '%s\n' "$c"; return 0; fi
+		if $SUDO -u "$user" "$c" -datadir="$datadir" --version >/dev/null 2>&1; then
+			printf '%s\n' "$c"; return 0
+		fi
+	done < <(daemon:_bitcoind_candidates)
+	if [ -z "$found" ]; then
+		error "enable: no 'bitcoind' found; run 'bitcoin daemon install' first"
+	else
+		error "enable: service account '$user' cannot run any bitcoind found"
+		error "  tried: $(daemon:_bitcoind_candidates | tr '\n' ' ')"
+		error "  a binary execs but fails as '$user' (permissions on the binary,"
+		error "  a parent directory, or a linked library — a restrictive umask on"
+		error "  a Homebrew keg is the usual cause). Prefer a MacPorts install"
+		error "  (world-readable /opt/local), or open the brew tree:"
+		error "      sudo chmod -R o+rX \"\$(brew --prefix)\"/{Cellar,opt,lib}"
 	fi
-	command -v bitcoind 2>/dev/null
+	return 1
 }
 
 # DESTDIR-style prefix for system-level absolute paths (default none).
@@ -283,46 +354,120 @@ daemon:_datadir() {
 	fi
 }
 
-# Service account the daemon runs as.
+# Service account the daemon runs as. macOS uses the '_'-prefixed
+# hidden-account convention; both OSes get a dedicated same-named group
+# (the account's primary group), so files the daemon writes are reachable
+# by the operator once they join it.
 daemon:_user() {
 	local mode=$1
-	if [ "$mode" = system ]; then
-		printf 'bitcoin\n'
-	else
+	if [ "$mode" != system ]; then
 		printf '%s\n' "${USER:-$(id -un)}"
+	elif [ "$(daemon:_os)" = macos ]; then
+		printf '_bitcoin\n'
+	else
+		printf 'bitcoin\n'
 	fi
 }
 
-# Installed unit-file path for os × mode.
+# Create the dedicated service account + group (idempotent). macOS gets a
+# hidden account pinned in the system UID range (mirrors the lightning
+# daemon's _clightning); Linux a --system user with a matching
+# --user-group. Relies on the caller's $SUDO.
+daemon:_ensure_account() {
+	local os=$1 user=$2 datadir=$3
+	id "$user" >/dev/null 2>&1 && return 0
+	info "creating system user '$user'"
+	if [ "$os" = macos ]; then
+		local uid=295 gid
+		while dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}' | grep -qx "$uid"; do
+			uid=$((uid + 1))
+		done
+		gid=$uid
+		$SUDO dscl . -create "/Groups/$user" PrimaryGroupID "$gid" || return 1
+		$SUDO dscl . -create "/Users/$user" UniqueID "$uid"
+		$SUDO dscl . -create "/Users/$user" PrimaryGroupID "$gid"
+		$SUDO dscl . -create "/Users/$user" UserShell /usr/bin/false
+		$SUDO dscl . -create "/Users/$user" NFSHomeDirectory "$datadir"
+		$SUDO dscl . -create "/Users/$user" RealName "Bitcoin Core daemon"
+		$SUDO dscl . -create "/Users/$user" IsHidden 1
+	else
+		$SUDO useradd --system --no-create-home --user-group \
+			--shell /usr/sbin/nologin "$user" || return 1
+	fi
+}
+
+# Add the invoking operator to the service group so they reach the datadir
+# (config, cookie, log) without sudo. Takes effect on next login.
+daemon:_join_group() {
+	local os=$1 group=$2 op="${USER:-$(id -un)}"
+	if [ "$os" = macos ]; then
+		$SUDO dseditgroup -o edit -a "$op" -t user "$group" 2>/dev/null || true
+	else
+		$SUDO usermod -a -G "$group" "$op" 2>/dev/null || true
+	fi
+}
+
+# The "can the service account actually run it" preflight now lives in
+# daemon:_select_bitcoind (above): it runs each candidate as the service
+# user (-datadir, --version) and skips one that execs-but-fails — the
+# exec bit, every parent dir's traverse bit, and the dynamic-library
+# load all in one shot. The classic failure is a Homebrew keg under
+# /opt/homebrew left non-world-readable by a tight umask, which would
+# otherwise make launchd crash-loop with EX_CONFIG / a dyld errno=13 and
+# an empty log.
+
+# Installed unit-file path for os × mode × network. Non-mainnet
+# networks get a -<net> suffix so they install side by side with the
+# mainnet unit.
 daemon:_unit_path() {
-	local os=$1 mode=$2
+	local os=$1 mode=$2 net=${3:-mainnet}
+	local svc; svc="$(daemon:_svcname "$net")"
+	local label; label="$(daemon:_label "$net")"
 	case "$os:$mode" in
 		linux:user)
-			printf '%s/systemd/user/bitcoind.service\n' \
-				"${XDG_CONFIG_HOME:-$HOME/.config}" ;;
+			printf '%s/systemd/user/%s.service\n' \
+				"${XDG_CONFIG_HOME:-$HOME/.config}" "$svc" ;;
 		linux:system)
-			printf '%s/etc/systemd/system/bitcoind.service\n' "$(daemon:_root)" ;;
+			printf '%s/etc/systemd/system/%s.service\n' "$(daemon:_root)" "$svc" ;;
 		macos:user)
-			printf '%s/Library/LaunchAgents/org.bitcoin.bitcoind.plist\n' "$HOME" ;;
+			printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$label" ;;
 		macos:system)
-			printf '%s/Library/LaunchDaemons/org.bitcoin.bitcoind.plist\n' "$(daemon:_root)" ;;
+			printf '%s/Library/LaunchDaemons/%s.plist\n' "$(daemon:_root)" "$label" ;;
 		*) return 1 ;;
 	esac
 }
 
-# Render a unit from its template, substituting @BITCOIND@ / @DATADIR@
-# / @USER@. For --user mode the privilege-drop directive is stripped:
-# a `systemctl --user` unit may not carry User=, and a LaunchAgent
-# has no UserName.
+# Render a unit from its template, substituting @BITCOIND@ / @DATADIR@ /
+# @USER@ and the per-network @LABEL@ / @CHAIN@ / @LOG@ / @PIDFILE@. For
+# --user mode the privilege-drop directive is stripped (a `systemctl
+# --user` unit may not carry User=, a LaunchAgent has no UserName).
 daemon:_render() {
-	local os=$1 mode=$2 datadir=$3 user=$4 bitcoind=$5 tmpl rendered
+	local os=$1 mode=$2 datadir=$3 user=$4 bitcoind=$5 net=${6:-mainnet} tmpl rendered
 	if [ "$os" = macos ]; then tmpl="$(daemon:_units_dir)/bitcoind.plist"
 	else tmpl="$(daemon:_units_dir)/bitcoind.service"; fi
 	[ -r "$tmpl" ] || { error "template not found: $tmpl"; return 1; }
+	local label log pidfile chain
+	label="$(daemon:_label "$net")"
+	log="$datadir/$(daemon:_logname "$net")"
+	pidfile="$datadir/$(daemon:_svcname "$net").pid"
+	chain="$(daemon:_chain "$net")"
 	rendered="$(sed \
 		-e "s|@BITCOIND@|$bitcoind|g" \
 		-e "s|@DATADIR@|$datadir|g" \
-		-e "s|@USER@|$user|g" "$tmpl")"
+		-e "s|@USER@|$user|g" \
+		-e "s|@LABEL@|$label|g" \
+		-e "s|@LOG@|$log|g" \
+		-e "s|@PIDFILE@|$pidfile|g" "$tmpl")"
+	# Chain arg: present for non-mainnet; for mainnet drop it entirely (an
+	# empty launchd ProgramArguments <string> would pass bitcoind a bogus
+	# "" arg; an empty systemd token is harmless but we strip it too).
+	if [ -n "$chain" ]; then
+		rendered="$(printf '%s\n' "$rendered" | sed "s|@CHAIN@|$chain|g")"
+	elif [ "$os" = macos ]; then
+		rendered="$(printf '%s\n' "$rendered" | sed '/<string>@CHAIN@<\/string>/d')"
+	else
+		rendered="$(printf '%s\n' "$rendered" | sed 's| *@CHAIN@||g')"
+	fi
 	if [ "$mode" = user ]; then
 		if [ "$os" = macos ]; then
 			rendered="$(printf '%s\n' "$rendered" | sed '/<key>UserName<\/key>/{N;d;}')"
@@ -335,13 +480,17 @@ daemon:_render() {
 
 help:enable() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF enable [--system | --user] [--public --allow <cidr>]
+	usage: $SELF enable [--user] [--network <net>] [--public --allow <cidr>]
 
 	  Install a bitcoind service unit and bring the daemon up so it
 	  survives reboots. --system (default) installs a system-wide
 	  service running as a dedicated 'bitcoin' account (needs root);
 	  --user installs a rootless per-user service. Idempotent.
 
+	  --network mainnet (default) | testnet | signet | regtest. Non-
+	            mainnet networks install a parallel unit (suffixed
+	            -<net>) running 'bitcoind -chain=<net>' — own data
+	            subdir + own ports — so they coexist with mainnet.
 	  --public  Expose RPC on all interfaces. Requires --system and
 	            --allow. Uses rpcauth (hash-based) instead of cookie
 	            auth; password stored in secret store.
@@ -352,7 +501,7 @@ help:enable() {
 
 help:disable() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF disable [--user | --system]
+	usage: $SELF disable [--user]
 
 	  Bring the bitcoind service down and remove its unit file. The
 	  data directory is preserved.
@@ -361,7 +510,7 @@ help:disable() {
 
 help:start() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF start [--user | --system]
+	usage: $SELF start [--user]
 
 	  Start the bitcoind service. Equivalent to systemctl --user start
 	  or launchctl kickstart depending on platform.
@@ -370,7 +519,7 @@ help:start() {
 
 help:stop() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF stop [--user | --system]
+	usage: $SELF stop [--user]
 
 	  Stop the bitcoind service gracefully.
 	ENDHELP
@@ -378,7 +527,7 @@ help:stop() {
 
 help:monitor() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF monitor [--user | --system]
+	usage: $SELF monitor [--user]
 
 	  Follow the bitcoind log output. On macOS reads from the
 	  datadir bitcoind.log; on Linux uses journalctl.
@@ -387,14 +536,14 @@ help:monitor() {
 
 help:space() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF space [--user | --system]
+	usage: $SELF space [--user]
 
 	  Show disk usage of the bitcoind data directory.
 	ENDHELP
 }
 
 command:enable() {
-	local mode=system public= allow=
+	local mode=system public= allow= net=mainnet
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--user)         mode=user ;;
@@ -402,11 +551,16 @@ command:enable() {
 			--public)       public=1 ;;
 			--allow)        allow="$2"; shift ;;
 			--allow=*)      allow="${1#--allow=}" ;;
+			--network)      net="$2"; shift ;;
+			--network=*)    net="${1#--network=}" ;;
 			-h|--help|help) help:enable; return 0 ;;
 			*) warn "enable: unknown argument '$1'"; return 1 ;;
 		esac
 		shift
 	done
+	local _nn; _nn="$(daemon:_network "--network=$net")" \
+		|| { error "enable: unknown network '$net' (mainnet|testnet|signet|regtest)"; return 1; }
+	net="$_nn"
 	if [ -n "$public" ]; then
 		if [ "$mode" != system ]; then
 			error "enable: --public requires --system"; return 1
@@ -421,72 +575,105 @@ command:enable() {
 		error "enable: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
 
-	local bitcoind; bitcoind="$(daemon:_bitcoind)"
-	if [ -z "$bitcoind" ]; then
-		error "enable: no 'bitcoind' on PATH; run 'bitcoin daemon install' first"
+	if [ -z "$(daemon:_bitcoind_candidates)" ]; then
+		error "enable: no 'bitcoind' found; run 'bitcoin daemon install' first"
 		return 1
 	fi
 
 	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
-	local datadir user unit
+	local datadir user group unit
 	datadir="$(daemon:_datadir "$mode")"
 	user="$(daemon:_user "$mode")"
-	unit="$(daemon:_unit_path "$os" "$mode")" \
+	group="$user"
+	unit="$(daemon:_unit_path "$os" "$mode" "$net")" \
 		|| { error "enable: no unit path for $os/$mode"; return 1; }
 
-	# --system: ensure the dedicated service account exists.
-	if [ "$mode" = system ] && ! id "$user" >/dev/null 2>&1; then
-		info "creating system user '$user'"
-		if [ "$os" = macos ]; then
-			$SUDO sysadminctl -addUser "$user" -roleAccount >/dev/null 2>&1 \
-				|| { error "enable: failed to create user '$user'"; return 1; }
-		else
-			$SUDO useradd --system --no-create-home \
-				--shell /usr/sbin/nologin "$user" \
-				|| { error "enable: failed to create user '$user'"; return 1; }
-		fi
+	# --system: dedicated service account + group; the operator joins the
+	# group so they read config/cookie/log without sudo (three-user model,
+	# mirrors the lightning daemon).
+	if [ "$mode" = system ]; then
+		daemon:_ensure_account "$os" "$user" "$datadir" \
+			|| { error "enable: failed to provision service account '$user'"; return 1; }
+		daemon:_join_group "$os" "$group"
 	fi
 
+	# State dir: owned by the service account, group-readable (0750) so the
+	# operator (a group member) can reach it; world gets no access.
 	$SUDO mkdir -p "$datadir" \
 		|| { error "enable: cannot create data dir '$datadir'"; return 1; }
-	[ "$mode" = system ] && $SUDO chown "$user" "$datadir" 2>/dev/null
+	if [ "$mode" = system ]; then
+		$SUDO chmod 0750 "$datadir" 2>/dev/null
+		$SUDO chown "$user:$group" "$datadir" 2>/dev/null
+	fi
+
+	# Select the bitcoind the service account can actually run (MacPorts
+	# first, then Homebrew, then PATH; system mode verifies each as the
+	# service account so a non-runnable Homebrew keg is skipped here
+	# rather than crash-looped under launchd).
+	local bitcoind
+	bitcoind="$(daemon:_select_bitcoind "$mode" "$user" "$datadir")" || return 1
 	# Generate or update bitcoin.conf. Note: daemon=1 is NOT set here
 	# because launchd / systemd already manages the process — with
 	# daemon=1 bitcoind forks, the original PID exits, KeepAlive
 	# spawns another instance, and they collide on the datadir lock.
 	local conf="$datadir/bitcoin.conf"
 	if [ -n "$public" ]; then
-		local rpcuser password salt_hex hmac
+		local rpcuser password salt_hex hmac tmpconf
 		rpcuser="bitcoin"
 		password="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 32)"
 		salt_hex="$(openssl rand -hex 16 2>/dev/null)"
 		hmac="$(printf '%s' "$salt_hex" | xxd -r -p | openssl dgst -sha256 -hmac "$password" 2>/dev/null | sed 's/.* //')"
-		cat > "$conf" <<-CONF
+		tmpconf="$(mktemp)"
+		cat > "$tmpconf" <<-CONF
 		# bitcoin.conf — generated by bitcoin daemon enable --public
 		server=1
 		rpcauth=$rpcuser:${salt_hex}\$${hmac}
 		rpcbind=0.0.0.0
 		rpcallowip=$allow
 		CONF
-		[ "$mode" = system ] && $SUDO chown "$user" "$conf" 2>/dev/null
+		# BUG-030: the datadir is owned by the service account, so install
+		# the config through $SUDO (a bare redirect runs as the invoking
+		# user and fails with EACCES). 0640 + group ownership lets the
+		# operator read it via group membership. Fail loudly on error.
+		$SUDO install -m 0640 "$tmpconf" "$conf" \
+			|| { rm -f "$tmpconf"; error "enable: cannot write config '$conf'"; return 1; }
+		rm -f "$tmpconf"
+		[ "$mode" = system ] && $SUDO chown "$user:$group" "$conf" 2>/dev/null
 		secret init bitcoin >/dev/null 2>&1 || true
 		printf '%s' "$password" | secret set "bitcoin/rpc:${rpcuser}" 2>/dev/null
 		info "created $conf (public: $allow)"
 		info "stored password in secret:bitcoin/rpc:${rpcuser}"
 	elif [ ! -f "$conf" ]; then
-		cat > "$conf" <<-CONF
-		# bitcoin.conf — generated by bitcoin daemon enable
-		# server=1 enables RPC with cookie auth (.cookie in datadir).
-		# bitcoin-cli -datadir=@DATADIR@ uses it automatically.
-		server=1
-		CONF
-		[ "$mode" = system ] && $SUDO chown "$user" "$conf" 2>/dev/null
+		local tmpconf; tmpconf="$(mktemp)"
+		{
+			cat <<-CONF
+			# bitcoin.conf — generated by bitcoin daemon enable
+			# server=1 enables RPC with cookie auth (.cookie in datadir).
+			# bitcoin-cli -datadir=@DATADIR@ uses it automatically.
+			server=1
+			CONF
+			# FEAT-274: in system mode make the .cookie group-readable so
+			# sibling daemons (lightning, fulcrum) whose service account is
+			# in the bitcoin group can authenticate to this node without
+			# their own RPC credentials (Bitcoin Core 28+; skipped if the
+			# binary predates -rpccookieperms).
+			if [ "$mode" = system ] && "$bitcoind" -help 2>/dev/null | grep -q -- '-rpccookieperms'; then
+				printf '%s\n' 'rpccookieperms=group'
+			fi
+		} > "$tmpconf"
+		# BUG-030: install through $SUDO; a bare redirect into the service-
+		# owned datadir fails with EACCES yet still printed "created". 0640
+		# + group ownership lets the operator read it via group membership.
+		$SUDO install -m 0640 "$tmpconf" "$conf" \
+			|| { rm -f "$tmpconf"; error "enable: cannot write config '$conf'"; return 1; }
+		rm -f "$tmpconf"
+		[ "$mode" = system ] && $SUDO chown "$user:$group" "$conf" 2>/dev/null
 		info "created $conf (cookie auth)"
 	fi
 
 	# Render + install the unit (idempotent: overwrites in place).
 	local tmp; tmp="$(mktemp)"
-	daemon:_render "$os" "$mode" "$datadir" "$user" "$bitcoind" > "$tmp" \
+	daemon:_render "$os" "$mode" "$datadir" "$user" "$bitcoind" "$net" > "$tmp" \
 		|| { rm -f "$tmp"; return 1; }
 	$SUDO mkdir -p "$(dirname "$unit")" \
 		|| { rm -f "$tmp"; error "enable: cannot create unit dir"; return 1; }
@@ -500,33 +687,42 @@ command:enable() {
 	mkdir -p "$bitcoin_confdir"
 	printf '%s\n' "$datadir" > "$bitcoin_confdir/bitcoind-datadir"
 
-	# Activate through the init system.
+	# Activate through the init system (per-network label / unit name).
+	local label svc
+	label="$(daemon:_label "$net")"; svc="$(daemon:_svcname "$net")"
 	if [ "$os" = macos ]; then
 		local domain
 		if [ "$mode" = system ]; then domain="system"; else domain="gui/$(id -u)"; fi
 		$SUDO launchctl bootstrap "$domain" "$unit" 2>/dev/null
-		$SUDO launchctl enable "$domain/org.bitcoin.bitcoind" 2>/dev/null
+		$SUDO launchctl enable "$domain/$label" 2>/dev/null
 	elif [ "$mode" = system ]; then
 		$SUDO systemctl daemon-reload
-		$SUDO systemctl enable --now bitcoind
+		$SUDO systemctl enable --now "$svc"
 	else
 		systemctl --user daemon-reload
-		systemctl --user enable --now bitcoind
+		systemctl --user enable --now "$svc"
 	fi
-	info "bitcoind service enabled ($mode/$os)"
+	info "bitcoind ($net) service enabled ($mode/$os)"
 }
 
 command:disable() {
-	local mode=user
+	# Default --system to match enable (the operate-verb default since
+	# FEAT-261); --user is the explicit rootless opt-in.
+	local mode=system net=mainnet
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--user)         mode=user ;;
 			--system)       mode=system ;;
+			--network)      net="$2"; shift ;;
+			--network=*)    net="${1#--network=}" ;;
 			-h|--help|help) help:disable; return 0 ;;
 			*) warn "disable: unknown argument '$1'"; return 1 ;;
 		esac
 		shift
 	done
+	local _nn; _nn="$(daemon:_network "--network=$net")" \
+		|| { error "disable: unknown network '$net' (mainnet|testnet|signet|regtest)"; return 1; }
+	net="$_nn"
 
 	local os; os="$(daemon:_os)"
 	case "$os" in linux|macos) ;; *)
@@ -534,18 +730,20 @@ command:disable() {
 	esac
 
 	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
-	local unit; unit="$(daemon:_unit_path "$os" "$mode")" \
+	local unit; unit="$(daemon:_unit_path "$os" "$mode" "$net")" \
 		|| { error "disable: no unit path for $os/$mode"; return 1; }
+	local label svc
+	label="$(daemon:_label "$net")"; svc="$(daemon:_svcname "$net")"
 
 	if [ "$os" = macos ]; then
 		local domain
 		if [ "$mode" = system ]; then domain="system"; else domain="gui/$(id -u)"; fi
-		$SUDO launchctl bootout "$domain/org.bitcoin.bitcoind" 2>/dev/null
+		$SUDO launchctl bootout "$domain/$label" 2>/dev/null
 	elif [ "$mode" = system ]; then
-		$SUDO systemctl disable --now bitcoind 2>/dev/null
+		$SUDO systemctl disable --now "$svc" 2>/dev/null
 		$SUDO systemctl daemon-reload
 	else
-		systemctl --user disable --now bitcoind 2>/dev/null
+		systemctl --user disable --now "$svc" 2>/dev/null
 		systemctl --user daemon-reload
 	fi
 
@@ -569,7 +767,12 @@ command:disable() {
 daemon:_default_source() {
 	case "$(account platform 2>/dev/null)" in
 		macos)
-			if command -v brew >/dev/null 2>&1; then echo brew; else echo macports; fi ;;
+			# MacPorts first: /opt/local is a world-readable, root-owned
+			# tree a dedicated service account can run; Homebrew is the
+			# fallback (FEAT — macports-first for system daemons).
+			if command -v port >/dev/null 2>&1; then echo macports
+			elif command -v brew >/dev/null 2>&1; then echo brew
+			else echo source; fi ;;
 		pureos|ubuntu|debian) echo apt ;;
 		alpine)               echo apk ;;
 		*)                    echo source ;;
@@ -613,8 +816,9 @@ help:install() {
 
 	  Install the bitcoind binary. --from selects the source; the
 	  default is chosen from the host platform:
-	    brew      macOS (default; falls back to macports)
-	    macports  macOS (alt)
+	    macports  macOS (default; world-readable /opt/local — a
+	              service account can run it; falls back to brew)
+	    brew      macOS (fallback)
 	    apt       Debian / Ubuntu / PureOS
 	    apk       Alpine
 	    source    clone + build from github.com/bitcoin/bitcoin
@@ -690,7 +894,7 @@ command:install() {
 
 help:password() {
 	cat >&2 <<-ENDHELP
-	usage: $SELF password --user | --system
+	usage: $SELF password [--user]
 
 	  Print the RPC credentials for the given mode. Reads from
 	  the secret store (bitcoin/rpc/<user>).

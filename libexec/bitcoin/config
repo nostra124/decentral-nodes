@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+############################################################################
+# bitcoin config — view and edit the effective bitcoind configuration
+# (FEAT-271). A thin front end over <datadir>/bitcoin.conf:
+#
+#   config list            show the explicitly-set keys (source: conf)
+#   config get <key>       effective value: conf if set, else the
+#                          bitcoind compiled-in default (source noted)
+#   config set <key> <val> write key=value into bitcoin.conf
+#   config unset <key>     remove key (revert to default)
+#   config path            print the config file path
+#
+# "Effective" = the conf value if present, otherwise bitcoind's default
+# parsed from `bitcoind -help`. Writes route through $SUDO + install
+# -m 0640, preserving the conf's owner:group (the daemon group model),
+# so the operator can read but a privileged step does the write.
+#
+# No-shared-lib (CLAUDE.md §4): resolves the datadir from the file the
+# 'bitcoin daemon enable' verb records, never by calling 'daemon'.
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+VERSION='0.6'
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { [ -n "$SELF_QUIET" ] || echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+has()   { type -t "$1:$2" | grep -q function; }
+
+: "${XDG_CONFIG_HOME:=$HOME/.config}"
+
+# Data directory holding bitcoin.conf. $BITCOIN_CONFIG_DATADIR overrides;
+# otherwise the path 'bitcoin daemon enable' records, else the system
+# default. --datadir <path> (handled by callers) wins over all.
+config:_datadir() {
+	if [ -n "${BITCOIN_CONFIG_DATADIR:-}" ]; then printf '%s\n' "$BITCOIN_CONFIG_DATADIR"; return 0; fi
+	local rec="$XDG_CONFIG_HOME/bitcoin/bitcoind-datadir"
+	if [ -s "$rec" ]; then cat "$rec"; else printf '/var/lib/bitcoin\n'; fi
+}
+config:_conf() { printf '%s/bitcoin.conf\n' "$(config:_datadir)"; }
+
+# bitcoind candidates for parsing -help defaults: MacPorts, Homebrew,
+# PATH (mirrors the daemon's preference). $BITCOIN_BITCOIND overrides.
+config:_bitcoind() {
+	if [ -n "${BITCOIN_BITCOIND:-}" ]; then printf '%s\n' "$BITCOIN_BITCOIND"; return 0; fi
+	local c
+	for c in /opt/local/bin/bitcoind /opt/homebrew/bin/bitcoind "$(command -v bitcoind 2>/dev/null)"; do
+		[ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+	done
+	return 1
+}
+
+# bitcoind's compiled-in default for <key>, parsed from `bitcoind -help`.
+# Echoes the default (empty + non-zero if none/unknown).
+config:_default() {
+	local key="$1" bin
+	bin="$(config:_bitcoind)" || return 1
+	"$bin" -help 2>/dev/null </dev/null | awk -v opt="-$key" '
+		/^[ \t]*-/ { cur = $1; sub(/=.*/, "", cur); inopt = (cur == opt) }
+		inopt && match($0, /\(default: [^)]*\)/) {
+			print substr($0, RSTART + 10, RLENGTH - 11); found = 1; exit
+		}
+		END { if (!found) exit 1 }
+	'
+}
+
+# Last value set for <key> in the conf (top-level; later rows win).
+config:_conf_get() {
+	local key="$1" conf="$2"
+	[ -r "$conf" ] || return 1
+	awk -F= -v k="$key" '
+		/^[ \t]*[#;]/ { next }
+		/^[ \t]*\[/   { sect=1 }        # stop at the first [section]
+		!sect { sub(/^[ \t]+/, "", $1); if ($1==k) { sub(/^[^=]*=/, ""); v=$0; got=1 } }
+		END { if (got) { print v } else exit 1 }
+	' "$conf"
+}
+
+# Owner:group of the conf (preserve on write). Tries GNU stat (-c)
+# first — coreutils may shadow BSD stat on macOS, and BSD '-f' under GNU
+# stat silently prints filesystem info instead — then BSD stat (-f).
+config:_owner() {
+	stat -c '%U:%G' "$1" 2>/dev/null || stat -f '%Su:%Sg' "$1" 2>/dev/null
+}
+
+# Install new conf content (stdin) to $conf at 0640, preserving its
+# owner:group, via $SUDO when the file isn't writable by us.
+config:_install_conf() {
+	local conf="$1" tmp og SUDO=""
+	tmp="$(mktemp)"; cat > "$tmp"
+	[ -e "$conf" ] && og="$(config:_owner "$conf")"
+	if [ -e "$conf" ]; then [ -w "$conf" ] || SUDO=sudo
+	else [ -w "$(dirname "$conf")" ] || SUDO=sudo; fi
+	if ! $SUDO install -m 0640 "$tmp" "$conf"; then
+		rm -f "$tmp"; error "cannot write '$conf'"; return 1
+	fi
+	[ -n "$og" ] && $SUDO chown "$og" "$conf" 2>/dev/null
+	rm -f "$tmp"
+}
+
+help:list() { cat >&2 <<-EOF
+	usage: $SELF list
+	  Show the keys explicitly set in bitcoin.conf (source: conf). Use
+	  '$SELF get <key>' to see a key's effective value incl. defaults.
+	EOF
+}
+command:list() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:list; return 0 ;; esac; done
+	local conf; conf="$(config:_conf)"
+	if [ ! -r "$conf" ]; then
+		error "list: no readable config at '$conf' (run 'bitcoin daemon enable' first)"; return 1
+	fi
+	info "config: $conf"
+	awk -F= '
+		/^[ \t]*[#;]/ || /^[ \t]*$/ { next }
+		/^[ \t]*\[/ { print "  [" ; next }
+		{ k=$1; sub(/^[ \t]+/,"",k); sub(/[ \t]+$/,"",k); sub(/^[^=]*=/,"",$0);
+		  printf "  %-24s = %s\n", k, $0 }
+	' "$conf"
+}
+
+help:get() { cat >&2 <<-EOF
+	usage: $SELF get <key>
+	  Print the effective value of <key>: the bitcoin.conf value if set,
+	  otherwise bitcoind's compiled-in default.
+	EOF
+}
+command:get() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:get; return 0 ;; esac; done
+	local key="${1:-}"
+	[ -n "$key" ] || { error "get: usage: $SELF get <key>"; return 2; }
+	key="${key#-}"
+	local conf val
+	conf="$(config:_conf)"
+	if val="$(config:_conf_get "$key" "$conf")"; then
+		printf '%s\n' "$val"; info "source: conf ($conf)"; return 0
+	fi
+	if val="$(config:_default "$key")"; then
+		printf '%s\n' "$val"; info "source: bitcoind default"; return 0
+	fi
+	warn "get: '$key' is not set in $conf and has no known bitcoind default"
+	return 1
+}
+
+help:set() { cat >&2 <<-EOF
+	usage: $SELF set <key> <value> [--restart]
+	  Write key=value into bitcoin.conf (replacing any existing line).
+	  Routes through sudo + install -m 0640, preserving the conf's
+	  owner:group. Warns that a restart is needed; --restart is reserved
+	  for an explicit 'bitcoin daemon restart' (not auto-run here).
+	EOF
+}
+command:set() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:set; return 0 ;; esac; done
+	local key="${1:-}" value="${2:-}"
+	[ -n "$key" ] && [ $# -ge 2 ] || { error "set: usage: $SELF set <key> <value>"; return 2; }
+	key="${key#-}"
+	local conf; conf="$(config:_conf)"
+	[ -e "$conf" ] || { error "set: no config at '$conf' (run 'bitcoin daemon enable' first)"; return 1; }
+	# Replace an existing top-level key=, else append.
+	local new
+	if config:_conf_get "$key" "$conf" >/dev/null 2>&1; then
+		new="$(awk -F= -v k="$key" -v val="$value" '
+			BEGIN{done=0}
+			/^[ \t]*\[/ { sect=1 }
+			!sect && $0 !~ /^[ \t]*[#;]/ { kk=$1; sub(/^[ \t]+/,"",kk);
+				if (kk==k && !done) { print k"="val; done=1; next } }
+			{ print }
+		' "$conf")"
+	else
+		new="$(cat "$conf"; printf '%s=%s\n' "$key" "$value")"
+	fi
+	printf '%s\n' "$new" | config:_install_conf "$conf" || return 1
+	info "set $key=$value in $conf"
+	warn "restart the daemon for this to take effect: bitcoin daemon stop && bitcoin daemon start"
+}
+
+help:unset() { cat >&2 <<-EOF
+	usage: $SELF unset <key>
+	  Remove <key> from bitcoin.conf (reverting it to bitcoind's default).
+	EOF
+}
+command:unset() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:unset; return 0 ;; esac; done
+	local key="${1:-}"
+	[ -n "$key" ] || { error "unset: usage: $SELF unset <key>"; return 2; }
+	key="${key#-}"
+	local conf; conf="$(config:_conf)"
+	[ -e "$conf" ] || { error "unset: no config at '$conf'"; return 1; }
+	config:_conf_get "$key" "$conf" >/dev/null 2>&1 || { warn "unset: '$key' is not set in $conf"; return 0; }
+	awk -v k="$key" '
+		/^[ \t]*\[/ { sect=1 }
+		!sect && $0 !~ /^[ \t]*[#;]/ { kk=$0; sub(/=.*/,"",kk); sub(/^[ \t]+/,"",kk); sub(/[ \t]+$/,"",kk);
+			if (kk==k) next }
+		{ print }
+	' "$conf" | config:_install_conf "$conf" || return 1
+	info "unset $key in $conf"
+	warn "restart the daemon for this to take effect: bitcoin daemon stop && bitcoin daemon start"
+}
+
+help:path() { cat >&2 <<-EOF
+	usage: $SELF path
+	  Print the path to bitcoin.conf.
+	EOF
+}
+command:path() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:path; return 0 ;; esac; done
+	config:_conf
+}
+
+command:help() {
+	cat >&2 <<-EOF
+	usage: $SELF <command> [<args>]
+
+	   bitcoin config views and edits the bitcoind configuration
+	   (the effective config = bitcoin.conf value, else bitcoind default).
+
+	commands:
+	   list                 keys explicitly set in bitcoin.conf
+	   get <key>            effective value of a key (conf or default)
+	   set <key> <value>    set a key (sudo write; warns to restart)
+	   unset <key>          remove a key (revert to default)
+	   path                 print the config file path
+	   help <command>       detailed help for a command
+	EOF
+}
+command:version() { echo "$VERSION"; }
+
+#------------------------------------------------------------------------------
+if [[ $# == 0 ]]; then command:help; exit 0; fi
+if has command "$1"; then
+	debug "executing command:$1 ${*:2}"
+	command:"$1" "${@:2}"
+	exit $?
+else
+	error "unknown config command: '$1'"
+	command:help
+	exit 2
+fi
