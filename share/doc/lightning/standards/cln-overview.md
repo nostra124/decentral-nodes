@@ -26,7 +26,7 @@ lists everything currently loaded.
 ## Data layout
 
 Default data dir is `~/.lightning/` for user-mode and
-`/var/lib/clightning/` for system-mode (FEAT-183
+`/var/lib/lightning/` for system-mode (FEAT-183
 `daemon enable --system`). Inside:
 
     <data-dir>/

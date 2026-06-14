@@ -310,6 +310,91 @@ EOF
 	[[ "$output" == *"refusing"* ]]
 }
 
+# FEAT-269 — the main lightningd service is network-aware: regtest /
+# testnet / signet run as PARALLEL units alongside mainnet. mainnet
+# (CLN calls it 'bitcoin') keeps the BARE unit names for backward
+# compatibility; other networks get a -<net> suffix. The naming logic
+# lives in lightning:_apply_network, exercised here through the macOS
+# user-mode LaunchAgent (no root needed) plus the reject path.
+
+@test "FEAT-269: enable --network regtest installs a suffixed LaunchAgent (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then
+		skip "macOS-only — exercises the per-network launchd label"
+	fi
+	ln -sf /bin/true "$BIN_SHIM/lightningd"
+	run "$LIGHTNING_BIN" daemon enable --user --network regtest
+	[ "$status" -eq 0 ]
+	local plist="$HOME/Library/LaunchAgents/network.lightning.lightningd-regtest.plist"
+	[ -f "$plist" ]
+	grep -q "<string>network.lightning.lightningd-regtest</string>" "$plist"
+	# The ExecStart env carries the resolved network so lightningd runs
+	# on the right chain (its own data subdir + ports).
+	grep -A1 "<key>LIGHTNING_NETWORK</key>" "$plist" | grep -q "<string>regtest</string>"
+}
+
+@test "FEAT-269: mainnet enable keeps the bare LaunchAgent label (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then
+		skip "macOS-only — exercises the bare-name backward-compat path"
+	fi
+	ln -sf /bin/true "$BIN_SHIM/lightningd"
+	run "$LIGHTNING_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	# Bare plist, no -<net> suffix anywhere.
+	local plist="$HOME/Library/LaunchAgents/network.lightning.lightningd.plist"
+	[ -f "$plist" ]
+	[ ! -f "$HOME/Library/LaunchAgents/network.lightning.lightningd-bitcoin.plist" ]
+	grep -q "<string>network.lightning.lightningd</string>" "$plist"
+	! grep -q "lightningd-" "$plist"
+}
+
+@test "FEAT-269: regtest and mainnet user units coexist (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then
+		skip "macOS-only — exercises parallel LaunchAgents"
+	fi
+	ln -sf /bin/true "$BIN_SHIM/lightningd"
+	"$LIGHTNING_BIN" daemon enable --user >/dev/null 2>&1
+	"$LIGHTNING_BIN" daemon enable --user --network regtest >/dev/null 2>&1
+	[ -f "$HOME/Library/LaunchAgents/network.lightning.lightningd.plist" ]
+	[ -f "$HOME/Library/LaunchAgents/network.lightning.lightningd-regtest.plist" ]
+}
+
+@test "FEAT-269: enable rejects an unknown network before any write" {
+	ln -sf /bin/true "$BIN_SHIM/lightningd"
+	run --separate-stderr "$LIGHTNING_BIN" daemon enable --user --network frobnet
+	[ "$status" -ne 0 ]
+	echo "$stderr$output" | grep -q "unknown network 'frobnet'"
+	# Aborted before touching the init system — no plist written.
+	[ ! -f "$HOME/Library/LaunchAgents/network.lightning.lightningd-frobnet.plist" ]
+}
+
+@test "FEAT-269: start rejects an unknown network" {
+	echo "down" > "$MOCK_STATE"
+	run --separate-stderr "$LIGHTNING_BIN" daemon start --network frobnet
+	[ "$status" -ne 0 ]
+	echo "$stderr$output" | grep -q "unknown network 'frobnet'"
+}
+
+@test "FEAT-269: --network=regtest equals-form parses (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then
+		skip "macOS-only — exercises the per-network launchd label"
+	fi
+	ln -sf /bin/true "$BIN_SHIM/lightningd"
+	run "$LIGHTNING_BIN" daemon enable --user --network=regtest
+	[ "$status" -eq 0 ]
+	[ -f "$HOME/Library/LaunchAgents/network.lightning.lightningd-regtest.plist" ]
+}
+
+@test "FEAT-269: main/mainnet aliases normalize to the bare CLN 'bitcoin' label (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then
+		skip "macOS-only — exercises mainnet alias normalization"
+	fi
+	ln -sf /bin/true "$BIN_SHIM/lightningd"
+	run "$LIGHTNING_BIN" daemon enable --user --network mainnet
+	[ "$status" -eq 0 ]
+	[ -f "$HOME/Library/LaunchAgents/network.lightning.lightningd.plist" ]
+	[ ! -f "$HOME/Library/LaunchAgents/network.lightning.lightningd-mainnet.plist" ]
+}
+
 @test "FEAT-183: lightning daemon enable writes a LaunchAgent plist (macOS)" {
 	if [ "$(uname -s)" != "Darwin" ]; then
 		skip "macOS-only — Linux uses systemd"
@@ -2669,6 +2754,43 @@ EOF
 	rm -rf "$LIGHTNING_DIR"
 }
 
+@test "BUG-032: daemon monitor (system, macOS) resolves /var/lib/lightning, not the Intel path" {
+	# The macOS system-mode state dir must be /var/lib/lightning (the same
+	# /var/lib/<product> dir the bitcoin/fulcrum daemons use), NOT the
+	# hardcoded Intel-Homebrew path /usr/local/var/clightning which breaks
+	# on Apple Silicon. Force Darwin via a uname shim so this runs on the
+	# Linux CI too. No log file exists at the resolved path → the daemon
+	# errors with the path it tried; we assert that path is the new one.
+	cat > "$BIN_SHIM/uname" <<'EOF'
+#!/bin/sh
+[ "$1" = "-s" ] && { echo Darwin; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+	chmod +x "$BIN_SHIM/uname"
+	run "$LIGHTNING_BIN" daemon monitor --system
+	[ "$status" -eq 2 ]
+	[[ "$output" == *"/var/lib/lightning"* ]]
+	[[ "$output" != *"/usr/local/var/clightning"* ]]
+}
+
+@test "BUG-032: daemon monitor (system, Linux) tails lightningd.service via journalctl" {
+	if [ "$(uname -s)" = "Darwin" ]; then
+		skip "Linux-only — exercises journalctl -u"
+	fi
+	# system-mode journalctl monitor must target the renamed unit
+	# lightningd.service (not clightningd.service) and use no sudo.
+	cat > "$BIN_SHIM/journalctl" <<EOF
+#!/bin/sh
+echo "journalctl \$*" >> "$BIN_SHIM/journalctl.calls"
+exit 0
+EOF
+	chmod +x "$BIN_SHIM/journalctl"
+	run "$LIGHTNING_BIN" daemon monitor --system
+	[ "$status" -eq 0 ]
+	grep -q -- "-u lightningd.service" "$BIN_SHIM/journalctl.calls"
+	! grep -q "clightningd.service" "$BIN_SHIM/journalctl.calls"
+}
+
 @test "1.2.0 ext: daemon with unknown subcommand prints usage" {
 	run "$LIGHTNING_BIN" daemon takeover
 	[ "$status" -ne 0 ]
@@ -3711,7 +3833,7 @@ EOF
 _openrc_common_setup() {
 	_fake_alpine_os_release
 	export LIGHTNING_INIT_D="$BATS_TMPDIR/init.d.$$"
-	export LIGHTNING_OPENRC_STATE="$BATS_TMPDIR/clightning-state.$$"
+	export LIGHTNING_OPENRC_STATE="$BATS_TMPDIR/lightning-state.$$"
 	rm -rf "$LIGHTNING_INIT_D" "$LIGHTNING_OPENRC_STATE"
 	# CI runs as non-root → ic_root_prefix returns sudo.  Stub it so
 	# the privileged calls (addgroup, install, tee, …) route through
@@ -3725,24 +3847,24 @@ _openrc_common_setup() {
 	_openrc_common_setup
 	run "$LIGHTNING_BIN" daemon enable
 	[ "$status" -eq 0 ]
-	[ -f "$LIGHTNING_INIT_D/clightningd" ]
+	[ -f "$LIGHTNING_INIT_D/lightningd" ]
 	# Init script shape — shebang + supervisor + depend block.
-	grep -q '^#!/sbin/openrc-run'                "$LIGHTNING_INIT_D/clightningd"
-	grep -q '^command="/usr/bin/lightningd"'     "$LIGHTNING_INIT_D/clightningd"
-	grep -q 'command_user="clightning:clightning"' "$LIGHTNING_INIT_D/clightningd"
-	grep -q '^supervisor=supervise-daemon'       "$LIGHTNING_INIT_D/clightningd"
-	grep -q 'need net'                           "$LIGHTNING_INIT_D/clightningd"
+	grep -q '^#!/sbin/openrc-run'                "$LIGHTNING_INIT_D/lightningd"
+	grep -q '^command="/usr/bin/lightningd"'     "$LIGHTNING_INIT_D/lightningd"
+	grep -q 'command_user="lightning:lightning"' "$LIGHTNING_INIT_D/lightningd"
+	grep -q '^supervisor=supervise-daemon'       "$LIGHTNING_INIT_D/lightningd"
+	grep -q 'need net'                           "$LIGHTNING_INIT_D/lightningd"
 }
 
-@test "FEAT-207: OpenRC enable creates the clightning user + group" {
+@test "FEAT-207: OpenRC enable creates the lightning user + group" {
 	_openrc_common_setup
 	run "$LIGHTNING_BIN" daemon enable
 	[ "$status" -eq 0 ]
 	[ -f "$BIN_SHIM/addgroup.calls" ]
-	grep -q "addgroup -S clightning" "$BIN_SHIM/addgroup.calls"
+	grep -q "addgroup -S lightning" "$BIN_SHIM/addgroup.calls"
 	[ -f "$BIN_SHIM/adduser.calls" ]
 	grep -q "adduser -S -H" "$BIN_SHIM/adduser.calls"
-	grep -q "\\-G clightning clightning" "$BIN_SHIM/adduser.calls"
+	grep -q "\\-G lightning lightning" "$BIN_SHIM/adduser.calls"
 }
 
 @test "FEAT-207: OpenRC enable seeds the config with rpc-file-mode 0660" {
@@ -3758,8 +3880,8 @@ _openrc_common_setup() {
 	_openrc_common_setup
 	run "$LIGHTNING_BIN" daemon enable
 	[ "$status" -eq 0 ]
-	grep -qF "lightning-dir=$LIGHTNING_OPENRC_STATE" "$LIGHTNING_INIT_D/clightningd"
-	grep -qF "pidfile=\"$LIGHTNING_OPENRC_STATE/lightningd-bitcoin.pid\"" "$LIGHTNING_INIT_D/clightningd"
+	grep -qF "lightning-dir=$LIGHTNING_OPENRC_STATE" "$LIGHTNING_INIT_D/lightningd"
+	grep -qF "pidfile=\"$LIGHTNING_OPENRC_STATE/lightningd-bitcoin.pid\"" "$LIGHTNING_INIT_D/lightningd"
 }
 
 @test "FEAT-207/264: OpenRC enable is silent for --system and for a bare (now system) enable" {
@@ -9223,4 +9345,303 @@ assert '\"auth\": None' in window or \"'auth': None\" in window, 'auth not None'
 
 @test "FEAT-1057: peer-disconnect man page exists" {
 	[ -f "$BATS_TEST_DIRNAME/../../share/man/man1/lightning-peer-disconnect.1" ]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-272: lightning config (list/get/set/unset/path). A temp config dir
+# holds the CLN 'config' file; a stub lightningd serves --help so 'get' can
+# resolve compiled-in defaults.
+# ---------------------------------------------------------------------------
+feat272_env() {
+	export LIGHTNING_CONFIG_DIR="$HOME/cfgdir"
+	mkdir -p "$LIGHTNING_CONFIG_DIR"
+	printf '# cln config\nnetwork=bitcoin\nlog-level=debug\n' > "$LIGHTNING_CONFIG_DIR/config"
+	export LIGHTNING_LIGHTNINGD="$HOME/lightningd-help-stub"
+	cat > "$LIGHTNING_LIGHTNINGD" <<-'STUB'
+		#!/usr/bin/env bash
+		[ "$1" = --help ] && printf '%s\n' \
+		  '  --alias=<arg>' \
+		  '       Up to 32-byte alias for node (default: SILLY-NAME).' \
+		  '  --log-level=<arg>' \
+		  '       Log level (default: info).'
+		exit 0
+	STUB
+	chmod +x "$LIGHTNING_LIGHTNINGD"
+}
+
+@test "FEAT-272 — config list shows the conf-set keys" {
+	feat272_env
+	run "$LIGHTNING_BIN" config list
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q 'network'
+	echo "$output" | grep -q 'log-level'
+}
+
+@test "FEAT-272 — config get returns the conf value (source: conf)" {
+	feat272_env
+	run "$LIGHTNING_BIN" config get log-level
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q 'debug'
+}
+
+@test "FEAT-272 — config get falls back to the lightningd default" {
+	feat272_env
+	run "$LIGHTNING_BIN" config get alias
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q 'SILLY-NAME'
+}
+
+@test "FEAT-272 — config set replaces/adds a key and warns to restart" {
+	feat272_env
+	run "$LIGHTNING_BIN" config set fee-base 1000
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qi 'restart'
+	grep -q '^fee-base=1000' "$LIGHTNING_CONFIG_DIR/config"
+}
+
+@test "FEAT-272 — config unset removes a key" {
+	feat272_env
+	"$LIGHTNING_BIN" config set foo bar
+	"$LIGHTNING_BIN" config unset foo
+	! grep -q '^foo=' "$LIGHTNING_CONFIG_DIR/config"
+}
+
+@test "FEAT-272 — config get errors for an unknown key with no default" {
+	feat272_env
+	run "$LIGHTNING_BIN" config get totallyboguskey
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-272 — config path prints the conf file" {
+	feat272_env
+	run "$LIGHTNING_BIN" config path
+	[ "$status" -eq 0 ]
+	[ "$output" = "$LIGHTNING_CONFIG_DIR/config" ]
+}
+
+# ---------------------------------------------------------------------------
+# BUG-033 — `daemon enable --system` must produce a WORKING node on a
+# fresh machine with no manual steps. Three fixes, all in the system
+# installers (install_system / install_macos_system / install_openrc_system):
+#   1. ExecStart points at the readlink-resolved lightningd, not the brew
+#      symlink (CLN: "I cannot find myself at ..." otherwise).
+#   2. The generated system config wires the bitcoind backend in:
+#      bitcoin-cli=<abs>, bitcoin-datadir=/var/lib/bitcoin, and
+#      disable-plugin=cln-grpc (cln-grpc crashes lightningd if it can't
+#      bind its port).
+#   3. The service user is best-effort-added to the bitcoind service
+#      group so it can read bitcoind's group-readable cookie (FEAT-274);
+#      a missing group hints + continues, never fails enable.
+# ---------------------------------------------------------------------------
+
+# Stub the privileged + user-creation tooling for an in-place system
+# enable, redirecting every filesystem write under $BATS_TMPDIR. Stubs:
+#   sudo            -> exec passthrough (records nothing extra needed)
+#   useradd/usermod -> record, exit 0
+#   getent          -> "not found" so the create paths fire
+#   dscl/dseditgroup-> record (macOS); reads return nonzero
+#   install         -> mkdir -p the -d target
+#   chown           -> no-op
+#   systemctl       -> no-op (daemon-reload)
+# Sets LIGHTNING_SYSTEM_STATE / LIGHTNING_SYSTEMD_DIR / LIGHTNING_LAUNCHD_DIR
+# so the generated config + unit land somewhere assertable.
+_bug033_system_setup() {
+	export LIGHTNING_SYSTEM_STATE="$BATS_TMPDIR/lnsys-state.$$"
+	export LIGHTNING_SYSTEMD_DIR="$BATS_TMPDIR/lnsys-systemd.$$"
+	export LIGHTNING_LAUNCHD_DIR="$BATS_TMPDIR/lnsys-launchd.$$"
+	rm -rf "$LIGHTNING_SYSTEM_STATE" "$LIGHTNING_SYSTEMD_DIR" "$LIGHTNING_LAUNCHD_DIR"
+	export BIN_SHIM_CALLS_DIR="$BIN_SHIM"
+
+	_stub_sudo
+
+	# A REAL lightningd target + a symlink to it, so we can assert the
+	# unit references the resolved target and not the symlink (fix #1).
+	cat > "$BATS_TMPDIR/lightningd-real.$$" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$BATS_TMPDIR/lightningd-real.$$"
+	ln -sf "$BATS_TMPDIR/lightningd-real.$$" "$BIN_SHIM/lightningd"
+
+	# bitcoin-cli on PATH so fix #2 has an absolute path to pin.
+	cat > "$BIN_SHIM/bitcoin-cli" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$BIN_SHIM/bitcoin-cli"
+
+	# User-creation + privileged no-ops, recording their calls.
+	for cmd in useradd usermod chown dseditgroup; do
+		cat > "$BIN_SHIM/$cmd" <<EOF
+#!/bin/sh
+echo "$cmd \$*" >> "$BIN_SHIM/$cmd.calls"
+exit 0
+EOF
+		chmod +x "$BIN_SHIM/$cmd"
+	done
+	# getent — not found, so create paths fire and group lookups can be
+	# toggled per-test by re-stubbing.
+	cat > "$BIN_SHIM/getent" <<EOF
+#!/bin/sh
+echo "getent \$*" >> "$BIN_SHIM/getent.calls"
+exit 2
+EOF
+	chmod +x "$BIN_SHIM/getent"
+	# install -d <dir> creates the dir; ownership flags ignored.
+	cat > "$BIN_SHIM/install" <<EOF
+#!/bin/sh
+echo "install \$*" >> "$BIN_SHIM/install.calls"
+for last in "\$@"; do :; done
+case "\$*" in *-d*) mkdir -p "\$last" ;; esac
+exit 0
+EOF
+	chmod +x "$BIN_SHIM/install"
+	# systemctl — no-op (daemon-reload).
+	cat > "$BIN_SHIM/systemctl" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+	chmod +x "$BIN_SHIM/systemctl"
+}
+
+# macOS extra: stub dscl. Reads (-read/-list) return nonzero so the
+# create path runs; -create records + succeeds.
+_bug033_stub_dscl() {
+	cat > "$BIN_SHIM/dscl" <<EOF
+#!/bin/sh
+echo "dscl \$*" >> "$BIN_SHIM/dscl.calls"
+case "\$*" in
+	*-create*) exit 0 ;;
+	*-read*|*-list*) exit 1 ;;
+	*) exit 1 ;;
+esac
+EOF
+	chmod +x "$BIN_SHIM/dscl"
+}
+
+# ---- fix #1: resolved lightningd path in the ExecStart ----
+
+@test "BUG-033: system unit ExecStart uses the resolved lightningd, not the symlink (Linux)" {
+	if [ "$(uname -s)" = "Darwin" ]; then skip "Linux-only — systemd unit"; fi
+	_bug033_system_setup
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	local unit="$LIGHTNING_SYSTEMD_DIR/lightningd.service"
+	[ -f "$unit" ]
+	# References the resolved real target, never the brew-style symlink.
+	grep -qF "ExecStart=$(readlink -f "$BIN_SHIM/lightningd") " "$unit"
+	grep -q "ExecStart=.*lightningd-real.$$ " "$unit"
+	! grep -qF "ExecStart=$BIN_SHIM/lightningd " "$unit"
+}
+
+@test "BUG-033: system plist ExecStart uses the resolved lightningd, not the symlink (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then skip "macOS-only — LaunchDaemon"; fi
+	_bug033_system_setup
+	_bug033_stub_dscl
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	local plist="$LIGHTNING_LAUNCHD_DIR/network.lightning.lightningd.plist"
+	[ -f "$plist" ]
+	# readlink -f resolves the symlink to the real target (macOS may
+	# canonicalize /tmp -> /private/tmp, so match the resolved path and
+	# the real basename, not the raw $BATS_TMPDIR prefix). The brew-style
+	# symlink path must NOT appear.
+	grep -qF "<string>$(readlink -f "$BIN_SHIM/lightningd")</string>" "$plist"
+	grep -q "lightningd-real.$$</string>" "$plist"
+	! grep -qF "<string>$BIN_SHIM/lightningd</string>" "$plist"
+}
+
+# ---- fix #2: bitcoind backend wired into the generated config ----
+
+@test "BUG-033: system config wires bitcoin-cli, bitcoin-datadir, and disables cln-grpc (Linux)" {
+	if [ "$(uname -s)" = "Darwin" ]; then skip "Linux-only — install_system"; fi
+	_bug033_system_setup
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	local cfg="$LIGHTNING_SYSTEM_STATE/config"
+	[ -f "$cfg" ]
+	grep -q "^bitcoin-cli=" "$cfg"
+	grep -q "^bitcoin-datadir=/var/lib/bitcoin$" "$cfg"
+	grep -q "^disable-plugin=cln-grpc$" "$cfg"
+}
+
+@test "BUG-033: system config wires bitcoin-cli, bitcoin-datadir, and disables cln-grpc (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then skip "macOS-only — install_macos_system"; fi
+	_bug033_system_setup
+	_bug033_stub_dscl
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	local cfg="$LIGHTNING_SYSTEM_STATE/config"
+	[ -f "$cfg" ]
+	grep -q "^bitcoin-cli=" "$cfg"
+	grep -q "^bitcoin-datadir=/var/lib/bitcoin$" "$cfg"
+	grep -q "^disable-plugin=cln-grpc$" "$cfg"
+}
+
+# ---- fix #3: best-effort join of the bitcoind service group ----
+
+@test "BUG-033: enable adds the service user to the bitcoin group when it exists (Linux)" {
+	if [ "$(uname -s)" = "Darwin" ]; then skip "Linux-only — usermod -aG bitcoin"; fi
+	_bug033_system_setup
+	# Re-stub getent so the 'bitcoin' group lookup succeeds (group exists),
+	# while passwd lightning still returns not-found (user create fires).
+	cat > "$BIN_SHIM/getent" <<EOF
+#!/bin/sh
+echo "getent \$*" >> "$BIN_SHIM/getent.calls"
+case "\$*" in
+	"group bitcoin") exit 0 ;;
+	*) exit 2 ;;
+esac
+EOF
+	chmod +x "$BIN_SHIM/getent"
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	[ -f "$BIN_SHIM/usermod.calls" ]
+	grep -q "usermod -aG bitcoin lightning" "$BIN_SHIM/usermod.calls"
+}
+
+@test "BUG-033: enable does NOT fail when the bitcoin group is absent (Linux)" {
+	if [ "$(uname -s)" = "Darwin" ]; then skip "Linux-only"; fi
+	_bug033_system_setup
+	# Default getent stub returns not-found for everything, including the
+	# bitcoin group → the join is a hint, not a failure.
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	# No `usermod -aG bitcoin` happened (group missing).
+	if [ -f "$BIN_SHIM/usermod.calls" ]; then
+		! grep -q "usermod -aG bitcoin" "$BIN_SHIM/usermod.calls"
+	fi
+}
+
+@test "BUG-033: enable adds the service user to the _bitcoin group when it exists (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then skip "macOS-only — dseditgroup _bitcoin"; fi
+	_bug033_system_setup
+	# dscl: -read /Groups/_bitcoin succeeds (group exists), other reads fail.
+	cat > "$BIN_SHIM/dscl" <<EOF
+#!/bin/sh
+echo "dscl \$*" >> "$BIN_SHIM/dscl.calls"
+case "\$*" in
+	*"-read /Groups/_bitcoin"*) exit 0 ;;
+	*-create*) exit 0 ;;
+	*-read*|*-list*) exit 1 ;;
+	*) exit 1 ;;
+esac
+EOF
+	chmod +x "$BIN_SHIM/dscl"
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	[ -f "$BIN_SHIM/dseditgroup.calls" ]
+	grep -q "dseditgroup -o edit -a _lightning -t user _bitcoin" "$BIN_SHIM/dseditgroup.calls"
+}
+
+@test "BUG-033: enable does NOT fail when the _bitcoin group is absent (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then skip "macOS-only"; fi
+	_bug033_system_setup
+	_bug033_stub_dscl   # every -read fails → _bitcoin group "absent"
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	# No dseditgroup add to _bitcoin (only the operator-group add to _lightning).
+	if [ -f "$BIN_SHIM/dseditgroup.calls" ]; then
+		! grep -q "_bitcoin" "$BIN_SHIM/dseditgroup.calls"
+	fi
 }

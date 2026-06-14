@@ -1,0 +1,50 @@
+.TH "LIGHTNING-CONFIG" 1 "June 2026" "lightning 3.1.0" "User Commands"
+.SH NAME
+lightning-config \- view and edit the effective lightningd configuration (FEAT-272)
+.SH SYNOPSIS
+.B lightning config
+[\fIsubcommand\fR] [\fIargs\fR]
+.SH DESCRIPTION
+.nf
+lightning config — a thin front end over the Core Lightning config
+file (<dir>/config), modeled on `bitcoin config` (FEAT-271).
+
+"Effective" = the conf value if present, otherwise lightningd's
+compiled-in default parsed from `lightningd --help`. Writes route
+through sudo + install -m 0640, preserving the conf's owner:group
+(the daemon group model: in --system mode the file is owned by the
+`lightning`/`_lightning` service account at 0640), so the operator
+can read but a privileged step does the write.
+
+The CLN config is flat key=value with `#` comments and key-only
+boolean flags (no INI [sections]).
+
+Subcommands:
+  list                 keys explicitly set in the config file
+  get <key>            effective value of a key (conf or default)
+  set <key> <value>    set a key (sudo write; warns to restart)
+  unset <key>          remove a key (revert to default)
+  path                 print the config file path
+  help <command>       detailed help for a command
+.fi
+.SH USAGE
+.nf
+usage: lightning config <command> [<args>]
+
+   list                 keys explicitly set in the config file
+   get <key>            effective value of a key (conf or default)
+   set <key> <value>    set a key (sudo write; warns to restart)
+   unset <key>          remove a key (revert to default)
+   path                 print the config file path
+.fi
+.SH ENVIRONMENT
+.nf
+LIGHTNING_CONFIG_DIR   force the state dir holding `config` (tests)
+LIGHTNING_DIR          user-mode state dir; default /var/lib/lightning
+LIGHTNING_LIGHTNINGD   lightningd binary used for --help defaults
+.fi
+.SH "SEE ALSO"
+.BR lightning (1),
+.BR lightning-daemon (1)
+.SH AUTHOR
+Part of the \fBlightning\fR educational Lightning Network frontend.
