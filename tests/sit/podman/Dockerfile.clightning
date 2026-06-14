@@ -15,7 +15,7 @@ FROM lightning-regtest:latest
 
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl bash git make \
+        ca-certificates curl bash git make stow \
         apache2 \
         python3 sqlite3 jq qrencode openssl \
         bats sudo \
