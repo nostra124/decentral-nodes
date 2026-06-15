@@ -2,7 +2,7 @@
 id: BUG-035
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # bitcoin daemon unit tests are non-hermetic: `tests/unit/streamline.bats` fails on a host running the live stack

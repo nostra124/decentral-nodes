@@ -2,7 +2,7 @@
 id: BUG-034
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # fulcrum enable/config: a fresh --system deployment needs five manual fixes before fulcrumd indexes

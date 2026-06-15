@@ -2,7 +2,7 @@
 id: BUG-036
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # fulcrum unit test is non-hermetic: BUG-031 macos account test fails on a host with a real `_fulcrum` account

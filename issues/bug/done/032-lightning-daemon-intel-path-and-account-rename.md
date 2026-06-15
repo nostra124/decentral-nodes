@@ -2,7 +2,7 @@
 id: BUG-032
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # lightning daemon (system-mode): hardcoded Intel `/usr/local/var/clightning`

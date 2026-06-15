@@ -2,7 +2,7 @@
 id: BUG-031
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # fulcrum enable/config: privileged datadir/config ops bypass sudo (EACCES, false success)

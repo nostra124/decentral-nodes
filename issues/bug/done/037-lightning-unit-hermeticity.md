@@ -2,7 +2,7 @@
 id: BUG-037
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # lightning daemon unit tests are non-hermetic: `tests/unit/lightning.bats` fails on a host running the live stack

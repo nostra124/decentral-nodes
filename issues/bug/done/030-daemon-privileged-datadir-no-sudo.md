@@ -2,7 +2,7 @@
 id: BUG-030
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # daemon enable/monitor: privileged datadir ops bypass sudo (EACCES, false success)
