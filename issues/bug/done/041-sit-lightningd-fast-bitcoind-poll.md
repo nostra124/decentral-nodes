@@ -2,8 +2,16 @@
 id: BUG-041
 type: bug
 priority: high
-status: open
+status: done
 ---
+
+> **Resolved.** Both nodes now poll bitcoind every 1s via `--developer
+> --dev-bitcoind-poll=1` — bob in `sit_setup_alice_bob`, alice via
+> `developer`/`dev-bitcoind-poll=1` written to its config in the entrypoint.
+> Validated: channel **setup ~1s, open ~2s** (was ~35s each); mined blocks are
+> seen within ~2s. The `02_channel_open_close` *open* test passes. (The *close*
+> test's remaining slowness is channel-state accumulation across tests, tracked
+> under [[BUG-042]], not polling.)
 
 # SIT — lightningd has no fast bitcoind polling, so confirmation-heavy live tests time out
 

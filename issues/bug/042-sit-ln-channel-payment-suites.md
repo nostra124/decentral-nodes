@@ -43,10 +43,32 @@ Most cascade from setup needing a synced node + a funded channel — so they
 should largely clear once [[BUG-041]] (fast polling) lands. Triage each for
 genuine stale-verb / assertion bugs vs. timing.
 
+## Progress
+
+- [[BUG-041]] (fast polling) is **done** — iteration is now ~1–2s per
+  confirmation instead of ~30s.
+- **`channel close` verb fixed.** It exited non-zero on a jq "Invalid numeric
+  literal": `lightning-cli close` streams `# …` fee-negotiation notices to
+  stdout before the JSON, and `cmd_close` fed them to jq. It now strips `^#`
+  (and accepts the newer `txs[0]` reply shape). Regression added — the
+  `lightning-cli-mock` now emits the notices, so the close test fails on the old
+  verb and passes on the fix. The close verb returns ok + reaches ONCHAIN
+  end-to-end in isolation.
+
+## Remaining
+
+1. **Test isolation / channel-state accumulation.** Each test's `setup` opens a
+   fresh channel but nothing closes/forgets alice's prior channels, so they pile
+   up and each `sit_open_channel` CHANNELD_NORMAL wait slows across a suite (the
+   `02` *close* test stalls behind it). Make each test start from a clean channel
+   set (teardown closes / dev-forgets alice's channels, or each suite resets).
+2. Then triage `03_invoice_pay_bolt11`, `04_offer_pay_bolt12`, `14_fee_forward`,
+   and the balance test for genuine stale-verb / assertion bugs.
+
 ## Acceptance
 
 Each listed suite passes against the live stack under `make check-sit`. File any
 genuine `lightning`-verb bug separately (with a unit regression per
 `skills/bugs.md`).
 
-Depends on [[BUG-041]] for practical iteration.
+Depends on [[BUG-041]] (done) for practical iteration.
