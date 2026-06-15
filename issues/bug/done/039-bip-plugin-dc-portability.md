@@ -2,7 +2,7 @@
 id: BUG-039
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # BIP plugins compute wrong results on the macOS `dc`: line-wrapping corrupts long output, and the bip32 engine needs GNU dc

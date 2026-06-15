@@ -2,7 +2,7 @@
 id: BUG-038
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # `make install` double-prefixes the stow tree, so `make check-sit` never installs into `$PREFIX`

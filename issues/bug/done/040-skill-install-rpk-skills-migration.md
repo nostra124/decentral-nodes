@@ -2,7 +2,7 @@
 id: BUG-040
 type: bug
 priority: medium
-status: open
+status: done
 ---
 
 # Skill install plumbing still reads the dead `skills/<name>/SKILL.md` layout; nothing installs and FEAT-019 fails
