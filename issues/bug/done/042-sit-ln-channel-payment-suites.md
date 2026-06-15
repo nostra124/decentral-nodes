@@ -2,7 +2,12 @@
 id: BUG-042
 type: bug
 priority: medium
-status: open
+status: done
+
+> **Resolved.** LN suite 11 -> ~30 passing once stale verbs were reconciled to
+> the FEAT-035 surface; the `wallet push` state.sql drop (push -> pull) is fixed
+> with a unit regression and passes end-to-end. The CGI account-API + LNURL-pay
+> tails moved to [[BUG-043]].
 ---
 
 # SIT — the LN channel/payment live suites need a pass against the working stack
