@@ -83,6 +83,11 @@ sit:install_bitcoin() {
     export XDG_CONFIG_HOME="$SIT_HOME/.config"
     export XDG_STATE_HOME="$SIT_HOME/.local/state"
     unset XDG_CACHE_HOME
+    # Keep config in the throwaway HOME — config:_confdir otherwise prefers a
+    # real /etc/bitcoin if one exists on the host, which both leaks test rpc
+    # settings into it and hides the test's own backend config (BUG-046).
+    export BITCOIN_CONFIG_DIR="$SIT_HOME/.config/bitcoin"
+    mkdir -p "$BITCOIN_CONFIG_DIR"
 
     # Reconfigure for the test prefix, then install. The Makefile hard-assigns
     # PREFIX/BINDIR/… at configure time, so `PREFIX=… make install` alone does
