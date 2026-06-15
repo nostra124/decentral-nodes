@@ -65,6 +65,37 @@ genuine stale-verb / assertion bugs vs. timing.
 2. Then triage `03_invoice_pay_bolt11`, `04_offer_pay_bolt12`, `14_fee_forward`,
    and the balance test for genuine stale-verb / assertion bugs.
 
+## Status (largely resolved)
+
+The original "test isolation" theory was wrong — the `02` close stall was just
+the pre-close-fix image. With [[BUG-041]] (fast polling) done and the stale
+verbs reconciled to the FEAT-035 streamlined surface, the LN suite went from
+11 → 26 passing (5 justified skips). Fixed in the SIT suites:
+
+- `offer-pay` → `pay offer` (04, 11 §5)
+- `fee`/`forward` → `channel fee`/`channel forward` + the round-trip grep `\t`
+  bug (14); `info` → `node info` (11 §1, 12)
+- `ledger` → `wallet ledger` (07, 08, 10); `backup --remote` → `wallet push`
+  (08); `lnurl decode` → `node lnurl-info` (05)
+- `account create … --description` → positional `<desc>` (11 §2)
+- per-test wallet reset (`rm -rf .../wallet/<name>`) for isolation (07, 08, 10, 11)
+- channel-close verb `#`-notice parse (the first finding, unit regression added)
+- `check-sit` runs the explicit list of all 14 LN suites with `/usr/sbin` on
+  alice's PATH (so apache-backed verbs find apache2)
+
+**Green now:** 01 daemon, 02 channel open+close, 03 BOLT-11 pay, 04 BOLT-12
+offer, 06 address, 07 ledger/account, 09 inbound (stub), 11 walkthrough,
++ 13/12 (skips), 14 fee/forward.
+
+**Remaining (small):**
+- `08 push -> pull`: `wallet push` git-pushes fine but the cloned ledger doesn't
+  match local — the pre-commit hook is present, so the `state.sql` regenerate /
+  rebuild path needs a closer look.
+- `14 fee set + get`: occasionally flaky (gossip-propagation timing; the 5×1s
+  retry is sometimes too short).
+
+The CGI account-API + LNURL-pay tails are tracked in [[BUG-043]].
+
 ## Acceptance
 
 Each listed suite passes against the live stack under `make check-sit`. File any

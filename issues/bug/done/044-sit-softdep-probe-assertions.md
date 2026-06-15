@@ -2,7 +2,7 @@
 id: BUG-044
 type: bug
 priority: low
-status: open
+status: done
 ---
 
 # SIT — softdep-probe suite assertions fail (graceful-degradation behaviour)

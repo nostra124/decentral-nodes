@@ -40,10 +40,33 @@ PathInfo) are the genuinely separate part. Triage the apache/CGI layer (sudoers
 `env_keep`, `CGIPassAuth`, `AcceptPathInfo`, the SQLite balance the 402 path
 reads) independently.
 
+## Findings (this session)
+
+`11_walkthrough` and `06_address_create_pay` are **green** now (the verb +
+PATH fixes from [[BUG-042]]). Two clusters remain, both deeper FEAT-196 / LNURL
+integration, not stale verbs:
+
+1. **`10_wellknown_api` (recv/balance/401/402) — two blockers:**
+   - **`secret` not in the SIT container.** `lightning account apikey create`
+     fails with "the `secret` package is required", so `API_KEY` is empty and
+     the auth tests can't run. The image needs the rpk `secret` tool installed
+     (the account API stores keys in `secret`).
+   - **apache 404.** `curl http://example.com/.well-known/lightning/alice/recv`
+     returns **404** even though the CGI scripts are present + executable at
+     `/usr/local/share/lightning/wellknown/lightning/{recv,send,balance}.py` and
+     `lightning.conf` has the RewriteRule + ScriptAlias. The
+     RewriteRule→ScriptAlias routing (or `AllowOverride`/`Options +ExecCGI` on
+     that path, or the `example.com` vhost) needs debugging.
+2. **`05_lnurl_flow` — client LNURL verb.** `node lnurl-info <raw-url>` doesn't
+   return the stub's `callback` JSON; the client-side LNURL-pay path may expect
+   a `user@domain` / bech32 `lnurl1…` rather than a raw URL, or needs a
+   different verb. Low value (the server LNURL is covered by 06/10).
+
 ## Acceptance
 
-`10_wellknown_api`, `05_lnurl_flow`, and `11_walkthrough` pass under
-`make check-sit`. Any genuine CGI/auth bug gets its own ticket + regression
-(`tests/python/` covers the CGI layer).
+`10_wellknown_api`, `05_lnurl_flow`, and `11_walkthrough` (done) pass under
+`make check-sit`. The wellknown cluster needs the `secret` package in the image
++ the apache route fixed; any genuine CGI/auth bug gets its own ticket +
+regression (`tests/python/` covers the CGI layer).
 
 Depends on [[BUG-041]]/[[BUG-042]] for the channel/pay steps.

@@ -2,7 +2,7 @@
 id: BUG-045
 type: bug
 priority: low
-status: open
+status: done
 ---
 
 # SIT — bob's bundled clnrest/wss-proxy plugins abort (missing python gevent/websockets)
