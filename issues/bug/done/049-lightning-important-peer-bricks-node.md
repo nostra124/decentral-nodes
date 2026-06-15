@@ -2,7 +2,7 @@
 id: BUG-049
 type: bug
 priority: high
-status: open
+status: closed
 ---
 
 # lightning peer bootstrap persists `important-peer=`, which some lightningd builds reject — bricking the node
