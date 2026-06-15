@@ -1,0 +1,79 @@
+.TH MONERO-CONFIG 1 "2026" "bitcoin stack" "User Commands"
+.SH NAME
+monero-config \- view and edit the effective monerod configuration
+.SH SYNOPSIS
+.B monero config
+.I subcommand
+.RI [ args ]
+.SH DESCRIPTION
+A thin front end over
+.IR monerod.conf .
+The
+.I effective
+configuration is the value present in the config file, otherwise monerod's
+compiled-in default (parsed from
+.BR "monerod --help" ).
+The config lives under
+.I /etc/monero
+for the system service (FHS). Writes route through
+.B sudo
++
+.B install -m 0640
+preserving the owner:group, so the operator reads while a privileged step
+does the write.
+.SH SUBCOMMANDS
+.TP
+.B list " [--set]"
+Print
+.IR NAME <TAB> VALUE <TAB> DESCRIPTION
+for every monerod option \(em
+.I VALUE
+is the config value if set, else the compiled-in default.
+.B \-\-set
+limits output to keys explicitly present in the config file.
+.TP
+.B get " <key>"
+Print the effective value of
+.IR key .
+.TP
+.B set " <key> <value>"
+Write
+.I key=value
+into the config (replacing any existing line) and warn that a restart is
+needed.
+.TP
+.B unset " <key>"
+Remove
+.IR key ,
+reverting it to monerod's default.
+.TP
+.B path
+Print the path to
+.IR monerod.conf .
+.SH OPTIONS
+.TP
+.B \-\-set
+With
+.BR list ,
+show only keys explicitly set in the config file.
+.SH ENVIRONMENT
+.TP
+.B MONERO_CONFIG_DIR
+Directory holding
+.I monerod.conf
+(overrides the default).
+.TP
+.B MONERO_MONEROD
+monerod binary used to parse compiled-in defaults.
+.SH EXIT STATUS
+.B 0
+on success;
+.B 2
+on a usage error;
+.B 1
+when a key is unknown / unset and has no default.
+.SH SEE ALSO
+.BR monero (1),
+.BR monero-daemon (1)
+.SH HISTORY
+Introduced in 3.2.0 (FEAT-302).

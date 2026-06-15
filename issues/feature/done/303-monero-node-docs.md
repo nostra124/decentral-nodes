@@ -2,7 +2,7 @@
 id: FEAT-303
 type: feature
 priority: medium
-status: open
+status: shipped
 ---
 
 # `monero` man pages + node walkthrough

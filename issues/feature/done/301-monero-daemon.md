@@ -2,7 +2,7 @@
 id: FEAT-301
 type: feature
 priority: high
-status: open
+status: shipped
 ---
 
 # `monero daemon {enable,start,stop,status,monitor}` — system-default monerod service

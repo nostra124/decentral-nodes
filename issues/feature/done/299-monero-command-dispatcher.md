@@ -2,7 +2,7 @@
 id: FEAT-299
 type: feature
 priority: high
-status: open
+status: shipped
 ---
 
 # `monero` command dispatcher + package wiring

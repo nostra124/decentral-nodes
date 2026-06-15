@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+############################################################################
+# monero config (FEAT-302) — view and edit the effective monerod config.
+# Mirrors `bitcoin config` (FEAT-271/298):
+#
+#   config list            NAME<TAB>VALUE<TAB>DESCRIPTION for every monerod
+#                          option — VALUE is the monerod.conf value if set,
+#                          else monerod's compiled-in default
+#   config get <key>       effective value (conf if set, else default)
+#   config set <key> <val> write key=value into monerod.conf
+#   config unset <key>     remove a key (revert to default)
+#   config path            print the config file path
+#
+# "Effective" = the conf value if present, else monerod's default parsed
+# from `monerod --help` (boost program_options: "--name arg (=default)").
+# Writes route through $SUDO + install -m 0640, preserving owner:group
+# (the _monero daemon group model — BUG-030 lesson: no bare redirection).
+# Parsing is BSD-awk + gawk portable (BUG-039). §4: no shared library.
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+VERSION='1.0'
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { [ -n "$SELF_QUIET" ] || echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+has()   { type -t "$1:$2" | grep -q function; }
+
+: "${XDG_CONFIG_HOME:=$HOME/.config}"
+
+# Directory holding monerod.conf. /etc/monero for the system service (FHS),
+# $MONERO_CONFIG_DIR overrides (tests), else the per-user datadir.
+config:_confdir() {
+	if [ -n "${MONERO_CONFIG_DIR:-}" ]; then printf '%s\n' "$MONERO_CONFIG_DIR"; return 0; fi
+	if [ -f /etc/monero/monerod.conf ]; then printf '/etc/monero\n'; return 0; fi
+	printf '%s/.bitmonero\n' "$HOME"
+}
+config:_conf() { printf '%s/monerod.conf\n' "$(config:_confdir)"; }
+
+# monerod binary for parsing --help defaults. $MONERO_MONEROD overrides;
+# else the system dirs the daemon prefers, then PATH.
+config:_monerod() {
+	if [ -n "${MONERO_MONEROD:-}" ]; then printf '%s\n' "$MONERO_MONEROD"; return 0; fi
+	local c
+	for c in /usr/local/bin/monerod /opt/local/bin/monerod /opt/homebrew/bin/monerod "$(command -v monerod 2>/dev/null)"; do
+		[ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+	done
+	return 1
+}
+
+# Dump every documented monerod option as NAME<TAB>DEFAULT<TAB>DESCRIPTION,
+# parsed from `monerod --help`. boost program_options renders one option per
+# line: "  --name arg (=default)   Description" (flags have no "arg"/default).
+# Empty + non-zero if no monerod. BSD-awk + gawk safe (BUG-039).
+config:_dump_help() {
+	local bin; bin="$(config:_monerod)" || return 1
+	"$bin" --help 2>/dev/null </dev/null | awk '
+		/^[ ]+--[A-Za-z0-9]/ {
+			s=$0
+			name=s; sub(/^[ ]+--/,"",name); sub(/[ \t=].*$/,"",name)
+			def=""
+			if (match(s, /[(]=[^)]*[)]/)) def=substr(s, RSTART+2, RLENGTH-3)
+			d=s
+			sub(/^[ ]+--[A-Za-z0-9_-]+/, "", d)   # strip "  --name"
+			sub(/^ arg/, "", d)                    # optional " arg"
+			sub(/^ [(]=[^)]*[)]/, "", d)           # optional " (=default)"
+			sub(/^[ \t]+/, "", d); gsub(/[ \t]+$/, "", d)
+			if (name != "") printf "%s\t%s\t%s\n", name, def, d
+		}
+	'
+}
+
+# monerod's compiled-in default for <key>. Empty + non-zero if none/unknown.
+config:_default() {
+	local key="$1"
+	config:_dump_help 2>/dev/null | awk -F'\t' -v k="$key" '
+		$1==k { if ($2!="") { print $2; f=1 } exit } END { exit !f }'
+}
+
+# Last value set for <key> in the flat key=value conf (later rows win).
+config:_conf_get() {
+	local key="$1" conf="$2"
+	[ -r "$conf" ] || return 1
+	awk -F= -v k="$key" '
+		/^[ \t]*[#;]/ { next }
+		{ kk=$1; sub(/^[ \t]+/,"",kk); sub(/[ \t]+$/,"",kk);
+		  if (kk==k) { sub(/^[^=]*=/, ""); v=$0; got=1 } }
+		END { if (got) print v; else exit 1 }
+	' "$conf"
+}
+
+config:_owner() {
+	stat -c '%U:%G' "$1" 2>/dev/null || stat -f '%Su:%Sg' "$1" 2>/dev/null
+}
+
+# Install new conf content (stdin) to $conf at 0640, preserving owner:group,
+# via $SUDO when needed (BUG-030: no bare redirect into a root-owned file).
+config:_install_conf() {
+	local conf="$1" tmp og SUDO=""
+	tmp="$(mktemp)"; cat > "$tmp"
+	[ -e "$conf" ] && og="$(config:_owner "$conf")"
+	if [ -e "$conf" ]; then [ -w "$conf" ] || SUDO=sudo
+	else [ -w "$(dirname "$conf")" ] || SUDO=sudo; fi
+	if ! $SUDO install -m 0640 "$tmp" "$conf"; then
+		rm -f "$tmp"; error "cannot write '$conf'"; return 1
+	fi
+	[ -n "$og" ] && $SUDO chown "$og" "$conf" 2>/dev/null
+	rm -f "$tmp"
+}
+
+help:list() { cat >&2 <<-EOF
+	usage: $SELF list [--set]
+	  Show the EFFECTIVE monerod configuration as TSV NAME<TAB>VALUE<TAB>
+	  DESCRIPTION — VALUE is the monerod.conf value if set, else monerod's
+	  compiled-in default. --set limits output to keys present in the config
+	  file. Pipe through \`column -t -s\$'\t'\` for aligned columns.
+	EOF
+}
+command:list() {
+	local only_set=0 a
+	for a in "$@"; do case "$a" in -h|--help|help) help:list; return 0 ;; --set) only_set=1 ;; esac; done
+	local conf; conf="$(config:_conf)"
+	info "config: $conf"
+	printf 'NAME\tVALUE\tDESCRIPTION\n'
+	local help_dump seen=" "
+	help_dump="$(config:_dump_help 2>/dev/null)"
+	if [ -n "$help_dump" ] && [ "$only_set" = 0 ]; then
+		# Merge in awk (NOT `read`, which collapses consecutive TSV tabs and
+		# drops empty VALUE columns — the FEAT-298 lesson).
+		printf '%s\n' "$help_dump" | awk -F'\t' -v conffile="$conf" '
+			BEGIN {
+				while ((getline ln < conffile) > 0) {
+					if (ln ~ /^[ \t]*[#;]/ || ln ~ /^[ \t]*$/) continue
+					e=index(ln,"="); if(e==0)continue
+					k=substr(ln,1,e-1); gsub(/[ \t]/,"",k)
+					cv[k]=substr(ln,e+1)
+				}
+			}
+			$1!="" { v=($1 in cv)?cv[$1]:$2; printf "%s\t%s\t%s\n", $1, v, $3 }
+		'
+		seen=" $(printf '%s\n' "$help_dump" | cut -f1 | tr '\n' ' ')"
+	fi
+	# Keys present only in the conf (custom / version-specific / --set).
+	if [ -r "$conf" ]; then
+		local k v
+		while IFS= read -r k; do
+			[ -n "$k" ] || continue
+			case "$seen" in *" $k "*) continue ;; esac
+			v="$(config:_conf_get "$k" "$conf")"
+			printf '%s\t%s\t%s\n' "$k" "$v" '(set in config)'
+		done < <(awk -F= '/^[ \t]*[#;]/||/^[ \t]*$/{next} {k=$1;sub(/^[ \t]+/,"",k);sub(/[ \t]+$/,"",k);print k}' "$conf")
+	fi
+}
+
+help:get() { cat >&2 <<-EOF
+	usage: $SELF get <key>
+	  Print the effective value of <key>: the monerod.conf value if set,
+	  otherwise monerod's compiled-in default.
+	EOF
+}
+command:get() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:get; return 0 ;; esac; done
+	local key="${1:-}"
+	[ -n "$key" ] || { error "get: usage: $SELF get <key>"; return 2; }
+	key="${key#--}"
+	local conf val; conf="$(config:_conf)"
+	if val="$(config:_conf_get "$key" "$conf")"; then
+		printf '%s\n' "$val"; info "source: conf ($conf)"; return 0
+	fi
+	if val="$(config:_default "$key")"; then
+		printf '%s\n' "$val"; info "source: monerod default"; return 0
+	fi
+	warn "get: '$key' is not set in $conf and has no known monerod default"
+	return 1
+}
+
+help:set() { cat >&2 <<-EOF
+	usage: $SELF set <key> <value>
+	  Write key=value into monerod.conf (replacing any existing line).
+	  Routes through sudo + install -m 0640, preserving owner:group.
+	EOF
+}
+command:set() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:set; return 0 ;; esac; done
+	local key="${1:-}" value="${2:-}"
+	{ [ -n "$key" ] && [ $# -ge 2 ]; } || { error "set: usage: $SELF set <key> <value>"; return 2; }
+	key="${key#--}"
+	local conf; conf="$(config:_conf)"
+	[ -e "$conf" ] || { error "set: no config at '$conf' (run 'monero daemon enable' first)"; return 1; }
+	local new
+	if config:_conf_get "$key" "$conf" >/dev/null 2>&1; then
+		new="$(awk -F= -v k="$key" -v val="$value" '
+			BEGIN{done=0}
+			$0 !~ /^[ \t]*[#;]/ { kk=$1; sub(/^[ \t]+/,"",kk); sub(/[ \t]+$/,"",kk);
+				if (kk==k && !done) { print k"="val; done=1; next } }
+			{ print }
+		' "$conf")"
+	else
+		new="$(cat "$conf"; printf '%s=%s\n' "$key" "$value")"
+	fi
+	printf '%s\n' "$new" | config:_install_conf "$conf" || return 1
+	info "set $key=$value in $conf"
+	warn "restart the daemon for this to take effect: monero daemon stop && monero daemon start"
+}
+
+help:unset() { cat >&2 <<-EOF
+	usage: $SELF unset <key>
+	  Remove <key> from monerod.conf (reverting it to monerod's default).
+	EOF
+}
+command:unset() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:unset; return 0 ;; esac; done
+	local key="${1:-}"
+	[ -n "$key" ] || { error "unset: usage: $SELF unset <key>"; return 2; }
+	key="${key#--}"
+	local conf; conf="$(config:_conf)"
+	[ -e "$conf" ] || { error "unset: no config at '$conf'"; return 1; }
+	config:_conf_get "$key" "$conf" >/dev/null 2>&1 || { warn "unset: '$key' is not set in $conf"; return 0; }
+	awk -v k="$key" '
+		$0 !~ /^[ \t]*[#;]/ { kk=$0; sub(/=.*/,"",kk); sub(/^[ \t]+/,"",kk); sub(/[ \t]+$/,"",kk);
+			if (kk==k) next }
+		{ print }
+	' "$conf" | config:_install_conf "$conf" || return 1
+	info "unset $key in $conf"
+	warn "restart the daemon for this to take effect: monero daemon stop && monero daemon start"
+}
+
+help:path() { echo "usage: $SELF path — print the path to monerod.conf" >&2; }
+command:path() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:path; return 0 ;; esac; done
+	config:_conf
+}
+
+command:help() {
+	cat >&2 <<-EOF
+	usage: $SELF config <command> [<args>]
+
+	   monero config views and edits the monerod configuration
+	   (effective config = monerod.conf value, else monerod default).
+
+	commands:
+	   list                 NAME/VALUE/DESCRIPTION for every monerod option
+	   get <key>            effective value of a key (conf or default)
+	   set <key> <value>    set a key (sudo write; warns to restart)
+	   unset <key>          remove a key (revert to default)
+	   path                 print the config file path
+	   help <command>       detailed help for a command
+	EOF
+}
+command:version() { echo "$VERSION"; }
+
+#------------------------------------------------------------------------------
+if [[ $# == 0 ]]; then command:help; exit 0; fi
+if has command "$1"; then
+	debug "executing command:$1 ${*:2}"
+	verb="$1"; shift
+	command:"$verb" "$@"
+	exit $?
+else
+	error "unknown config command: '$1'"
+	command:help
+	exit 2
+fi

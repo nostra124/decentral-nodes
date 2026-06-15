@@ -1,0 +1,93 @@
+.TH MONERO-DAEMON 1 "2026" "bitcoin stack" "User Commands"
+.SH NAME
+monero-daemon \- install and operate a boot-persistent monerod service
+.SH SYNOPSIS
+.B monero daemon
+.I subcommand
+.RB [ \-\-user | \-\-system ]
+.RB [ \-\-mainnet | \-\-stagenet | \-\-testnet ]
+.RI [ args ]
+.SH DESCRIPTION
+Render a platform-appropriate service unit (systemd on Linux, launchd on
+macOS), install it, and operate the monerod process. The default mode is
+.B \-\-system
+\(em a boot-persistent service under a dedicated
+.RB ( _monero / monero )
+account, with a
+.I /var/lib/monero
+data directory and
+.I /etc/monero
+config. Pass
+.B \-\-user
+for the rootless per-user service.
+.PP
+monerod runs with restricted RPC bound to 127.0.0.1. The
+.BR \-\-stagenet / \-\-testnet
+flags install a distinctly-labelled parallel service that coexists with the
+mainnet one.
+.SH SUBCOMMANDS
+.TP
+.B enable " [--user] [--stagenet|--testnet] [--prune]"
+Provision the account/group + data dir, generate the restricted-RPC config
+(adding
+.B prune-blockchain
+when
+.BR \-\-prune ),
+install the unit, and start it.
+.B \-\-system
+(default) needs root;
+.B \-\-user
+is the rootless opt-in. Refuses if the restricted-RPC port is already in
+use rather than installing a unit that would crash-loop on bind.
+.TP
+.B disable " [--user] [--stagenet|--testnet]"
+Stop the service and remove its unit (data directory preserved).
+.TP
+.B start " / " stop
+Drive the installed service (mode auto-detected).
+.TP
+.B status
+Report whether monerod is reachable on its restricted RPC and its height.
+Reads via group access \(em no sudo prompt.
+.TP
+.B monitor
+Tail the daemon log directly (group-read; no sudo).
+.TP
+.B space
+Report the data-directory disk usage.
+.SH OPTIONS
+.TP
+.B \-\-user
+Rootless per-user service (opt-in).
+.TP
+.B \-\-system
+Boot-persistent system service (default).
+.TP
+.B \-\-stagenet ", " \-\-testnet
+Target a non-mainnet network (parallel, suffixed unit).
+.TP
+.B \-\-prune
+Run a pruned node
+.RB ( prune-blockchain ).
+.SH FILES
+.TP
+.I /etc/monero/monerod.conf
+System-service config (per-network suffix for stagenet/testnet).
+.TP
+.I /var/lib/monero
+System data dir;
+.I ~/.bitmonero
+in \-\-user mode.
+.SH ENVIRONMENT
+.TP
+.B MONERO_MONEROD
+Path to the monerod binary (overrides autodetection).
+.SH EXIT STATUS
+.B 0
+on success; non-zero on error (each failure names the condition).
+.SH SEE ALSO
+.BR monero (1),
+.BR monero-install (1),
+.BR monero-config (1)
+.SH HISTORY
+Introduced in 3.2.0 (FEAT-301).

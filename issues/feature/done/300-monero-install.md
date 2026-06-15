@@ -2,7 +2,7 @@
 id: FEAT-300
 type: feature
 priority: high
-status: open
+status: shipped
 ---
 
 # `monero install` — verified release-tarball install of the Monero binaries

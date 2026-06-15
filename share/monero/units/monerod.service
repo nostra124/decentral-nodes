@@ -1,0 +1,16 @@
+[Unit]
+Description=Monero daemon (managed by monero daemon enable)
+Documentation=man:monero-daemon(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=@MONEROD@ --non-interactive --config-file=@CONF@ --data-dir=@DATADIR@ --pidfile=@PIDFILE@ @CHAIN@
+Type=simple
+User=@USER@
+PIDFile=@PIDFILE@
+Restart=on-failure
+TimeoutStopSec=600
+
+[Install]
+WantedBy=default.target

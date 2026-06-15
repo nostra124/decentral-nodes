@@ -1,0 +1,283 @@
+#!/usr/bin/env bash
+
+############################################################################
+# monero install (FEAT-300) — verified release-tarball install of monerod.
+#
+# Monero isn't cleanly packaged on most distros, so — like bitcoin/fulcrum —
+# we pull the official release tarball from getmonero.org and verify it
+# before staging:
+#   1. resolve host arch -> release asset name + pinned version
+#   2. TOFU-fetch the maintainer (binaryFate) signing key and CHECK its
+#      fingerprint against the pinned one (cached after first use)
+#   3. gpg --verify the clearsigned hashes file with that key
+#   4. check the tarball's SHA256 against the verified hashes
+#   5. extract monerod / monero-wallet-rpc / monero-wallet-cli to the bindir
+# Any verification failure FAILS CLOSED — nothing is staged.
+#
+# Hermetic bats: every network/tool boundary is a seam —
+#   $MONERO_VERSION         pin/override the release version
+#   $MONERO_RELEASE_BASEURL tarball download base
+#   $MONERO_HASHES_URL      clearsigned hashes file
+#   $MONERO_KEY_URL         maintainer signing key (TOFU source)
+#   $MONERO_BINDIRS         ':'-separated install-dir candidates
+#   $MONERO_KEYCACHE        where the fetched key is cached
+# plus PATH-stubbed uname / curl / gpg in the suite.  §4: no shared library.
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+# --- pinned constants (overridable via seams) ------------------------------
+
+# The Monero release signing key (binaryFate). The fingerprint is pinned in
+# the source; the key material is fetched TOFU and rejected unless it hashes
+# to this fingerprint, so a swapped key file can never slip through.
+MONERO_SIGNING_FPR="${MONERO_SIGNING_FPR:-81AC591FE9C4B65C5806AFC3F0AF4D462A0BDF92}"
+MONERO_VERSION="${MONERO_VERSION:-v0.18.3.4}"
+MONERO_RELEASE_BASEURL="${MONERO_RELEASE_BASEURL:-https://downloads.getmonero.org/cli}"
+MONERO_HASHES_URL="${MONERO_HASHES_URL:-https://www.getmonero.org/downloads/hashes.txt}"
+MONERO_KEY_URL="${MONERO_KEY_URL:-https://raw.githubusercontent.com/monero-project/monero/master/utils/gpg_keys/binaryfate.asc}"
+MONERO_KEYCACHE="${MONERO_KEYCACHE:-${XDG_DATA_HOME:-$HOME/.local/share}/monero/keys/binaryfate.asc}"
+
+# --- host detection --------------------------------------------------------
+
+# OS family: "linux" | "macos" | "unknown".
+monero:_os() {
+	case "$(uname -s)" in
+		Linux)  printf 'linux\n' ;;
+		Darwin) printf 'macos\n' ;;
+		*)      printf 'unknown\n' ;;
+	esac
+}
+
+# Release asset basename for this host (no extension), or empty if unknown.
+# Mirrors the getmonero.org asset naming.
+monero:_asset() {
+	local os arch
+	os="$(monero:_os)"
+	case "$(uname -m)" in
+		x86_64|amd64)      arch=x64 ;;
+		aarch64|arm64)     arch=armv8 ;;
+		*)                 arch="" ;;
+	esac
+	[ -n "$arch" ] || { printf '\n'; return; }
+	case "$os" in
+		linux) printf 'monero-linux-%s-%s\n' "$arch" "$MONERO_VERSION" ;;
+		macos) printf 'monero-mac-%s-%s\n' "$arch" "$MONERO_VERSION" ;;
+		*)     printf '\n' ;;
+	esac
+}
+
+# SHA256 of a file, hex only. sha256sum (Linux) / shasum -a 256 (macOS).
+monero:_sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+	else
+		shasum -a 256 "$1" | awk '{print $1}'
+	fi
+}
+
+# Pick a writable install bindir. $MONERO_BINDIRS (':'-separated) or
+# --prefix override; else the system dirs other commands prefer (avoiding
+# the dispatcher-name collision: we install the real binaries, not 'monero').
+monero:_bindir() {
+	local override="$1" cand
+	if [ -n "$override" ]; then printf '%s\n' "$override"; return; fi
+	local dirs="${MONERO_BINDIRS:-/usr/local/bin:/opt/local/bin:/opt/homebrew/bin}"
+	local _oldifs="$IFS"; IFS=:
+	for cand in $dirs; do
+		IFS="$_oldifs"
+		[ -d "$cand" ] && [ -w "$cand" ] && { printf '%s\n' "$cand"; return; }
+		IFS=:
+	done
+	IFS="$_oldifs"
+	# Fall back to the first candidate (caller may need sudo); name it so the
+	# error is actionable.
+	printf '%s\n' "${dirs%%:*}"
+}
+
+# --- key handling (TOFU + fingerprint pin) ---------------------------------
+
+# Fetch + cache the signing key, and verify it hashes to the pinned
+# fingerprint. Echoes the cached key path on success; fails closed.
+monero:_ensure_key() {
+	local key="$MONERO_KEYCACHE"
+	if [ ! -s "$key" ]; then
+		mkdir -p "$(dirname "$key")"
+		info "fetching signing key (first use) from $MONERO_KEY_URL"
+		if ! curl -fsSL -o "$key" "$MONERO_KEY_URL"; then
+			rm -f "$key"
+			error "install: failed to download signing key from $MONERO_KEY_URL"
+			return 1
+		fi
+	fi
+	# Show-only import: read the key's fingerprint WITHOUT touching any
+	# keyring, and reject anything but the pinned binaryFate fingerprint.
+	local fprs
+	fprs="$(gpg --with-colons --import-options show-only --import "$key" 2>/dev/null \
+		| awk -F: '$1=="fpr"{print $10}')"
+	if ! printf '%s\n' "$fprs" | grep -qx "$MONERO_SIGNING_FPR"; then
+		error "install: signing key fingerprint mismatch (expected $MONERO_SIGNING_FPR)"
+		error "  refusing the fetched key at $key — delete it and retry, or check $MONERO_KEY_URL"
+		rm -f "$key"
+		return 1
+	fi
+	printf '%s\n' "$key"
+}
+
+# gpg --verify a clearsigned file against the pinned key in an EPHEMERAL
+# keyring (never touches the user's ~/.gnupg).
+monero:_verify_sig() {
+	local signed="$1" key="$2" gh rc
+	gh="$(mktemp -d)"
+	GNUPGHOME="$gh" gpg --quiet --import "$key" 2>/dev/null
+	GNUPGHOME="$gh" gpg --quiet --verify "$signed" 2>/dev/null
+	rc=$?
+	rm -rf "$gh"
+	return $rc
+}
+
+# --- help ------------------------------------------------------------------
+
+help:install() {
+	cat >&2 <<-ENDHELP
+	usage: monero install [--from release] [--version <vX.Y.Z.W>]
+	                      [--prefix <bindir>] [--force]
+
+	  Install the official Monero binaries (monerod, monero-wallet-rpc,
+	  monero-wallet-cli) from a verified getmonero.org release tarball.
+
+	  The release is authenticated before anything is staged: the
+	  maintainer (binaryFate) signing key is fetched on first use and
+	  pinned by fingerprint, the clearsigned hashes file is gpg-verified
+	  with it, and the tarball's SHA256 is checked against those hashes.
+	  Any failure aborts with nothing installed (fail-closed).
+
+	  --from release   install source (only 'release' today; the default)
+	  --version        pin a specific release (default: $MONERO_VERSION)
+	  --prefix <dir>   install into <dir> instead of the autodetected bindir
+	  --force          re-install even if the target version is present
+	ENDHELP
+}
+
+# --- main ------------------------------------------------------------------
+
+command:install() {
+	local source=release version="" prefix="" force=
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--from)         source="$2"; shift ;;
+			--from=*)       source="${1#--from=}" ;;
+			--version)      version="$2"; shift ;;
+			--version=*)    version="${1#--version=}" ;;
+			--prefix)       prefix="$2"; shift ;;
+			--prefix=*)     prefix="${1#--prefix=}" ;;
+			--force)        force=1 ;;
+			-h|--help|help) help:install; return 0 ;;
+			*) error "install: unknown argument '$1'"; return 1 ;;
+		esac
+		shift
+	done
+	[ -n "$version" ] && MONERO_VERSION="$version"
+	if [ "$source" != release ]; then
+		error "install: unknown source '$source' (only 'release' is supported)"
+		return 1
+	fi
+
+	local os; os="$(monero:_os)"
+	case "$os" in linux|macos) ;; *)
+		error "install: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+	local asset; asset="$(monero:_asset)"
+	if [ -z "$asset" ]; then
+		error "install: unsupported architecture '$(uname -m)' (need x86_64 or aarch64)"
+		return 1
+	fi
+	info "release: $MONERO_VERSION  asset: $asset"
+
+	local bindir; bindir="$(monero:_bindir "$prefix")"
+	# Idempotency: a matching monerod already in place is a no-op unless --force.
+	if [ -z "$force" ] && [ -x "$bindir/monerod" ] \
+		&& "$bindir/monerod" --version 2>/dev/null | grep -q "$MONERO_VERSION"; then
+		info "monerod $MONERO_VERSION already installed at $bindir (use --force to reinstall)"
+		return 0
+	fi
+
+	# 1. signing key (TOFU + fingerprint pin).
+	local key; key="$(monero:_ensure_key)" || return 1
+
+	local work; work="$(mktemp -d)"
+	trap 'rm -rf "$work"' RETURN
+
+	# 2. clearsigned hashes file + gpg verify.
+	info "downloading + verifying hashes ($MONERO_HASHES_URL)"
+	if ! curl -fsSL -o "$work/hashes.txt" "$MONERO_HASHES_URL"; then
+		error "install: failed to download hashes from $MONERO_HASHES_URL"; return 1
+	fi
+	if ! monero:_verify_sig "$work/hashes.txt" "$key"; then
+		error "install: GPG signature on the hashes file did NOT verify — aborting"
+		return 1
+	fi
+	info "hashes signature verified (binaryFate)"
+
+	# 3. tarball + SHA256 check against the verified hashes.
+	local tarball="$asset.tar.bz2"
+	info "downloading $tarball"
+	if ! curl -fsSL -o "$work/$tarball" "$MONERO_RELEASE_BASEURL/$tarball"; then
+		error "install: failed to download $tarball from $MONERO_RELEASE_BASEURL"; return 1
+	fi
+	local want got
+	want="$(awk -v f="$tarball" '$2==f{print $1}' "$work/hashes.txt" | head -n1)"
+	got="$(monero:_sha256 "$work/$tarball")"
+	if [ -z "$want" ]; then
+		error "install: $tarball is not listed in the verified hashes file — aborting"
+		return 1
+	fi
+	if [ "$want" != "$got" ]; then
+		error "install: SHA256 mismatch for $tarball (tampered download?) — aborting"
+		error "  expected $want"
+		error "  got      $got"
+		return 1
+	fi
+	info "sha256 verified: $got"
+
+	# 4. extract + stage the binaries.
+	if ! tar -xjf "$work/$tarball" -C "$work" 2>/dev/null; then
+		error "install: failed to extract $tarball"; return 1
+	fi
+	local srcdir="$work/$asset"
+	[ -d "$srcdir" ] || srcdir="$(find "$work" -maxdepth 1 -type d -name 'monero-*' | head -n1)"
+	if [ -z "$srcdir" ] || [ ! -d "$srcdir" ]; then
+		error "install: extracted tree has no monero-* directory"; return 1
+	fi
+	local SUDO=""; [ -w "$bindir" ] || SUDO=sudo
+	mkdir -p "$bindir" 2>/dev/null || $SUDO mkdir -p "$bindir"
+	local b staged=0
+	for b in monerod monero-wallet-rpc monero-wallet-cli; do
+		if [ -f "$srcdir/$b" ]; then
+			$SUDO install -m 0755 "$srcdir/$b" "$bindir/$b" \
+				|| { error "install: failed to stage $b into $bindir"; return 1; }
+			staged=$((staged + 1))
+		fi
+	done
+	if [ "$staged" -eq 0 ]; then
+		error "install: no monero binaries found in the tarball"; return 1
+	fi
+	info "installed $staged monero binaries ($MONERO_VERSION) to $bindir"
+}
+
+# Dispatch: invoked as `monero install ...`; the dispatcher execs this file.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	case "${1:-}" in
+		help|-h|--help) help:install ;;
+		*)              command:install "$@" ;;
+	esac
+fi
