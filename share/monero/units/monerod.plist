@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>@LABEL@</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@MONEROD@</string>
+		<string>--non-interactive</string>
+		<string>--config-file=@CONF@</string>
+		<string>--data-dir=@DATADIR@</string>
+		<string>--pidfile=@PIDFILE@</string>
+		<string>@CHAIN@</string>
+	</array>
+	<key>UserName</key>
+	<string>@USER@</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>@LOG@</string>
+	<key>StandardErrorPath</key>
+	<string>@LOG@</string>
+</dict>
+</plist>

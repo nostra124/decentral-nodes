@@ -255,3 +255,177 @@ _mk_release_fixture() {
 		[[ "$output" == *"$s"* ]] || { echo "missing: $s"; return 1; }
 	done
 }
+
+# ===========================================================================
+# FEAT-301 — system-default monerod service (mirrors streamline.bats
+# feat034_env). Init-system binaries are stubbed (logging their argv to
+# $MCALLS); sudo execs transparently; MONERO_DAEMON_OS forces the os branch;
+# MONERO_DAEMON_ROOT redirects every --system absolute path into a tmp tree.
+# ===========================================================================
+
+monero_daemon_env() {
+	local os="${1:-linux}"
+	export MONERO_DAEMON_OS="$os"
+	export XDG_CONFIG_HOME="$HOME/.config"
+	export MONERO_DAEMON_ROOT="$HOME/root"
+	export SELF_UNITS="$REPO/share/monero/units"
+	export MCALLS="$HOME/monero-daemon-calls.log"; : > "$MCALLS"
+	local stub="$HOME/mdstub" c; mkdir -p "$stub"
+	for c in systemctl launchctl useradd dscl dseditgroup usermod chown du; do
+		printf '#!/usr/bin/env bash\nprintf "%s %%s\\n" "$*" >> "%s"\nexit 0\n' "$c" "$MCALLS" > "$stub/$c"
+		chmod +x "$stub/$c"
+	done
+	# du must still print a size for `space`.
+	printf '#!/usr/bin/env bash\nprintf "du %%s\\n" "$*" >> "%s"\necho "42G\t."\n' "$MCALLS" > "$stub/du"
+	chmod +x "$stub/du"
+	# Username lookups report not-found so the account-creation branch fires;
+	# flag forms pass through to the real id.
+	cat > "$stub/id" <<-'STUB'
+		#!/usr/bin/env bash
+		case "$1" in -*) exec /usr/bin/id "$@" ;; "") exec /usr/bin/id ;; *) exit 1 ;; esac
+	STUB
+	chmod +x "$stub/id"
+	cat > "$stub/sudo" <<-STUB
+		#!/usr/bin/env bash
+		printf 'sudo %s\n' "\$*" >> "$MCALLS"
+		[ "\$1" = "-u" ] && shift 2
+		exec "\$@"
+	STUB
+	chmod +x "$stub/sudo"
+	# curl backs `status`: empty (down) unless MONERO_TEST_RPC_JSON is set.
+	cat > "$stub/curl" <<-STUB
+		#!/usr/bin/env bash
+		[ -n "\$MONERO_TEST_RPC_JSON" ] && printf '%s' "\$MONERO_TEST_RPC_JSON"
+		exit 0
+	STUB
+	chmod +x "$stub/curl"
+	export PATH="$stub:$PATH"
+	export MONERO_MONEROD="$HOME/monerod-stub"
+	printf '#!/usr/bin/env bash\n:\n' > "$MONERO_MONEROD"; chmod +x "$MONERO_MONEROD"
+	# Hermetic on a host running monerod: sentinel matches no real port.
+	export MONERO_PORT_BUSY=none
+}
+
+@test "FEAT-301 AC1: daemon enable (system, linux) creates the account, unit (User=monero), and starts it" {
+	monero_daemon_env linux
+	run "$MONERO" daemon enable
+	[ "$status" -eq 0 ]
+	local unit="$MONERO_DAEMON_ROOT/etc/systemd/system/monerod.service"
+	[ -f "$unit" ]
+	grep -q '^User=monero' "$unit"
+	grep -q "ExecStart=$MONERO_MONEROD --non-interactive --config-file=" "$unit"
+	# account provisioned + service enabled
+	grep -q 'useradd .* monero' "$MCALLS"
+	grep -q 'systemctl .*enable --now monerod' "$MCALLS"
+	# datadir under the redirected root
+	[ -d "$MONERO_DAEMON_ROOT/var/lib/monero" ]
+}
+
+@test "FEAT-301 AC1: daemon enable (system, macos) installs a LaunchDaemon running as _monero" {
+	monero_daemon_env macos
+	run "$MONERO" daemon enable
+	[ "$status" -eq 0 ]
+	local unit="$MONERO_DAEMON_ROOT/Library/LaunchDaemons/net.monero.monerod.plist"
+	[ -f "$unit" ]
+	grep -q '<string>_monero</string>' "$unit"
+	grep -q 'dscl .* /Users/_monero' "$MCALLS"
+}
+
+@test "FEAT-301 AC2: daemon enable --user (linux) installs a rootless unit with no User=" {
+	monero_daemon_env linux
+	run "$MONERO" daemon enable --user
+	[ "$status" -eq 0 ]
+	local unit="$XDG_CONFIG_HOME/systemd/user/monerod.service"
+	[ -f "$unit" ]
+	! grep -q '^User=' "$unit"
+	grep -q 'systemctl --user enable --now monerod' "$MCALLS"
+}
+
+@test "FEAT-301 AC3: --stagenet installs a distinctly-labelled unit alongside mainnet" {
+	monero_daemon_env linux
+	"$MONERO" daemon enable --user >/dev/null 2>&1
+	"$MONERO" daemon enable --user --stagenet >/dev/null 2>&1
+	[ -f "$XDG_CONFIG_HOME/systemd/user/monerod.service" ]
+	[ -f "$XDG_CONFIG_HOME/systemd/user/monerod-stagenet.service" ]
+	# stagenet unit carries the --stagenet chain flag
+	grep -q -- '--stagenet' "$XDG_CONFIG_HOME/systemd/user/monerod-stagenet.service"
+	! grep -q -- '--stagenet' "$XDG_CONFIG_HOME/systemd/user/monerod.service"
+}
+
+@test "FEAT-301 AC5: monerod config binds restricted RPC to localhost; --prune adds prune-blockchain" {
+	monero_daemon_env linux
+	run "$MONERO" daemon enable --user --prune
+	[ "$status" -eq 0 ]
+	local conf="$HOME/.bitmonero/monerod.conf"
+	[ -f "$conf" ]
+	grep -q '^rpc-bind-ip=127.0.0.1' "$conf"
+	grep -q '^rpc-bind-port=18081' "$conf"
+	grep -q '^restricted-rpc=1' "$conf"
+	grep -q '^prune-blockchain=1' "$conf"
+}
+
+@test "FEAT-301 AC5: testnet uses its own restricted-RPC port (28081)" {
+	monero_daemon_env linux
+	run "$MONERO" daemon enable --user --testnet
+	[ "$status" -eq 0 ]
+	grep -q '^rpc-bind-port=28081' "$HOME/.bitmonero/monerod-testnet.conf"
+}
+
+@test "FEAT-301 AC4: status (down) errors with a hint and uses no sudo" {
+	monero_daemon_env linux
+	run "$MONERO" daemon status --user
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"down"* ]]
+	[[ "$output" == *"not reachable"* ]]
+	! grep -q '^sudo ' "$MCALLS"
+}
+
+@test "FEAT-301 AC4: status (up) reports the height from get_info, no sudo" {
+	monero_daemon_env linux
+	export MONERO_TEST_RPC_JSON='{"height": 3201234, "status": "OK"}'
+	run "$MONERO" daemon status --user
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"healthy"* ]]
+	[[ "$output" == *"3201234"* ]]
+	! grep -q '^sudo ' "$MCALLS"
+}
+
+@test "FEAT-301 AC4: monitor with no log errors naming the path, no sudo" {
+	monero_daemon_env linux
+	run "$MONERO" daemon monitor --user
+	[ "$status" -eq 2 ]
+	[[ "$output" == *"no log"* ]]
+	[[ "$output" == *".bitmonero"* ]]
+	! grep -q '^sudo ' "$MCALLS"
+}
+
+@test "FEAT-301: BUG-048 lesson — enable refuses when the restricted-RPC port is busy" {
+	monero_daemon_env linux
+	export MONERO_PORT_BUSY=18081
+	run "$MONERO" daemon enable --user
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"18081"* ]]
+	[[ "$output" == *"in use"* ]]
+	[ ! -f "$XDG_CONFIG_HOME/systemd/user/monerod.service" ]
+}
+
+@test "FEAT-301 AC6: help enable names --system as the default and --user as the opt-in" {
+	run "$MONERO" daemon enable --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"--system"* ]]
+	[[ "$output" == *"default"* ]]
+	[[ "$output" == *"--user"* ]]
+}
+
+@test "FEAT-301: daemon with no subcommand prints usage (exit 0)" {
+	run "$MONERO" daemon
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"enable"* ]]
+	[[ "$output" == *"monitor"* ]]
+}
+
+@test "FEAT-301: daemon unknown subcommand errors non-zero" {
+	run "$MONERO" daemon frobnicate
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"not a 'monero daemon' command"* ]]
+}

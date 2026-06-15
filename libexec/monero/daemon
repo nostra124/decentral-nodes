@@ -1,0 +1,558 @@
+#!/usr/bin/env bash
+
+############################################################################
+# monero daemon (FEAT-301) — system-default monerod service.
+#
+# Modeled on libexec/bitcoin/daemon: render a platform-appropriate unit
+# from share/monero/units/, install it, and (de)activate it through the
+# init system — systemd on Linux, launchd on macOS — in --system (default;
+# dedicated `_monero`/`monero` account) or --user (rootless opt-in) mode.
+#
+# The 3.0/3.1 daemon posture (CLAUDE.md §1): --system is the default;
+# --user is the explicit rootless opt-in. monerod runs with restricted RPC
+# bound to localhost, optional pruning, and per-network parallel units
+# (mainnet bare; stagenet/testnet suffixed) like bitcoin FEAT-268/269.
+#
+# Every privileged step routes through $SUDO; every absolute system path
+# through $MONERO_DAEMON_ROOT; the OS family through $MONERO_DAEMON_OS — so
+# the bats matrix mocks the init system and redirects writes into a tmp dir.
+# §4: no shared library — these helpers are this file's own.
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+has() { type -t "$1:$2" | grep -q function; }
+
+# --- mode / os / network helpers -------------------------------------------
+
+# OS family: "linux" | "macos". $MONERO_DAEMON_OS overrides uname.
+daemon:_os() {
+	local os="${MONERO_DAEMON_OS:-}"
+	if [ -z "$os" ]; then
+		case "$(uname -s)" in
+			Linux)  os=linux ;;
+			Darwin) os=macos ;;
+			*)      os=unknown ;;
+		esac
+	fi
+	printf '%s\n' "$os"
+}
+
+# launchd domain for a mode (system → system; user → gui/<uid>).
+daemon:_domain() {
+	[ "$1" = system ] && printf 'system\n' || printf 'gui/%s\n' "$(id -u)"
+}
+
+# Resolve --user/--system. When unspecified, auto-detect the installed
+# supervisor (system unit present → system; else user). The *install*
+# default (command:enable) is system; operate verbs follow what's installed.
+daemon:_mode() {
+	local mode=""
+	while [ $# -gt 0 ]; do
+		case "$1" in --user) mode=user ;; --system) mode=system ;; esac
+		shift
+	done
+	if [ -n "$mode" ]; then printf '%s\n' "$mode"; return; fi
+	local net; net="$(daemon:_network "$@" 2>/dev/null)"; net="${net#invalid:}"
+	[ -n "$net" ] || net=mainnet
+	if [ -f "$(daemon:_unit_path "$(daemon:_os)" system "$net" 2>/dev/null)" ]; then
+		printf 'system\n'
+	else
+		printf 'user\n'
+	fi
+}
+
+# Normalize the requested network. Monero networks: mainnet / stagenet /
+# testnet (no regtest/signet). Echoes 'invalid:<x>' + returns 1 on unknown.
+daemon:_network() {
+	local net=mainnet want=0 a
+	for a in "$@"; do
+		if [ "$want" = 1 ]; then net="$a"; want=0; continue; fi
+		case "$a" in
+			--mainnet)   net=mainnet ;;
+			--stagenet)  net=stagenet ;;
+			--testnet)   net=testnet ;;
+			--network)   want=1 ;;
+			--network=*) net="${a#--network=}" ;;
+		esac
+	done
+	case "$net" in
+		main|mainnet) printf 'mainnet\n' ;;
+		stagenet)     printf 'stagenet\n' ;;
+		test|testnet) printf 'testnet\n' ;;
+		*) printf 'invalid:%s\n' "$net"; return 1 ;;
+	esac
+}
+
+# Per-network identifiers (mainnet bare; others suffixed) so stagenet /
+# testnet units install side by side with mainnet.
+daemon:_label()   { [ "$1" = mainnet ] && printf 'net.monero.monerod\n' || printf 'net.monero.monerod-%s\n' "$1"; }
+daemon:_svcname() { [ "$1" = mainnet ] && printf 'monerod\n'            || printf 'monerod-%s\n' "$1"; }
+daemon:_logname() { [ "$1" = mainnet ] && printf 'monerod.log\n'        || printf 'monerod-%s.log\n' "$1"; }
+daemon:_confname(){ [ "$1" = mainnet ] && printf 'monerod.conf\n'       || printf 'monerod-%s.conf\n' "$1"; }
+daemon:_chain()   { [ "$1" = stagenet ] && printf -- '--stagenet\n'; [ "$1" = testnet ] && printf -- '--testnet\n'; }
+
+# Restricted-RPC port per network (upstream monerod defaults).
+daemon:_rpc_port() {
+	case "$1" in
+		mainnet)  printf '18081\n' ;;
+		testnet)  printf '28081\n' ;;
+		stagenet) printf '38081\n' ;;
+		*)        printf '18081\n' ;;
+	esac
+}
+
+# Is <port> already accepting TCP on localhost? $MONERO_PORT_BUSY is
+# authoritative when set (busy iff <port> matches) so the suite is hermetic
+# on a host running monerod; else probe localhost via /dev/tcp (BUG-048).
+daemon:_port_in_use() {
+	local port="$1"
+	if [ -n "${MONERO_PORT_BUSY:-}" ]; then
+		[ "$port" = "$MONERO_PORT_BUSY" ]
+		return
+	fi
+	(exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && { exec 3>&- 2>/dev/null; return 0; }
+	return 1
+}
+
+# --- paths / accounts ------------------------------------------------------
+
+daemon:_root() { printf '%s' "${MONERO_DAEMON_ROOT:-}"; }
+
+daemon:_units_dir() {
+	if [ -n "${SELF_UNITS:-}" ]; then printf '%s\n' "$SELF_UNITS"; return 0; fi
+	(cd "$(dirname "$0")/../../share/monero/units" 2>/dev/null && pwd)
+}
+
+# Data directory for the mode. monerod's own default is ~/.bitmonero;
+# system mode uses /var/lib/monero (matching the bitcoin/fulcrum daemons).
+daemon:_datadir() {
+	local mode=$1
+	if [ "$mode" = system ]; then printf '%s/var/lib/monero\n' "$(daemon:_root)"
+	else printf '%s/.bitmonero\n' "$HOME"; fi
+}
+
+# Directory holding monerod.conf. FHS: system config under /etc/monero;
+# user mode keeps it in the datadir.
+daemon:_confdir() {
+	local mode=$1
+	if [ "$mode" = system ]; then printf '%s/etc/monero\n' "$(daemon:_root)"
+	else daemon:_datadir "$mode"; fi
+}
+
+# Service account. macOS uses the '_'-prefixed hidden-account convention;
+# both OSes get a dedicated same-named group.
+daemon:_user() {
+	local mode=$1
+	if [ "$mode" != system ]; then printf '%s\n' "${USER:-$(id -un)}"
+	elif [ "$(daemon:_os)" = macos ]; then printf '_monero\n'
+	else printf 'monero\n'; fi
+}
+
+# monerod binary, preferring real system installs over a PATH dispatcher
+# shim. $MONERO_MONEROD overrides; $MONERO_SYSTEM_BINDIRS overrides the list.
+daemon:_monerod() {
+	if [ -n "${MONERO_MONEROD:-}" ]; then printf '%s\n' "$MONERO_MONEROD"; return; fi
+	local d dirs="${MONERO_SYSTEM_BINDIRS:-/usr/local/bin:/opt/local/bin:/opt/homebrew/bin}"
+	local _oldifs="$IFS"; IFS=:
+	for d in $dirs; do
+		IFS="$_oldifs"
+		[ -x "$d/monerod" ] && { printf '%s\n' "$d/monerod"; return; }
+		IFS=:
+	done
+	IFS="$_oldifs"
+	command -v monerod 2>/dev/null
+}
+
+# Create the dedicated service account + group (idempotent).
+daemon:_ensure_account() {
+	local os=$1 user=$2 datadir=$3
+	id "$user" >/dev/null 2>&1 && return 0
+	info "creating system user '$user'"
+	if [ "$os" = macos ]; then
+		local uid=296 gid
+		while dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}' | grep -qx "$uid"; do
+			uid=$((uid + 1))
+		done
+		gid=$uid
+		$SUDO dscl . -create "/Groups/$user" PrimaryGroupID "$gid" || return 1
+		$SUDO dscl . -create "/Users/$user" UniqueID "$uid"
+		$SUDO dscl . -create "/Users/$user" PrimaryGroupID "$gid"
+		$SUDO dscl . -create "/Users/$user" UserShell /usr/bin/false
+		$SUDO dscl . -create "/Users/$user" NFSHomeDirectory "$datadir"
+		$SUDO dscl . -create "/Users/$user" RealName "Monero daemon"
+		$SUDO dscl . -create "/Users/$user" IsHidden 1
+	else
+		$SUDO useradd --system --no-create-home --user-group \
+			--shell /usr/sbin/nologin "$user" || return 1
+	fi
+}
+
+# Add the operator to the service group so they reach the datadir / log
+# without sudo (group-read monitor). Takes effect on next login.
+daemon:_join_group() {
+	local os=$1 group=$2 op="${USER:-$(id -un)}"
+	if [ "$os" = macos ]; then
+		$SUDO dseditgroup -o edit -a "$op" -t user "$group" 2>/dev/null || true
+	else
+		$SUDO usermod -a -G "$group" "$op" 2>/dev/null || true
+	fi
+}
+
+# Installed unit path for os × mode × network.
+daemon:_unit_path() {
+	local os=$1 mode=$2 net=${3:-mainnet}
+	local svc label; svc="$(daemon:_svcname "$net")"; label="$(daemon:_label "$net")"
+	case "$os:$mode" in
+		linux:user)    printf '%s/systemd/user/%s.service\n' "${XDG_CONFIG_HOME:-$HOME/.config}" "$svc" ;;
+		linux:system)  printf '%s/etc/systemd/system/%s.service\n' "$(daemon:_root)" "$svc" ;;
+		macos:user)    printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$label" ;;
+		macos:system)  printf '%s/Library/LaunchDaemons/%s.plist\n' "$(daemon:_root)" "$label" ;;
+		*) return 1 ;;
+	esac
+}
+
+# Render a unit from its template.
+daemon:_render() {
+	local os=$1 mode=$2 datadir=$3 user=$4 monerod=$5 net=${6:-mainnet} tmpl rendered
+	if [ "$os" = macos ]; then tmpl="$(daemon:_units_dir)/monerod.plist"
+	else tmpl="$(daemon:_units_dir)/monerod.service"; fi
+	[ -r "$tmpl" ] || { error "template not found: $tmpl"; return 1; }
+	local label log pidfile chain conf
+	label="$(daemon:_label "$net")"
+	log="$datadir/$(daemon:_logname "$net")"
+	pidfile="$datadir/$(daemon:_svcname "$net").pid"
+	chain="$(daemon:_chain "$net")"
+	conf="$(daemon:_confdir "$mode")/$(daemon:_confname "$net")"
+	rendered="$(sed \
+		-e "s|@MONEROD@|$monerod|g" \
+		-e "s|@DATADIR@|$datadir|g" \
+		-e "s|@CONF@|$conf|g" \
+		-e "s|@USER@|$user|g" \
+		-e "s|@LABEL@|$label|g" \
+		-e "s|@LOG@|$log|g" \
+		-e "s|@PIDFILE@|$pidfile|g" "$tmpl")"
+	# Network flag: present for stagenet/testnet; drop entirely for mainnet
+	# (an empty launchd <string> would pass monerod a bogus "" arg).
+	if [ -n "$chain" ]; then
+		rendered="$(printf '%s\n' "$rendered" | sed "s|@CHAIN@|$chain|g")"
+	elif [ "$os" = macos ]; then
+		rendered="$(printf '%s\n' "$rendered" | sed '/<string>@CHAIN@<\/string>/d')"
+	else
+		rendered="$(printf '%s\n' "$rendered" | sed 's| *@CHAIN@||g')"
+	fi
+	if [ "$mode" = user ]; then
+		if [ "$os" = macos ]; then
+			rendered="$(printf '%s\n' "$rendered" | sed '/<key>UserName<\/key>/{N;d;}')"
+		else
+			rendered="$(printf '%s\n' "$rendered" | sed '/^User=/d')"
+		fi
+	fi
+	printf '%s\n' "$rendered"
+}
+
+# Render the monerod.conf body (restricted RPC on localhost + log + optional
+# prune). Network selection is carried by the unit's @CHAIN@ flag, not here.
+daemon:_gen_conf() {
+	local net=$1 log=$2 prune=$3 rpcport
+	rpcport="$(daemon:_rpc_port "$net")"
+	printf '# monerod.conf — generated by monero daemon enable\n'
+	printf 'log-file=%s\n' "$log"
+	printf 'no-igd=1\n'
+	printf 'restricted-rpc=1\n'
+	printf 'rpc-bind-ip=127.0.0.1\n'
+	printf 'rpc-bind-port=%s\n' "$rpcport"
+	printf 'confirm-external-bind=0\n'
+	[ -n "$prune" ] && printf 'prune-blockchain=1\n'
+	return 0
+}
+
+# --- help ------------------------------------------------------------------
+
+help:enable() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF daemon enable [--user] [--mainnet|--stagenet|--testnet] [--prune]
+
+	  Install and start a boot-persistent monerod service. The default is
+	  --system: a dedicated '_monero'/'monero' service account, /var/lib/
+	  monero data dir, /etc/monero config, and a systemd unit (Linux) or
+	  LaunchDaemon (macOS). Pass --user for the rootless per-user service.
+
+	  monerod runs with restricted RPC bound to 127.0.0.1; --prune adds
+	  prune-blockchain. --stagenet/--testnet install a parallel, distinctly
+	  labelled service that coexists with mainnet.
+	ENDHELP
+}
+help:disable() { echo "usage: $SELF daemon disable [--user] [--stagenet|--testnet]" >&2; }
+help:start()   { echo "usage: $SELF daemon start [--user] [--stagenet|--testnet]" >&2; }
+help:stop()    { echo "usage: $SELF daemon stop [--user] [--stagenet|--testnet]" >&2; }
+help:status()  { echo "usage: $SELF daemon status [--user] [--stagenet|--testnet]" >&2; }
+help:monitor() { echo "usage: $SELF daemon monitor [--user] [--stagenet|--testnet]" >&2; }
+help:space()   { echo "usage: $SELF daemon space [--user] [--stagenet|--testnet]" >&2; }
+
+# --- verbs -----------------------------------------------------------------
+
+command:enable() {
+	local mode=system net=mainnet prune=
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user)        mode=user ;;
+			--system)      mode=system ;;
+			--mainnet)     net=mainnet ;;
+			--stagenet)    net=stagenet ;;
+			--testnet)     net=testnet ;;
+			--network)     net="$2"; shift ;;
+			--network=*)   net="${1#--network=}" ;;
+			--prune)       prune=1 ;;
+			-h|--help|help) help:enable; return 0 ;;
+			*) error "enable: unknown argument '$1'"; return 1 ;;
+		esac
+		shift
+	done
+	local _nn; _nn="$(daemon:_network "--network=$net")" \
+		|| { error "enable: unknown network '$net' (mainnet|stagenet|testnet)"; return 1; }
+	net="$_nn"
+
+	local os; os="$(daemon:_os)"
+	case "$os" in linux|macos) ;; *)
+		error "enable: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+
+	local monerod; monerod="$(daemon:_monerod)"
+	if [ -z "$monerod" ]; then
+		error "enable: no 'monerod' found; run 'monero install' first"
+		return 1
+	fi
+
+	# BUG-048 lesson: preflight the RPC port so we never install a unit that
+	# crash-loops on a port an existing monerod already owns.
+	local rpcport; rpcport="$(daemon:_rpc_port "$net")"
+	if daemon:_port_in_use "$rpcport"; then
+		error "enable: restricted-RPC port $rpcport ($net) is already in use — another monerod?"
+		error "  stop it, or pick a different network, before enabling a node here"
+		return 1
+	fi
+
+	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
+	local datadir user group unit
+	datadir="$(daemon:_datadir "$mode")"
+	user="$(daemon:_user "$mode")"; group="$user"
+	unit="$(daemon:_unit_path "$os" "$mode" "$net")" \
+		|| { error "enable: no unit path for $os/$mode"; return 1; }
+
+	if [ "$mode" = system ]; then
+		daemon:_ensure_account "$os" "$user" "$datadir" \
+			|| { error "enable: failed to provision service account '$user'"; return 1; }
+		daemon:_join_group "$os" "$group"
+	fi
+
+	$SUDO mkdir -p "$datadir" \
+		|| { error "enable: cannot create data dir '$datadir'"; return 1; }
+	if [ "$mode" = system ]; then
+		$SUDO chmod 0750 "$datadir" 2>/dev/null
+		$SUDO chown "$user:$group" "$datadir" 2>/dev/null
+	fi
+
+	local confdir; confdir="$(daemon:_confdir "$mode")"
+	$SUDO mkdir -p "$confdir" \
+		|| { error "enable: cannot create config dir '$confdir'"; return 1; }
+	[ "$mode" = system ] && $SUDO chmod 0755 "$confdir" 2>/dev/null
+
+	# Generate the monerod.conf (restricted RPC + optional prune).
+	local conf log tmpconf
+	conf="$confdir/$(daemon:_confname "$net")"
+	log="$datadir/$(daemon:_logname "$net")"
+	tmpconf="$(mktemp)"
+	daemon:_gen_conf "$net" "$log" "$prune" > "$tmpconf"
+	$SUDO install -m 0640 "$tmpconf" "$conf" \
+		|| { rm -f "$tmpconf"; error "enable: cannot write config '$conf'"; return 1; }
+	rm -f "$tmpconf"
+	[ "$mode" = system ] && $SUDO chown "$user:$group" "$conf" 2>/dev/null
+	info "created $conf (restricted RPC on 127.0.0.1:$rpcport${prune:+, pruned})"
+
+	# Render + install the unit.
+	local tmp; tmp="$(mktemp)"
+	daemon:_render "$os" "$mode" "$datadir" "$user" "$monerod" "$net" > "$tmp" \
+		|| { rm -f "$tmp"; return 1; }
+	$SUDO mkdir -p "$(dirname "$unit")" \
+		|| { rm -f "$tmp"; error "enable: cannot create unit dir"; return 1; }
+	$SUDO install -m 0644 "$tmp" "$unit" \
+		|| { rm -f "$tmp"; error "enable: cannot install unit '$unit'"; return 1; }
+	rm -f "$tmp"
+	info "installed $unit"
+
+	# Activate.
+	local svc label; svc="$(daemon:_svcname "$net")"; label="$(daemon:_label "$net")"
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then
+				$SUDO systemctl daemon-reload 2>/dev/null
+				$SUDO systemctl enable --now "$svc" 2>/dev/null
+			else
+				systemctl --user daemon-reload 2>/dev/null
+				systemctl --user enable --now "$svc" 2>/dev/null
+			fi ;;
+		macos)
+			if [ "$mode" = system ]; then
+				$SUDO launchctl bootstrap system "$unit" 2>/dev/null || true
+			else
+				launchctl bootstrap "gui/$(id -u)" "$unit" 2>/dev/null || true
+			fi ;;
+	esac
+	info "monerod service enabled ($mode/$os, $net)"
+}
+
+command:disable() {
+	local mode=system net=mainnet
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user) mode=user ;; --system) mode=system ;;
+			--mainnet) net=mainnet ;; --stagenet) net=stagenet ;; --testnet) net=testnet ;;
+			--network) net="$2"; shift ;; --network=*) net="${1#--network=}" ;;
+			-h|--help|help) help:disable; return 0 ;;
+			*) error "disable: unknown argument '$1'"; return 1 ;;
+		esac
+		shift
+	done
+	local _nn; _nn="$(daemon:_network "--network=$net")" \
+		|| { error "disable: unknown network '$net' (mainnet|stagenet|testnet)"; return 1; }
+	net="$_nn"
+	local os; os="$(daemon:_os)"
+	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
+	local unit svc label
+	unit="$(daemon:_unit_path "$os" "$mode" "$net")" \
+		|| { error "disable: no unit path for $os/$mode"; return 1; }
+	svc="$(daemon:_svcname "$net")"; label="$(daemon:_label "$net")"
+	if [ "$os" = macos ]; then
+		$SUDO launchctl bootout "$(daemon:_domain "$mode")/$label" 2>/dev/null
+	elif [ "$mode" = system ]; then
+		$SUDO systemctl disable --now "$svc" 2>/dev/null
+		$SUDO systemctl daemon-reload 2>/dev/null
+	else
+		systemctl --user disable --now "$svc" 2>/dev/null
+		systemctl --user daemon-reload 2>/dev/null
+	fi
+	if [ -e "$unit" ]; then $SUDO rm -f "$unit" && info "removed $unit"; fi
+	info "monerod service disabled ($mode/$os); data dir preserved"
+}
+
+command:start() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:start; return 0 ;; esac; done
+	local mode os net SUDO=""
+	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	net="$(daemon:_network "$@")" || { error "start: unknown network '${net#invalid:}'"; return 1; }
+	[ "$mode" = system ] && SUDO=sudo
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then $SUDO systemctl start "$(daemon:_svcname "$net")"
+			else systemctl --user start "$(daemon:_svcname "$net")"; fi ;;
+		macos)
+			$SUDO launchctl kickstart "$(daemon:_domain "$mode")/$(daemon:_label "$net")" || true ;;
+		*) error "start: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+}
+
+command:stop() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:stop; return 0 ;; esac; done
+	local mode os net SUDO=""
+	mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	net="$(daemon:_network "$@")" || { error "stop: unknown network '${net#invalid:}'"; return 1; }
+	[ "$mode" = system ] && SUDO=sudo
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then $SUDO systemctl stop "$(daemon:_svcname "$net")"
+			else systemctl --user stop "$(daemon:_svcname "$net")"; fi ;;
+		macos)
+			$SUDO launchctl kill SIGTERM "$(daemon:_domain "$mode")/$(daemon:_label "$net")" ;;
+		*) error "stop: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+}
+
+# Query the restricted RPC get_info (group-read posture: no sudo). Returns
+# the JSON on success. $MONERO_RPC_CURL can stub the transport in tests.
+daemon:_rpc_info() {
+	local port=$1
+	curl -s --max-time 4 "http://127.0.0.1:$port/get_info" 2>/dev/null
+}
+
+command:status() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:status; return 0 ;; esac; done
+	local mode net rpcport info height
+	mode="$(daemon:_mode "$@")"
+	net="$(daemon:_network "$@")" || { error "status: unknown network '${net#invalid:}'"; return 1; }
+	rpcport="$(daemon:_rpc_port "$net")"
+	# Read the daemon via its restricted RPC — group-read posture, no sudo.
+	info="$(daemon:_rpc_info "$rpcport")"
+	if [ -z "$info" ]; then
+		echo "down ($net, $mode-mode)"
+		warn "monerod not reachable on 127.0.0.1:$rpcport — is it running? ('monero daemon start')"
+		return 1
+	fi
+	height="$(printf '%s' "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -n1)"
+	echo "healthy ($net, $mode-mode, height ${height:-?})"
+}
+
+command:monitor() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:monitor; return 0 ;; esac; done
+	local mode net datadir logfile
+	mode="$(daemon:_mode "$@")"
+	net="$(daemon:_network "$@")" || { error "monitor: unknown network '${net#invalid:}'"; return 1; }
+	datadir="$(daemon:_datadir "$mode")"
+	logfile="$datadir/$(daemon:_logname "$net")"
+	# Group-read posture: the operator is in the service group and the datadir
+	# is group-readable, so the log is tailed directly (no sudo).
+	if [ ! -f "$logfile" ]; then
+		error "monitor: no log at $logfile (run 'monero daemon enable' / 'start' first)"
+		return 2
+	fi
+	exec tail -f "$logfile"
+}
+
+command:space() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:space; return 0 ;; esac; done
+	local mode datadir SUDO=""
+	mode="$(daemon:_mode "$@")"
+	datadir="$(daemon:_datadir "$mode")"
+	[ "$mode" = system ] && SUDO=sudo
+	if [ ! -d "$datadir" ]; then
+		error "space: data dir '$datadir' does not exist (run 'monero daemon enable' first)"
+		return 1
+	fi
+	$SUDO du -sh "$datadir" | cut -f1
+}
+
+#------------------------------------------------------------------------------
+# Sub-dispatch: `monero daemon <verb> ...` execs this file with <verb> first.
+if [[ $# == 0 ]]; then
+	cat >&2 <<-USAGE
+	usage: $SELF daemon <command> [args]
+
+	   enable [--user] [--stagenet|--testnet] [--prune]   install + start the service
+	   disable [--user]                                   stop + remove the unit
+	   start / stop                                       drive the installed service
+	   status                                             reachable? height? (no sudo)
+	   monitor                                            tail the daemon log (no sudo)
+	   space                                              datadir disk usage
+
+	   The default mode is --system; pass --user for the rootless per-user
+	   service. See '$SELF help daemon' for more.
+	USAGE
+	exit 0
+fi
+if has command "$1"; then
+	verb="$1"; shift
+	command:"$verb" "$@"
+	exit $?
+else
+	error "'$1' is not a 'monero daemon' command"
+	exit 1
+fi
