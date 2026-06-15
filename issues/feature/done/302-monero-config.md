@@ -2,7 +2,7 @@
 id: FEAT-302
 type: feature
 priority: medium
-status: open
+status: shipped
 ---
 
 # `monero config {list,get,set}` — effective-config frontend over monerod
