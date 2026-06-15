@@ -42,3 +42,32 @@ The host-side bitcoin SIT suites run and pass under `make check-sit`, and the le
 reports failures instead of swallowing them.
 
 Independent of the lightning-container tickets ([[BUG-041]]..[[BUG-045]]).
+
+## Progress (this session)
+
+Four blockers fixed so the host-side install + bitcoind come up:
+
+1. **bitcoind container exits.** Bitcoin Core 27 fatally rejects network-scoped
+   options (`rpcbind`/`rpcallowip`/`fallbackfee`) in the global config section;
+   moved them under `[regtest]` in `Dockerfile.bitcoind`. bitcoind now starts
+   and `getblockchaininfo` is reachable from the host.
+2. **install didn't relocate.** `sit:install_bitcoin` used `PREFIX=… make
+   install`, but the Makefile hard-assigns PREFIX at configure time, so the
+   install landed in the *configured* prefix and the suite ran the host's real
+   (stale) bitcoin. Now it `./configure --prefix=$SIT_HOME/.local` first.
+3. **stow on a fresh prefix.** `make install` didn't `mkdir -p $(PREFIX)` before
+   `stow -t $(PREFIX)`, so a brand-new prefix failed "not a valid directory".
+   Fixed in `Makefile.in`.
+4. **wallet new seed verb** — `secret put` → `secret set` ([[BUG-047]], a real
+   product bug surfaced here).
+
+## Remaining (secret/gpg provisioning)
+
+`bitcoin wallet new` now reaches `secret set alice/seed`, which fails "store
+alice does not exist": the `secret(1)` tool needs a GPG-backed store
+provisioned, and the ephemeral SIT `HOME` has none. The host-side suites need
+to initialise a `secret` store (GPG identity + the per-wallet store) in
+`setup_file` — the **same secret-provisioning gap** that blocks the CGI
+account-API apikey path in [[BUG-043]]. Provisioning `secret`/GPG in the SIT
+environments (host-side HOME + the clightning container) is the shared
+follow-up; with it, BUG-046 and the [[BUG-043]] apikey path both unblock.
