@@ -108,7 +108,8 @@ sit:fund_address() {
 # repo to have been configured (./configure run). Sets SIT_HOME and
 # exports it.
 sit:install_bitcoin() {
-    export SIT_HOME="$(mktemp -d)"
+    SIT_HOME="$(mktemp -d)"
+    export SIT_HOME
     export HOME="$SIT_HOME"
     export XDG_DATA_HOME="$SIT_HOME/.local/share"
     export XDG_CONFIG_HOME="$SIT_HOME/.config"

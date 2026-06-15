@@ -379,9 +379,11 @@ EOF
 	mkdir -p "$HOME/.lightning"
 	run "$LIGHTNING_BIN" daemon enable
 	[ "$status" -eq 3 ]
-	# The refusal is error-level (the "pass --migrate" hint is a warn, which
-	# the test fixture's SELF_QUIET=1 suppresses). "user-mode install
-	# detected" is printed only by the system installers, never install_user.
+	# The refusal is error-level (both lines — the detection and the
+	# "pass --migrate" hint — so they survive the fixture's SELF_QUIET=1;
+	# FEAT-207 asserts the --migrate hint stays visible). "user-mode
+	# install detected" is printed only by the system installers, never
+	# install_user.
 	[[ "$output" == *"user-mode install detected"* ]]
 	[[ "$output" == *"refusing"* ]]
 }

@@ -1888,7 +1888,7 @@ install_macos_system() {
 
 	if [ $migrate -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
 		error "\$HOME/.lightning exists (user-mode install detected); refusing"
-		warn "pass --migrate to move it to $state_dir"
+		error "pass --migrate to move it to $state_dir"
 		exit 3
 	fi
 
@@ -2051,7 +2051,7 @@ install_system() {
 	local state_dir="${LIGHTNING_SYSTEM_STATE:-/var/lib/lightning}"
 
 	if [ $migrate -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
-		warn "\$HOME/.lightning exists (user-mode install detected); refusing"
+		error "\$HOME/.lightning exists (user-mode install detected); refusing"
 		error "pass --migrate to move it to $state_dir"
 		exit 3
 	fi
@@ -2171,7 +2171,7 @@ install_openrc_system() {
 	local state_dir="${LIGHTNING_OPENRC_STATE:-/var/lib/lightning}"
 
 	if [ "$migrate" -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
-		warn "\$HOME/.lightning exists (user-mode install detected); refusing"
+		error "\$HOME/.lightning exists (user-mode install detected); refusing"
 		error "pass --migrate to move it to $state_dir"
 		exit 3
 	fi
