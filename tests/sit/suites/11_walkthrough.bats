@@ -22,7 +22,7 @@ teardown() { sit_teardown; }
 	rm -rf "$HOME/.lightning/wallet/walkthrough"
 	lightning wallet new walkthrough >/dev/null
 	lightning wallet use walkthrough >/dev/null
-	lightning account create personal --description "everyday" >/dev/null
+	lightning account create personal "everyday" >/dev/null
 	run lightning account list
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"personal"* ]]
