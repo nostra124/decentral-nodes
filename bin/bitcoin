@@ -258,7 +258,7 @@ shopt -s extglob
 # A wallet is a per-name git repo at
 # $XDG_DATA_HOME/bitcoin/wallets/<name>/ holding the *signing context*
 # (config, descriptors, ledger). The seed phrase lives in `secret`, not
-# here — `bitcoin wallet new` calls `secret put <name>/seed` with the
+# here — `bitcoin wallet new` calls `secret set <name>/seed` with the
 # generated BIP-39 mnemonic so the wallet repo can be pushed (FEAT-011)
 # without leaking the seed.
 # ---------------------------------------------------------------------------
@@ -2501,7 +2501,7 @@ wallet:help() {
 
 	  new <name>        create a new wallet at $(wallet:_root)/<name>
 	                    generates a BIP-39 mnemonic and stores it via
-	                    'secret put <name>/seed'
+	                    'secret set <name>/seed'
 	  watch <name> <xpub>
 	                    create a watch-only wallet from an account xpub
 	                    (m/84h/0h/0h). Derives addresses without a seed.
@@ -4195,8 +4195,8 @@ wallet:new() {
 		return 8
 	fi
 
-	if ! printf '%s\n' "$mnemonic" | secret put "$name/seed"; then
-		error "wallet new: 'secret put $name/seed' failed"
+	if ! printf '%s\n' "$mnemonic" | secret set "$name/seed"; then
+		error "wallet new: 'secret set $name/seed' failed"
 		return 9
 	fi
 
