@@ -25,17 +25,32 @@ sit:start_bitcoind() {
     SIT_RPC_PORT="$(( 18500 + (RANDOM % 4000) ))"
     podman build -q -t bitcoin-sit-bitcoind \
         "$SIT_DIR/podman" -f "$SIT_DIR/podman/Dockerfile.bitcoind" >/dev/null
-    SIT_CONTAINER_ID="$(podman run -d --rm \
+    if ! SIT_CONTAINER_ID="$(podman run -d --rm \
         --name "$SIT_CONTAINER_NAME" \
         -p "127.0.0.1:${SIT_RPC_PORT}:18443" \
-        bitcoin-sit-bitcoind)"
-    # Wait until bitcoind is ready (up to 30 s).
+        bitcoin-sit-bitcoind 2>&1)"; then
+        echo "SIT: podman run failed: $SIT_CONTAINER_ID" >&2
+        return 1
+    fi
+    # Wait until bitcoind is ready (up to 60 s — slow under multi-suite load).
     local tries=0
     while ! sit:cli getblockchaininfo >/dev/null 2>&1; do
+        # Bail early (with logs) if the container already exited — otherwise we
+        # burn the whole timeout polling a dead node (BUG-046).
+        if ! podman ps --format '{{.Names}}' | grep -q "^${SIT_CONTAINER_NAME}\$"; then
+            echo "SIT: bitcoind container exited early:" >&2
+            podman logs "$SIT_CONTAINER_NAME" 2>&1 | tail -8 >&2
+            return 1
+        fi
         sleep 1
-        (( tries++ ))
-        if (( tries >= 30 )); then
-            echo "SIT: bitcoind did not become ready in 30 s" >&2
+        # NB: `(( tries++ ))` returns exit 1 when tries==0 (the pre-increment
+        # value), which `set -e` treats as a fatal error — so the bring-up
+        # aborted whenever bitcoind wasn't ready on the very first poll. Use a
+        # plain assignment, which always succeeds (BUG-046).
+        tries=$(( tries + 1 ))
+        if (( tries >= 60 )); then
+            echo "SIT: bitcoind did not become ready in 60 s:" >&2
+            podman logs "$SIT_CONTAINER_NAME" 2>&1 | tail -8 >&2
             return 1
         fi
     done
@@ -43,10 +58,12 @@ sit:start_bitcoind() {
 
 # Stop and remove the bitcoind container.
 sit:stop_bitcoind() {
-    if [ -n "${SIT_CONTAINER_ID:-}" ]; then
-        podman stop "$SIT_CONTAINER_NAME" >/dev/null 2>&1 || true
-    fi
+    # Force-remove by name: `--rm` only fires on a clean stop, so a container
+    # left behind by a failed setup would otherwise linger and exhaust
+    # ports/disk across the per-suite runs (BUG-046).
+    [ -n "${SIT_CONTAINER_NAME:-}" ] && podman rm -f "$SIT_CONTAINER_NAME" >/dev/null 2>&1
     SIT_CONTAINER_ID=""
+    return 0
 }
 
 # Run a bitcoin-cli command against the regtest node.
