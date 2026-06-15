@@ -123,6 +123,9 @@ install:
 			install -m 644 VERSION $(BUILD_DIR)/$(REL_DATADIR)/$$p/version; \
 		done; \
 	fi
+	@# stow refuses a non-existent target, so ensure $(PREFIX) exists for a
+	@# fresh prefix (e.g. the SIT host-side install into a tmp HOME) — BUG-046.
+	@mkdir -p $(PREFIX)
 	@stow -d build -t $(PREFIX) $(PACKAGE)
 
 uninstall:
