@@ -166,10 +166,14 @@ sit_setup_alice_bob() {
 	# marked "important", so when it exits (no grpc port configured) it takes
 	# lightningd down with it — the same plugin alice's wiring disables
 	# (BUG-033/BUG-038 SIT harness).
+	# --developer + --dev-bitcoind-poll=1: poll bitcoind every 1s instead of
+	# CLN's ~30s default, so the suites don't wait half a minute per
+	# confirmation (BUG-041). alice gets the same via its config file.
 	lightningd --lightning-dir="$BOB_DIR" --network="$LIGHTNING_NETWORK" \
 	           --bitcoin-rpcuser=test --bitcoin-rpcpassword=test \
 	           --addr="127.0.0.1:$BOB_PORT" --daemon \
 	           --disable-plugin=cln-grpc \
+	           --developer --dev-bitcoind-poll=1 \
 	           --log-file="$BOB_DIR/log"
 	# Wait for both nodes to reach getinfo.
 	for _ in 1 2 3 4 5 6 7 8 9 10; do

@@ -33,6 +33,12 @@ bitcoin-cli -regtest createwallet test 2>/dev/null \
 # Mature some coins so the node is actually usable.
 bitcoin-cli -regtest generatetoaddress 101 "$(bitcoin-cli -regtest getnewaddress)" >/dev/null
 
+# Fast bitcoind polling so the SIT suites don't wait ~30s per confirmation
+# (CLN's default poll cadence). Written to alice's config before bring-up so
+# `lightning daemon start` picks it up. Dev-only; SIT container (BUG-041).
+mkdir -p ~/.lightning
+printf 'developer\ndev-bitcoind-poll=1\n' > ~/.lightning/config
+
 lightning daemon start
 lightning version
 # Wait until lightningd has caught up to bitcoind. Channel opens and funding

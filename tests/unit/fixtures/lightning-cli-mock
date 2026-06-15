@@ -163,7 +163,13 @@ EOF
 EOF
 		;;
 	close)
+		# Real lightning-cli streams `# …` progress notices to stdout during
+		# the mutual-close fee negotiation, before the JSON reply. The verb
+		# must strip them before jq (BUG-042); emit them here so the
+		# close test exercises that.
 		cat <<'EOF'
+# Sending closing fee offer 151sat, with range 151sat-151sat
+# Received closing fee offer 151sat, with range 151sat-100000sat
 {
   "type": "mutual",
   "txid": "0000000000000000000000000000000000000000000000000000000000000002"
