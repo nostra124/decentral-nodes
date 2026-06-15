@@ -54,6 +54,22 @@ contract.
 
 ---
 
+## Bugs pulled in (live daemon-stack regressions, fixed before the monero work)
+
+Surfaced operating the 3.1.0 `--system` stack on a real host (an existing
+MacPorts bitcoind + a system clightning). Per CLAUDE.md §3 bugs come before
+features, so these land first, each with a failing-first regression.
+
+- **BUG-048** — `bitcoin daemon enable` installs a second node that crash-loops
+  on the RPC port instead of preflighting it. File:
+  `issues/bug/048-bitcoin-enable-port-preflight.md`.
+- **BUG-049** — `lightning peer bootstrap` persists `important-peer=`, which some
+  lightningd builds reject as an unknown option → the node won't start. File:
+  `issues/bug/049-lightning-important-peer-bricks-node.md`.
+- **BUG-050** — lightning operate verbs always auto-detect *user* mode on macOS
+  (`system_mode` is systemd-only), so `monitor`/`status` miss the running system
+  instance. File: `issues/bug/050-lightning-mode-detect-macos-system.md`.
+
 ## Recommended order
 
 ```

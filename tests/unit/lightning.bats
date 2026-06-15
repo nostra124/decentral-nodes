@@ -2898,6 +2898,57 @@ EOF
 	! grep -q "clightningd.service" "$BIN_SHIM/journalctl.calls"
 }
 
+@test "BUG-050: macOS operate verbs auto-detect SYSTEM when the LaunchDaemon is installed (no flag)" {
+	# Force Darwin so the macOS detection path runs on the Linux CI too.
+	cat > "$BIN_SHIM/uname" <<'EOF'
+#!/bin/sh
+[ "$1" = "-s" ] && { echo Darwin; exit 0; }
+exec /usr/bin/uname "$@"
+EOF
+	chmod +x "$BIN_SHIM/uname"
+	# A system LaunchDaemon is installed (the 3.1.0 default); no user agent.
+	mkdir -p "$LIGHTNING_LAUNCHD_DIR"
+	: > "$LIGHTNING_LAUNCHD_DIR/network.lightning.lightningd.plist"
+	rm -rf "$LIGHTNING_LAUNCHAGENTS_DIR"
+	# Redirect the system state dir to an empty tmp dir so monitor finds no
+	# log and errors with the path it tried (the assertable signal).
+	export LIGHTNING_SYSTEM_STATE="$BATS_TMPDIR/sysstate.$$"
+	rm -rf "$LIGHTNING_SYSTEM_STATE"
+	# No --system/--user flag: this must AUTO-DETECT system, not fall back to
+	# user (the BUG-050 regression: system_mode was systemd-only, so macOS
+	# always resolved user and monitor tailed ~/.lightning/log).
+	run "$LIGHTNING_BIN" daemon monitor
+	[ "$status" -eq 2 ]
+	[[ "$output" == *"$LIGHTNING_SYSTEM_STATE/log"* ]]
+	[[ "$output" != *"/.lightning/log"* ]]
+}
+
+@test "BUG-049: peer bootstrap does NOT persist important-peer when lightningd rejects it" {
+	# A lightningd whose --help does NOT list --important-peer (the real CLN
+	# build that crash-looped on 'unknown option').
+	cat > "$BIN_SHIM/lightningd" <<'EOF'
+#!/bin/sh
+[ "$1" = "--help" ] && { echo "usage: lightningd [options]"; echo "  --alias=<arg>"; exit 0; }
+exit 0
+EOF
+	chmod +x "$BIN_SHIM/lightningd"
+	printf '03aaa@1.2.3.4:9735\n03bbb@5.6.7.8:9735\n' > "$BATS_TMPDIR/nodes.$$"
+	export LIGHTNING_BOOTSTRAP_NODES="$BATS_TMPDIR/nodes.$$"
+	run "$LIGHTNING_BIN" peer bootstrap
+	[ "$status" -eq 0 ]
+	# The bricking line must NOT be persisted (BUG-049 regression).
+	[ ! -f "$HOME/.lightning/config" ] || ! grep -q 'important-peer=' "$HOME/.lightning/config"
+}
+
+@test "BUG-049: peer bootstrap persists important-peer when lightningd accepts it" {
+	export LIGHTNING_IMPORTANT_PEER_SUPPORTED=1
+	printf '03aaa@1.2.3.4:9735\n' > "$BATS_TMPDIR/nodes.$$"
+	export LIGHTNING_BOOTSTRAP_NODES="$BATS_TMPDIR/nodes.$$"
+	run "$LIGHTNING_BIN" peer bootstrap
+	[ "$status" -eq 0 ]
+	grep -q 'important-peer=03aaa@1.2.3.4:9735' "$HOME/.lightning/config"
+}
+
 @test "1.2.0 ext: daemon with unknown subcommand prints usage" {
 	run "$LIGHTNING_BIN" daemon takeover
 	[ "$status" -ne 0 ]

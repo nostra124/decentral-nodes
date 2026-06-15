@@ -288,6 +288,20 @@ LIGHTNING_CONF="$LIGHTNING_DIR/config"
 IMPORTANT_BLOCK_BEGIN="# >>> lightning peers — managed by 'peer bootstrap'"
 IMPORTANT_BLOCK_END="# <<< lightning peers"
 
+# BUG-049 — does the installed lightningd actually accept `important-peer`?
+# Some Core Lightning builds don't recognise the option and REFUSE TO START
+# when it appears in the config ("Config file ... important-peer=...: unknown
+# option"), bricking the node. Probe `lightningd --help` before persisting.
+# Test seam: $LIGHTNING_IMPORTANT_PEER_SUPPORTED=1|0 forces the result.
+important_peer_supported() {
+	case "${LIGHTNING_IMPORTANT_PEER_SUPPORTED:-}" in
+		1) return 0 ;;
+		0) return 1 ;;
+	esac
+	local lnd; lnd=$(command -v lightningd 2>/dev/null) || return 1
+	"$lnd" --help 2>&1 | grep -q -- '--important-peer'
+}
+
 # Append a managed `important-peer=<uri>` block to $LIGHTNING_DIR/config.
 # Idempotent: strips any previous managed block first.
 # Input: newline-separated list of URIs (the same picks bootstrap used).
@@ -295,7 +309,16 @@ important_peer_write() {
 	local picks="$1"
 	[ -n "$picks" ] || return 0
 	mkdir -p "$LIGHTNING_DIR"
+	# Always clear any prior managed block first (idempotent). If this
+	# lightningd rejects `important-peer`, stop here — persisting it would
+	# brick the node on its next start (BUG-049). The keepalive sidecar
+	# (FEAT-199 Layer 2) still reconnects these peers without the config line.
 	important_peer_clear
+	if ! important_peer_supported; then
+		warn "lightningd does not accept 'important-peer'; not persisting it to config"
+		warn "  (the keepalive sidecar still reconnects these peers — FEAT-199 Layer 2)"
+		return 0
+	fi
 
 	{
 		[ -s "$LIGHTNING_CONF" ] && echo

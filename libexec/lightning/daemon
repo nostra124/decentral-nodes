@@ -136,10 +136,26 @@ daemon:_mode() {
 	done
 	if [ -n "$mode" ]; then
 		echo "$mode"
-	elif system_mode; then
+	elif system_installed; then
 		echo system
 	else
 		echo user
+	fi
+}
+
+# BUG-050 — is a *system*-mode supervisor unit installed for this product,
+# on ANY platform? `system_mode` (below) only knows systemd, so on macOS /
+# OpenRC an installed system service was never recognized and the operate
+# verbs auto-detected user mode. This cross-platform check is what
+# `daemon:_mode` keys off; the systemd-labeled `system_mode` call sites
+# (start/stop/status, all inside is_macos-guarded branches) keep using it.
+system_installed() {
+	if is_macos; then
+		[ -f "$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist" ]
+	elif [ "$(init_system)" = openrc ]; then
+		[ -f "${LIGHTNING_INIT_D:-/etc/init.d}/lightningd" ]
+	else
+		system_mode
 	fi
 }
 
