@@ -1271,6 +1271,11 @@ feat034_env() {
 	export BITCOIN_BITCOIND="$HOME/bitcoind-stub"
 	printf '#!/usr/bin/env bash\n:\n' > "$BITCOIN_BITCOIND"
 	chmod +x "$BITCOIN_BITCOIND"
+	# BUG-048 — neutralise the RPC-port preflight by default so these tests
+	# are hermetic on a host that is itself running a bitcoind (the dev box's
+	# real node binds 8332). The sentinel matches no real port → "all free".
+	# The BUG-048 cases below override it with the specific busy port.
+	export BITCOIN_PORT_BUSY=none
 }
 
 @test "FEAT-034 — enable --user (linux) installs a rootless systemd unit" {
@@ -1283,6 +1288,25 @@ feat034_env() {
 	# A --user systemd unit may not carry User=.
 	! grep -q '^User=' "$unit"
 	grep -q 'systemctl --user enable --now bitcoind' "$FEAT034_CALLS"
+}
+
+@test "BUG-048 — enable refuses when the RPC port is already in use (no crash-looping unit)" {
+	feat034_env linux
+	export BITCOIN_PORT_BUSY=8332    # an existing bitcoind already owns mainnet RPC
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"8332"* ]]
+	[[ "$output" == *"in use"* ]]
+	# The bug: a unit got installed and then crash-looped on bind failure.
+	[ ! -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
+}
+
+@test "BUG-048 — enable proceeds when only a DIFFERENT network's port is busy" {
+	feat034_env linux
+	export BITCOIN_PORT_BUSY=18443   # regtest port busy, but we enable mainnet (8332)
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	[ -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
 }
 
 @test "FEAT-034 — enable --user (macos) installs a LaunchAgent without UserName" {

@@ -185,6 +185,35 @@ daemon:_network() {
 	esac
 }
 
+# BUG-048 — default bitcoind RPC port per network. `enable` preflights this
+# so it never installs a unit that crash-loops on "Unable to bind ... RPC
+# server" because another node (e.g. an existing MacPorts/Homebrew bitcoind)
+# already owns the port. Networks take the upstream bitcoind defaults.
+daemon:_rpc_port() {
+	case "$1" in
+		mainnet) printf '8332\n' ;;
+		testnet) printf '18332\n' ;;
+		signet)  printf '38332\n' ;;
+		regtest) printf '18443\n' ;;
+		*)       printf '8332\n' ;;
+	esac
+}
+
+# BUG-048 — is <port> already accepting TCP on localhost? When
+# $BITCOIN_PORT_BUSY is set it is AUTHORITATIVE (busy iff <port> matches it)
+# and the real probe is skipped — so the unit suite is hermetic on a host
+# that is itself running a bitcoind (set it to a sentinel like 'none' to mean
+# "every port free"). Otherwise probe localhost directly via /dev/tcp.
+daemon:_port_in_use() {
+	local port="$1"
+	if [ -n "${BITCOIN_PORT_BUSY:-}" ]; then
+		[ "$port" = "$BITCOIN_PORT_BUSY" ]
+		return
+	fi
+	(exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && { exec 3>&- 2>/dev/null; return 0; }
+	return 1
+}
+
 # launchd label / systemd unit base name / log / pidfile / -chain flag
 # for a network. mainnet is bare; other networks append -<net>.
 daemon:_label()   { [ "$1" = mainnet ] && printf 'org.bitcoin.bitcoind\n' || printf 'org.bitcoin.bitcoind-%s\n' "$1"; }
@@ -596,6 +625,17 @@ command:enable() {
 
 	if [ -z "$(daemon:_bitcoind_candidates)" ]; then
 		error "enable: no 'bitcoind' found; run 'bitcoin daemon install' first"
+		return 1
+	fi
+
+	# BUG-048 — refuse if the RPC port is already taken (e.g. an existing
+	# MacPorts/Homebrew bitcoind, or a sibling already bound to this network's
+	# port). Installing anyway leaves a unit that crash-loops under launchd/
+	# systemd on "Unable to bind any endpoint for RPC server".
+	local rpcport; rpcport="$(daemon:_rpc_port "$net")"
+	if daemon:_port_in_use "$rpcport"; then
+		error "enable: RPC port $rpcport ($net) is already in use — another bitcoind is running"
+		error "  reuse it, stop it, or pick a different --network before enabling a node here"
 		return 1
 	fi
 
