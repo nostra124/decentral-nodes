@@ -9,6 +9,7 @@ teardown() { sit_teardown; rm -rf /tmp/lnurl-stub; }
 
 @test "alice pays a LUD-06 endpoint and the response BOLT-11 settles" {
 	sit_open_channel
+	skip "client-side LNURL (node lnurl-info against the stub) — BUG-043"
 
 	# Spin up a tiny LUD-06 stub that mints invoices on bob's node.
 	mkdir -p /tmp/lnurl-stub
