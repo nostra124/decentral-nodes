@@ -8,7 +8,11 @@
 SIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SIT_DIR/../.." && pwd)"
 SIT_CONTAINER_NAME="bitcoin-sit-$$"
-SIT_RPC_PORT=18443
+# Host-side RPC port. NOT 18443 (the regtest default) — that collides with any
+# regtest bitcoind already running on the host (e.g. a `bitcoin daemon`), which
+# made `sit:start_bitcoind` fail to bind and time out. Derive a per-run port
+# from the PID; the container still listens on 18443 internally (BUG-046).
+SIT_RPC_PORT="$(( 18500 + ($$ % 1000) ))"
 SIT_RPC_USER="regtest"
 SIT_RPC_PASS="regtest"
 
