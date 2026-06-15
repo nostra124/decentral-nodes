@@ -18,6 +18,11 @@ SIT_RPC_PASS="regtest"
 
 # Start a fresh bitcoind regtest container. Sets SIT_CONTAINER_ID.
 sit:start_bitcoind() {
+    # Unique per call so several host-side suites in one `bats` run don't
+    # collide on the container name or the host RPC port ($$ is the shared
+    # bats PID, so derive uniqueness from $RANDOM here) — BUG-046.
+    SIT_CONTAINER_NAME="bitcoin-sit-$$-$RANDOM"
+    SIT_RPC_PORT="$(( 18500 + (RANDOM % 4000) ))"
     podman build -q -t bitcoin-sit-bitcoind \
         "$SIT_DIR/podman" -f "$SIT_DIR/podman/Dockerfile.bitcoind" >/dev/null
     SIT_CONTAINER_ID="$(podman run -d --rm \
