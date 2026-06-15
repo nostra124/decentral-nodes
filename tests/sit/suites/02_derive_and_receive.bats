@@ -28,7 +28,7 @@ setup() {
 }
 
 @test "wallet derive adds an entry to the addresses ledger" {
-    ledger="$SIT_HOME/.local/var/bitcoin/wallets/alice/addresses"
+    ledger="$XDG_DATA_HOME/bitcoin/wallets/alice/addresses"
     [ -f "$ledger" ]
     [ "$(wc -l < "$ledger")" -ge 1 ]
 }
