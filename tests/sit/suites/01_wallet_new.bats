@@ -23,28 +23,28 @@ setup() {
 @test "wallet new creates the wallet directory" {
     run bitcoin wallet new alice
     [ "$status" -eq 0 ]
-    [ -d "$SIT_HOME/.local/var/bitcoin/wallets/alice" ]
+    [ -d "$XDG_DATA_HOME/bitcoin/wallets/alice" ]
 }
 
 @test "wallet new writes a config file with network=regtest" {
     skip "wallet new writes network=testnet by default; regtest requires explicit config"
-    config="$SIT_HOME/.local/var/bitcoin/wallets/alice/config"
+    config="$XDG_DATA_HOME/bitcoin/wallets/alice/config"
     [ -f "$config" ]
     grep -q "^network=" "$config"
 }
 
 @test "wallet new initialises a git repository" {
-    [ -d "$SIT_HOME/.local/var/bitcoin/wallets/alice/.git" ]
+    [ -d "$XDG_DATA_HOME/bitcoin/wallets/alice/.git" ]
 }
 
-@test "wallet list shows the new wallet" {
-    run bitcoin wallet list
+@test "wallet ls shows the new wallet" {
+    run bitcoin wallet ls
     [ "$status" -eq 0 ]
     [[ "$output" == *"alice"* ]]
 }
 
-@test "wallet new is idempotent (second call reuses existing wallet)" {
+@test "wallet new rejects a duplicate name (does not clobber the existing)" {
     run bitcoin wallet new alice
-    [ "$status" -eq 0 ]
-    [ -d "$SIT_HOME/.local/var/bitcoin/wallets/alice" ]
+    [ "$status" -ne 0 ]
+    [ -d "$XDG_DATA_HOME/bitcoin/wallets/alice" ]
 }
