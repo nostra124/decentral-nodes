@@ -7,9 +7,9 @@ VERSION=$1
 
 # This one rpk package ships multiple commands (each with its own
 # bin/<cmd>, libexec/<cmd>/, share/<cmd>/, share/doc/<cmd>/). bitcoin is
-# the rpk identity; lightning was merged in from nostra124/lightning. A
-# future fulcrum command (FEAT-055..060) slots into this same list.
-COMMANDS="bitcoin lightning fulcrum"
+# the rpk identity; lightning was merged in from nostra124/lightning;
+# fulcrum (FEAT-055..060) and monero (FEAT-299..) slot into this same list.
+COMMANDS="bitcoin lightning fulcrum monero"
 
 test -z "$VERSION" && VERSION=$(rpk versions | tail -1)
 

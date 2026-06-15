@@ -40,8 +40,8 @@ REL_DATADIR    = $(patsubst $(PREFIX)/%,%,$(DATADIR))
 REL_MANDIR     = $(patsubst $(PREFIX)/%,%,$(MANDIR))
 
 # The commands this one package ships. Each has bin/<cmd>, libexec/<cmd>/,
-# share/<cmd>/, share/doc/<cmd>/. Add fulcrum here when it lands.
-PACKAGES = bitcoin lightning fulcrum
+# share/<cmd>/, share/doc/<cmd>/. monero (FEAT-299) is the fourth.
+PACKAGES = bitcoin lightning fulcrum monero
 
 BUILD_DIR = build/$(PACKAGE)
 
