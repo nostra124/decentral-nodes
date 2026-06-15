@@ -101,7 +101,8 @@ sit:install_bitcoin() {
     # NOT relocate the install — it lands in the configured prefix, and the
     # suite then runs the host's *real* (possibly stale) bitcoin instead. So
     # configure explicitly here (BUG-046).
-    ( cd "$REPO_ROOT" && ./configure --prefix="$SIT_HOME/.local" >/dev/null 2>&1 \
+    ( cd "$REPO_ROOT" && rm -rf build \
+        && ./configure --prefix="$SIT_HOME/.local" >/dev/null 2>&1 \
         && make install >/dev/null 2>&1 )
     export PATH="$SIT_HOME/.local/bin:$PATH"
     hash -r
