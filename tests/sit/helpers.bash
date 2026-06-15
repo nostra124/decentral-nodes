@@ -88,6 +88,9 @@ sit:install_bitcoin() {
     # settings into it and hides the test's own backend config (BUG-046).
     export BITCOIN_CONFIG_DIR="$SIT_HOME/.config/bitcoin"
     mkdir -p "$BITCOIN_CONFIG_DIR"
+    # `config set` won't create a fresh bitcoin.conf (it tells you to run
+    # `daemon enable` first); seed an empty one so the backend can be set.
+    : > "$BITCOIN_CONFIG_DIR/bitcoin.conf"
 
     # Reconfigure for the test prefix, then install. The Makefile hard-assigns
     # PREFIX/BINDIR/… at configure time, so `PREFIX=… make install` alone does
