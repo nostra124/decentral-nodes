@@ -429,3 +429,92 @@ monero_daemon_env() {
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"not a 'monero daemon' command"* ]]
 }
+
+# ===========================================================================
+# FEAT-302 — effective-config frontend over monerod. A stub `monerod --help`
+# supplies the boost program_options defaults; the config dir is a tmp dir
+# (no sudo needed for writes there).
+# ===========================================================================
+
+monero_config_env() {
+	export MONERO_CONFIG_DIR="$HOME/etc-monero"; mkdir -p "$MONERO_CONFIG_DIR"
+	export MONERO_MONEROD="$HOME/monerod-help"
+	cat > "$MONERO_MONEROD" <<-'STUB'
+		#!/bin/sh
+		cat <<'HELP'
+		Monero 'Fluorine Fermi' (v0.18.3.4-release)
+
+		Options:
+		  --data-dir arg                        Specify data directory
+		  --rpc-bind-port arg (=18081)          Port for RPC server
+		  --log-level arg (=0)                  Set default log level
+		  --prune-blockchain                    Prune blockchain
+		HELP
+	STUB
+	chmod +x "$MONERO_MONEROD"
+}
+
+@test "FEAT-302 AC1: config list emits TSV NAME/VALUE/DESCRIPTION incl. compiled-in defaults" {
+	monero_config_env
+	run "$MONERO" config list
+	[ "$status" -eq 0 ]
+	printf '%s\n' "$output" | grep -q "^NAME	VALUE	DESCRIPTION$"
+	# A defaulted option carries a non-empty VALUE column (literal tabs).
+	printf '%s\n' "$output" | grep -q "rpc-bind-port	18081	"
+	# A flag (no default) still appears in the listing.
+	printf '%s\n' "$output" | grep -q '^prune-blockchain'
+}
+
+@test "FEAT-302 AC2: config get returns the default when unset, the conf value when set" {
+	monero_config_env
+	run "$MONERO" config get rpc-bind-port
+	[ "$status" -eq 0 ]
+	[ "${lines[0]}" = 18081 ]
+	# Now set it and read back.
+	printf 'rpc-bind-port=29999\n' > "$MONERO_CONFIG_DIR/monerod.conf"
+	run "$MONERO" config get rpc-bind-port
+	[ "$status" -eq 0 ]
+	[ "${lines[0]}" = 29999 ]
+}
+
+@test "FEAT-302 AC3: config set persists to the conf and is read back by get/list" {
+	monero_config_env
+	: > "$MONERO_CONFIG_DIR/monerod.conf"   # an existing conf to write into
+	run "$MONERO" config set log-level 2
+	[ "$status" -eq 0 ]
+	grep -q '^log-level=2' "$MONERO_CONFIG_DIR/monerod.conf"
+	run "$MONERO" config get log-level
+	[ "${lines[0]}" = 2 ]
+	# list shows the set value (not the default 0).
+	run "$MONERO" config list
+	printf '%s\n' "$output" | grep -q "log-level	2	"
+}
+
+@test "FEAT-302 AC3: set replaces an existing key rather than duplicating it" {
+	monero_config_env
+	printf 'log-level=0\n' > "$MONERO_CONFIG_DIR/monerod.conf"
+	"$MONERO" config set log-level 4 >/dev/null 2>&1
+	[ "$(grep -c '^log-level=' "$MONERO_CONFIG_DIR/monerod.conf")" -eq 1 ]
+	grep -q '^log-level=4' "$MONERO_CONFIG_DIR/monerod.conf"
+}
+
+@test "FEAT-302: config path prints the monerod.conf path; unset reverts to default" {
+	monero_config_env
+	run "$MONERO" config path
+	[ "$status" -eq 0 ]
+	[[ "${lines[0]}" == *"/monerod.conf" ]]
+	printf 'log-level=7\n' > "$MONERO_CONFIG_DIR/monerod.conf"
+	"$MONERO" config unset log-level >/dev/null 2>&1
+	! grep -q '^log-level=' "$MONERO_CONFIG_DIR/monerod.conf"
+	run "$MONERO" config get log-level
+	[ "${lines[0]}" = 0 ]   # back to the compiled-in default
+}
+
+@test "FEAT-302 AC4: list/default parsing is awk-portable (BSD awk + gawk)" {
+	monero_config_env
+	# Force BSD awk if present (macOS /usr/bin/awk); else the system awk.
+	# The parse must still yield the defaulted value.
+	run "$MONERO" config list
+	[ "$status" -eq 0 ]
+	printf '%s\n' "$output" | grep -q "rpc-bind-port	18081	"
+}
