@@ -113,18 +113,43 @@ needed four more harness fixes, all applied here:
    `--daemon` but no `--log-file`; CLN 24.11 rejects that (`--daemon needs
    --log-file`). Fix: pass `--log-file="$BOB_DIR/log"`. (The `clnrest`/`wss-proxy`
    "No module named …" lines are non-fatal self-disables, not the blocker.)
-4. **hang guard.** `check-sit` wraps the `podman run` in `timeout` (if present)
+4. **bob shut down by cln-grpc.** bob's bundled `cln-grpc` plugin is marked
+   "important" and exits (no grpc port configured), taking lightningd down with
+   it. Fix: `--disable-plugin=cln-grpc` for bob (the same plugin alice's wiring
+   disables, BUG-033).
+5. **bootstrap hang.** `lightning daemon stop`→`start` (test 2) hung forever:
+   the restart ran `auto_bootstrap_peers`, which `peer bootstrap`s to ~5
+   mainnet nodes — unreachable in the container, so it blocked on TCP timeouts.
+   Fix: `check-sit` exports `LIGHTNING_NO_BOOTSTRAP=1` (bootstrap is meaningless
+   in regtest). The restart round-trip passes after this.
+6. **block-sync race.** `sit_mine` mined blocks but returned immediately,
+   despite its "returns once they're seen" contract, so `fundchannel`/`listfunds`
+   ran before the nodes had followed the new tip and saw zero confirmed UTXOs
+   (`Could not afford … 0 available UTXOs`). Fix: `sit_mine` now blocks until
+   alice (and bob, if up) report the new blockheight.
+7. **stale verbs in the suites.** `02_channel_open_close` / `14_fee_forward`
+   called `lightning channels` (no such verb) instead of `lightning channel
+   list`. Fixed.
+8. **hang guard.** `check-sit` wraps the `podman run` in `timeout` (if present)
    so a hung live-flow test fails the target fast instead of blocking CI.
 
-### Known residual (live-flow reliability, tracked)
+With 1–8, the bring-up + operator path is fully working and the channel
+**open** flow is green end-to-end (alice funds, connects bob, opens + confirms
+a real channel).
 
-The stack now comes up healthy as the operator and the daemon-status test
-passes, but the full live two-node suite is not yet green: `lightning daemon
-stop` → `lightning daemon start` (the restart round-trip) hangs, and the
-channel/pay flows need their funding/confirmation timing made deterministic.
-This is live-flow harness reliability — separate from the packaging/infra
-repairs above — and wants its own follow-up. The `timeout` guard keeps it from
-hanging CI in the meantime.
+### Known residual (live-flow speed + per-suite bugs, tracked)
+
+Two things keep the *full* two-node suite from green, both follow-ups:
+
+- **CLN's 30 s bitcoind poll.** With no developer build available
+  (`--dev-bitcoind-poll` is rejected by this image's lightningd), the only
+  correct option is to wait for the nodes to follow each mined block — ~30 s per
+  confirmation. That makes confirmation-heavy tests (channel close, multi-hop
+  pay) slow enough to exceed the `timeout` guard. The real fix is a
+  fast-polling lightningd (a developer build, or `--dev-bitcoind-poll=1`).
+- **per-suite test bugs.** The suites were written but never run green, so they
+  carry stale verbs / assumptions (the `channels` typo was one of several
+  likely). Each wants a pass once polling is fast enough to iterate on.
 
 ## Regression test
 

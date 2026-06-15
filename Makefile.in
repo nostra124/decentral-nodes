@@ -190,7 +190,7 @@ check-sit:
 	$${to:+$$to 900} podman run --rm \
 		-v $(PWD)/tests/sit:/sit:ro \
 		lightning-clightning \
-		sudo -u alice -i env LIGHTNING_NETWORK=regtest bash -lc 'bats /sit/suites/0[1-9]_*lightning* /sit/suites/1[0-4]_*.bats 2>/dev/null || bats /sit/suites/*daemon* /sit/suites/*channel* /sit/suites/*invoice* /sit/suites/*offer* /sit/suites/*lnurl* /sit/suites/*wellknown* /sit/suites/*walkthrough* /sit/suites/*softdep* /sit/suites/*tower* /sit/suites/*fee*'
+		sudo -u alice -i env LIGHTNING_NETWORK=regtest LIGHTNING_NO_BOOTSTRAP=1 bash -lc 'bats /sit/suites/0[1-9]_*lightning* /sit/suites/1[0-4]_*.bats 2>/dev/null || bats /sit/suites/*daemon* /sit/suites/*channel* /sit/suites/*invoice* /sit/suites/*offer* /sit/suites/*lnurl* /sit/suites/*wellknown* /sit/suites/*walkthrough* /sit/suites/*softdep* /sit/suites/*tower* /sit/suites/*fee*'
 	@echo "==> running bitcoin host-side suites"
 	@bats tests/sit/suites/*wallet* tests/sit/suites/*derive* tests/sit/suites/*send* tests/sit/suites/*psbt* tests/sit/suites/*push_pull* 2>/dev/null || true
 

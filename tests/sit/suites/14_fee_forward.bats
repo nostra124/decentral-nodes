@@ -16,7 +16,7 @@ teardown() { sit_teardown; }
 @test "fee set + get round-trips a new base/ppm" {
 	sit_open_channel
 	local cid
-	cid=$(lightning channels | awk 'NR==2{print $1}')
+	cid=$(lightning channel list | awk 'NR==2{print $1}')
 	[ -n "$cid" ]
 	run lightning fee set "$cid" 1234 7
 	[ "$status" -eq 0 ]

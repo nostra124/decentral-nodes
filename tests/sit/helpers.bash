@@ -135,6 +135,22 @@ sit_mine() {
 	local addr
 	addr=$(BTCCLI getnewaddress)
 	BTCCLI generatetoaddress "$n" "$addr" >/dev/null
+	# Block until the lightning node(s) have followed the new tip. CLN's
+	# bcli backend polls bitcoind only ~every 30 s, so without this wait
+	# fundchannel/listfunds race ahead of the node's view of the chain and
+	# see zero confirmed UTXOs. This honours sit_mine's documented contract
+	# ("returns once they're seen"). BUG-038 SIT harness.
+	local tip; tip=$(BTCCLI getblockcount)
+	local _ h bh
+	for _ in $(seq 1 45); do
+		h=$(cli_alice getinfo 2>/dev/null | jq -r '.blockheight // 0')
+		if [ "$h" = "$tip" ]; then
+			[ -n "${BOB_DIR:-}" ] || return 0
+			bh=$(lightning-cli --lightning-dir="$BOB_DIR" --network="$LIGHTNING_NETWORK" getinfo 2>/dev/null | jq -r '.blockheight // 0')
+			[ "$bh" = "$tip" ] && return 0
+		fi
+		sleep 1
+	done
 }
 
 # A second lightningd for the peer side of every test.
@@ -146,10 +162,14 @@ sit_setup_alice_bob() {
 	# the container CMD); bob is a fresh second instance.
 	BOB_DIR=$(mktemp -d /tmp/bob.XXXXXX)
 	# CLN 24.11 refuses `--daemon` without `--log-file` ("--daemon needs
-	# --log-file"), so give bob an explicit log (BUG-038 SIT harness).
+	# --log-file"), so give bob an explicit log. Also disable cln-grpc: it is
+	# marked "important", so when it exits (no grpc port configured) it takes
+	# lightningd down with it — the same plugin alice's wiring disables
+	# (BUG-033/BUG-038 SIT harness).
 	lightningd --lightning-dir="$BOB_DIR" --network="$LIGHTNING_NETWORK" \
 	           --bitcoin-rpcuser=test --bitcoin-rpcpassword=test \
 	           --addr="127.0.0.1:$BOB_PORT" --daemon \
+	           --disable-plugin=cln-grpc \
 	           --log-file="$BOB_DIR/log"
 	# Wait for both nodes to reach getinfo.
 	for _ in 1 2 3 4 5 6 7 8 9 10; do
