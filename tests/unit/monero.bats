@@ -518,3 +518,53 @@ monero_config_env() {
 	[ "$status" -eq 0 ]
 	printf '%s\n' "$output" | grep -q "rpc-bind-port	18081	"
 }
+
+# ===========================================================================
+# FEAT-303 — man pages + walkthrough
+# ===========================================================================
+
+MAN_DIR_M="$BATS_TEST_DIRNAME/../../share/man/man1"
+
+# Render a manpage file portably (BUG-039): GNU man-db takes `-l`, BSD/macOS
+# man renders a path argument directly; prefer -l where supported.
+render_manfile_m() {
+	if man -l "$1" >/dev/null 2>&1; then man -l "$1"; else man "$1"; fi
+}
+
+@test "FEAT-303 AC1/AC2: every monero node verb (+ parent) has a man page that renders" {
+	command -v man >/dev/null || skip "man not installed"
+	local f
+	for f in monero monero-install monero-daemon monero-config; do
+		[ -f "$MAN_DIR_M/$f.1" ] || { echo "missing: $f.1"; return 1; }
+		run render_manfile_m "$MAN_DIR_M/$f.1"
+		[ "$status" -eq 0 ] || { echo "render failed for $f.1: $output"; return 1; }
+		[ -n "$output" ]
+	done
+}
+
+@test "FEAT-303 AC2: parent monero(1) lists the node verbs" {
+	for v in install daemon config version modules; do
+		grep -q "$v" "$MAN_DIR_M/monero.1" || { echo "monero.1 missing $v"; return 1; }
+	done
+	# SEE ALSO cross-references the sibling commands.
+	grep -q 'bitcoin (1)' "$MAN_DIR_M/monero.1"
+	grep -q 'lightning (1)' "$MAN_DIR_M/monero.1"
+}
+
+@test "FEAT-303 AC3: walkthrough covers install -> daemon -> config, incl. --user/--stagenet/--prune" {
+	local doc="$BATS_TEST_DIRNAME/../../docs/monero-walkthrough.md"
+	[ -f "$doc" ]
+	grep -q 'monero install' "$doc"
+	grep -q 'monero daemon enable' "$doc"
+	grep -q 'monero config' "$doc"
+	grep -q -- '--user' "$doc"
+	grep -q -- '--stagenet' "$doc"
+	grep -q -- '--prune' "$doc"
+}
+
+@test "FEAT-303: daemon man page keeps system as the documented default (not user)" {
+	# The (default) marker belongs to system, never to the rootless user mode
+	# (the 3.x daemon posture). Source escapes dashes as \-\-, so match prose.
+	grep -q 'system service (default)' "$MAN_DIR_M/monero-daemon.1"
+	! grep -qi 'per-user service (default)' "$MAN_DIR_M/monero-daemon.1"
+}

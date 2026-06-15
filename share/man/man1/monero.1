@@ -1,0 +1,86 @@
+.TH MONERO 1 "2026" "bitcoin stack" "User Commands"
+.SH NAME
+monero \- manage a Monero node alongside bitcoin
+.SH SYNOPSIS
+.B monero
+.RI [ options ]
+.I command
+.RI [ args ]
+.SH DESCRIPTION
+.B monero
+is a peer command to
+.BR bitcoin (1),
+shipped from the same package (one rpk identity, many commands). It
+installs, runs, and configures a Monero node
+.RB ( monerod ).
+Monero is an independent chain and daemon, not a wallet feature \(em
+hence a separate top-level command sharing one package and one version.
+.PP
+The 3.2.0 milestone ships the node surface (install / daemon / config);
+the wallet and decentralized-mining surfaces land in later releases.
+.SH OPTIONS
+.TP
+.B \-d
+Enable debug output.
+.TP
+.B \-q
+Quiet mode (suppress info lines).
+.SH COMMANDS
+.SS Generic
+.TP
+.B help " [command]"
+Show help, optionally for a specific command.
+.TP
+.B version
+Print the version (the same string as
+.BR "bitcoin version" ).
+.TP
+.B modules
+List the available libexec plugins.
+.SS Node
+.TP
+.B install " [--from release] [--version V] [--prefix DIR] [--force]"
+Install the official monerod binaries from a verified getmonero.org
+release tarball. See
+.BR monero-install (1).
+.TP
+.B daemon " <enable|disable|start|stop|status|monitor|space>"
+Install and operate a boot-persistent monerod service. See
+.BR monero-daemon (1).
+.TP
+.B config " <list|get|set|unset|path>"
+View and edit the effective monerod configuration. See
+.BR monero-config (1).
+.SH FILES
+.TP
+.I /etc/monero/monerod.conf
+System-service configuration (\-\-system mode).
+.TP
+.I /var/lib/monero
+System-service data directory.
+.TP
+.I ~/.bitmonero
+Per-user data directory (\-\-user mode).
+.SH ENVIRONMENT
+.TP
+.B MONERO_VERSION
+Pin the release version installed by
+.BR "monero install" .
+.SH EXIT STATUS
+.B 0
+on success; non-zero on error (each failure prints a
+.I warn
+or
+.I error
+line naming the condition).
+.SH SEE ALSO
+.BR monero-install (1),
+.BR monero-daemon (1),
+.BR monero-config (1),
+.BR bitcoin (1),
+.BR lightning (1)
+.PP
+Walkthrough:
+.I docs/monero-walkthrough.md
+.SH HISTORY
+Introduced in the 3.2.0 milestone (FEAT-299..303).

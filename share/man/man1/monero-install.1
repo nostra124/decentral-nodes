@@ -1,0 +1,75 @@
+.TH MONERO-INSTALL 1 "2026" "bitcoin stack" "User Commands"
+.SH NAME
+monero-install \- verified release-tarball install of the Monero binaries
+.SH SYNOPSIS
+.B monero install
+.RB [ \-\-from
+.IR release ]
+.RB [ \-\-version
+.IR vX.Y.Z.W ]
+.RB [ \-\-prefix
+.IR DIR ]
+.RB [ \-\-force ]
+.SH DESCRIPTION
+Fetch the official Monero release tarball from getmonero.org for the host
+architecture and authenticate it before staging anything (fail-closed):
+.IP 1. 4
+resolve the host arch to a release asset
+.RB ( monero-linux-x64 ,
+.BR monero-linux-armv8 ,
+.BR monero-mac-x64 / -armv8 )
+and the pinned version;
+.IP 2. 4
+fetch the maintainer (binaryFate) signing key on first use and reject it
+unless its fingerprint matches the pinned one (cached thereafter);
+.IP 3. 4
+.B gpg \-\-verify
+the clearsigned hashes file with that key;
+.IP 4. 4
+check the tarball SHA256 against the verified hashes;
+.IP 5. 4
+extract
+.BR monerod ,
+.BR monero-wallet-rpc ,
+and
+.B monero-wallet-cli
+into the install bindir.
+.PP
+Any verification failure aborts with a non-zero exit and nothing staged.
+.SH OPTIONS
+.TP
+.BI \-\-from " release"
+Install source. Only
+.I release
+is supported today (the default).
+.TP
+.BI \-\-version " vX.Y.Z.W"
+Install a specific release instead of the pinned default.
+.TP
+.BI \-\-prefix " DIR"
+Install into
+.I DIR
+instead of the autodetected bindir
+.RI ( /usr/local/bin ,
+.IR /opt/local/bin ,
+.IR /opt/homebrew/bin ).
+.TP
+.B \-\-force
+Re-install even if the target version is already present.
+.SH ENVIRONMENT
+.TP
+.B MONERO_VERSION
+Override the pinned release version.
+.TP
+.B MONERO_KEY_URL ", " MONERO_HASHES_URL ", " MONERO_RELEASE_BASEURL
+Override the signing-key, hashes, and tarball sources (testing seams).
+.SH EXIT STATUS
+.B 0
+on success;
+.B 1
+on a download / verification / extraction failure (nothing staged).
+.SH SEE ALSO
+.BR monero (1),
+.BR monero-daemon (1)
+.SH HISTORY
+Introduced in 3.2.0 (FEAT-300).
