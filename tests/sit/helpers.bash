@@ -173,6 +173,7 @@ sit_setup_alice_bob() {
 	           --bitcoin-rpcuser=test --bitcoin-rpcpassword=test \
 	           --addr="127.0.0.1:$BOB_PORT" --daemon \
 	           --disable-plugin=cln-grpc \
+	           --disable-plugin=clnrest --disable-plugin=wss-proxy \
 	           --developer --dev-bitcoind-poll=1 \
 	           --log-file="$BOB_DIR/log"
 	# Wait for both nodes to reach getinfo.

@@ -13,7 +13,7 @@ teardown() { sit_teardown; }
 	        offer 1000msat "tip jar" | jq -r .bolt12)
 	[ -n "$offer" ]
 
-	run lightning offer-pay "$offer"
+	run lightning pay offer "$offer"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"ok"* ]]
 }

@@ -3,6 +3,7 @@
 # end-to-end (FEAT-196).
 
 setup() {
+	rm -rf "$HOME/.lightning/wallet/api-test"
 	lightning wallet new api-test >/dev/null
 	lightning wallet use api-test >/dev/null
 	lightning account create alice --limit 1000000 --overdraft deny >/dev/null
