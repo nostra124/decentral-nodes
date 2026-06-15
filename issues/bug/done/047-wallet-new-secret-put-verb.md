@@ -27,3 +27,12 @@ regression — it fails against `put`, passes against `set`.
 ## Regression
 
 `tests/unit/bitcoin.bats` "FEAT-010 — wallet new stores the seed via secret".
+
+## Follow-up caveat
+
+The verb fix (`put`→`set`) is correct and unit-verified, but on a real system
+`wallet new` then reaches `secret: store <name> does not exist` — `secret set
+<store>/<param>` needs the store provisioned. The unit `secret` stub auto-creates
+the path, so it doesn't exercise this. Whether `wallet new` should create the
+secret store itself (vs. requiring `secret` to be pre-initialised) is an open
+question tracked with the secret/gpg provisioning work in [[BUG-046]]/[[BUG-043]].
