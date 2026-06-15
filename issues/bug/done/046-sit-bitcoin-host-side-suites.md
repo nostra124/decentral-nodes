@@ -2,7 +2,15 @@
 id: BUG-046
 type: bug
 priority: medium
-status: open
+status: done
+
+> **Resolved.** All 5 host-side suites run reliably: **25 ok / 0 not ok / 19
+> skip**. The flakiness root cause was `(( tries++ ))` aborting under set -e;
+> with that + the ~12 infra fixes (bitcoind [regtest] config, install-to-test-
+> prefix, mkdir-before-stow, clean build, unique port/name, GPG provisioning,
+> BITCOIN_CONFIG_DIR seam, createwallet, robust teardown), `01_wallet_new` and
+> `02_derive_and_receive` pass; `03`/`04`/`05` skip pending [[FEAT-304]] (the
+> bitcoind backend get-address-utxos/broadcast).
 ---
 
 # SIT — the bitcoin host-side suites are unverified (separate check-sit leg)
