@@ -190,7 +190,7 @@ check-sit:
 	$${to:+$$to 900} podman run --rm \
 		-v $(PWD)/tests/sit:/sit:ro \
 		lightning-clightning \
-		sudo -u alice -i env LIGHTNING_NETWORK=regtest LIGHTNING_NO_BOOTSTRAP=1 bash -lc 'bats /sit/suites/0[1-9]_*lightning* /sit/suites/1[0-4]_*.bats 2>/dev/null || bats /sit/suites/*daemon* /sit/suites/*channel* /sit/suites/*invoice* /sit/suites/*offer* /sit/suites/*lnurl* /sit/suites/*wellknown* /sit/suites/*walkthrough* /sit/suites/*softdep* /sit/suites/*tower* /sit/suites/*fee*'
+		sudo -u alice -i env LIGHTNING_NETWORK=regtest LIGHTNING_NO_BOOTSTRAP=1 bash -lc 'export PATH=/usr/sbin:/sbin:$$PATH; bats /sit/suites/01_daemon_lifecycle.bats /sit/suites/02_channel_open_close.bats /sit/suites/03_invoice_pay_bolt11.bats /sit/suites/04_offer_pay_bolt12.bats /sit/suites/05_lnurl_flow.bats /sit/suites/06_address_create_pay.bats /sit/suites/07_wallet_account_ledger.bats /sit/suites/08_wallet_push_pull.bats /sit/suites/09_inbound_liquidity_lsps1.bats /sit/suites/10_wellknown_api.bats /sit/suites/11_walkthrough.bats /sit/suites/12_softdep_probe.bats /sit/suites/13_tower.bats /sit/suites/14_fee_forward.bats'
 	@echo "==> running bitcoin host-side suites"
 	@bats tests/sit/suites/*wallet* tests/sit/suites/*derive* tests/sit/suites/*send* tests/sit/suites/*psbt* tests/sit/suites/*push_pull* 2>/dev/null || true
 

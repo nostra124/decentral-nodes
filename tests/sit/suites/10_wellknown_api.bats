@@ -14,7 +14,7 @@ setup() {
 	export API_KEY
 
 	# Pre-credit alice so /send has something to spend.
-	lightning ledger add in 500000 --account alice
+	lightning wallet ledger add in 500000 --account alice
 }
 
 @test "recv mints a BOLT-11 with the message in the description" {

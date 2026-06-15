@@ -5,10 +5,11 @@ BARE=""
 CLONE=""
 
 setup() {
+	rm -rf "$HOME/.lightning/wallet/push-test"
 	lightning wallet new push-test >/dev/null
 	lightning wallet use push-test >/dev/null
 	lightning account create rent >/dev/null
-	lightning ledger add in 100000 --account rent --message "ping"
+	lightning wallet ledger add in 100000 --account rent --message "ping"
 
 	BARE=$(mktemp -d /tmp/bare.XXXXXX)
 	git init --bare --quiet "$BARE"
@@ -21,7 +22,7 @@ teardown() {
 }
 
 @test "push -> pull on a fresh machine preserves the ledger byte-for-byte" {
-	lightning backup --remote origin
+	lightning wallet push origin
 
 	# Clone-side: rebuild state.db from state.sql, dump, compare.
 	CLONE=$(mktemp -d /tmp/clone.XXXXXX)

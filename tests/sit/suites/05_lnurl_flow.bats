@@ -47,7 +47,7 @@ http.server.HTTPServer(('127.0.0.1',9090), H).serve_forever()
 	# resolver to the stub URL via /etc/hosts.
 	# (Stub LNURL doesn't bech32-decode; we just point at the URL.)
 
-	run lightning lnurl decode http://stub.example:9090/.well-known/lnurlp/alice
+	run lightning node lnurl-info http://stub.example:9090/.well-known/lnurlp/alice
 	# Decode hits the URL; expect non-empty callback in the JSON.
 	[[ "$output" == *"callback"* ]]
 
