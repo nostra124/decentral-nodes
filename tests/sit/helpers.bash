@@ -54,6 +54,11 @@ sit:start_bitcoind() {
             return 1
         fi
     done
+    # Bitcoin Core 0.21+ starts with no wallet loaded, but sit:mine /
+    # sit:fund_address call getnewaddress / sendtoaddress, which need one
+    # (else RPC error 18). Create (or load) a throwaway wallet (BUG-046).
+    sit:cli createwallet sit >/dev/null 2>&1 \
+        || sit:cli loadwallet sit >/dev/null 2>&1 || true
 }
 
 # Stop and remove the bitcoind container.
