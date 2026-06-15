@@ -71,3 +71,38 @@ to initialise a `secret` store (GPG identity + the per-wallet store) in
 account-API apikey path in [[BUG-043]]. Provisioning `secret`/GPG in the SIT
 environments (host-side HOME + the clightning container) is the shared
 follow-up; with it, BUG-046 and the [[BUG-043]] apikey path both unblock.
+
+## Update — host-side infra fixed; suite 02 green
+
+The secret/gpg gap is solved: `account init` does a batch, passphrase-less GPG
+keygen, so `secret setup` + `secret init <store>` + `secret set` work
+non-interactively. Fixes landed:
+
+- `bitcoin wallet new` now `secret init`s the store before `secret set`
+  ([[BUG-047]] — it was still broken after the put→set fix).
+- SIT host-side `sit:install_bitcoin`: reconfigure to the test prefix; clean
+  `build/` first; provision GPG (account init + secret setup) in the throwaway
+  HOME; keep config in the HOME via `BITCOIN_CONFIG_DIR` (no more /etc leak);
+  seed an empty `bitcoin.conf`; export `SIT_HOME`.
+- `Dockerfile.bitcoind`: `[regtest]` section so bitcoind 27 starts.
+- `make install`: `mkdir -p $(PREFIX)` before stow (fresh prefix).
+- `sit:start_bitcoind`: unique container name + RPC port per call (off 18443,
+  which collided with a host regtest node).
+- `02_derive_and_receive`: ledger path uses `XDG_DATA_HOME`; the balance/UTXO
+  tests skip pending [[FEAT-304]] (the bitcoind backend's get-address-utxos /
+  broadcast are stubs).
+
+**`02_derive_and_receive` run in isolation: 5 ok / 0 not ok / 3 skip** — the
+host-side install + bitcoind + wallet new + derive + ledger all work.
+
+## Remaining
+
+1. **multi-suite isolation.** Running all five host-side suites in one `bats`
+   invocation is flaky: `sit:start_bitcoind` times out under sequential load
+   (leftover containers when a `setup_file` fails, GPG-agent/keygen contention
+   across the per-suite throwaway HOMEs). Needs robust teardown (always remove
+   the container) + a settled GPG-agent story.
+2. **per-suite test debt.** `01_wallet_new` (stale `.local/var` paths, a
+   `wallet new` idempotency expectation), `03_send_and_broadcast` (gated on
+   [[FEAT-304]] broadcast), `04_psbt_roundtrip`, `05_push_pull_between_accounts`
+   each want the same reconciliation suite 02 got.
