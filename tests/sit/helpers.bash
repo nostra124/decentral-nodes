@@ -84,8 +84,15 @@ sit:install_bitcoin() {
     export XDG_STATE_HOME="$SIT_HOME/.local/state"
     unset XDG_CACHE_HOME
 
-    PREFIX="$SIT_HOME/.local" make -C "$REPO_ROOT" install >/dev/null 2>&1
+    # Reconfigure for the test prefix, then install. The Makefile hard-assigns
+    # PREFIX/BINDIR/… at configure time, so `PREFIX=… make install` alone does
+    # NOT relocate the install — it lands in the configured prefix, and the
+    # suite then runs the host's *real* (possibly stale) bitcoin instead. So
+    # configure explicitly here (BUG-046).
+    ( cd "$REPO_ROOT" && ./configure --prefix="$SIT_HOME/.local" >/dev/null 2>&1 \
+        && make install >/dev/null 2>&1 )
     export PATH="$SIT_HOME/.local/bin:$PATH"
+    hash -r
 }
 
 # Tear down the test HOME created by sit:install_bitcoin.
