@@ -26,9 +26,12 @@ setup() {
 	verb="$1"; key="$2"
 	store="$SECRET_STORE"
 	case "$verb" in
-		put) mkdir -p "$store/$(dirname "$key")"; cat > "$store/$key" ;;
-		get) cat "$store/$key" ;;
-		*)   exit 1 ;;
+		# wallet new now `secret init <name>` then `secret set <name>/seed`
+		# (BUG-047); init is a no-op for the stub, set mirrors put.
+		init)     exit 0 ;;
+		set|put)  mkdir -p "$store/$(dirname "$key")"; cat > "$store/$key" ;;
+		get)      cat "$store/$key" ;;
+		*)        exit 1 ;;
 	esac
 	STUB
 	chmod +x "$HOME/bin/secret"

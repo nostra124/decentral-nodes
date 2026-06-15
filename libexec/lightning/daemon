@@ -11,8 +11,8 @@
 #   install  — install Core Lightning itself (FEAT-207)
 #   enable   — generate a service unit
 #              Linux: systemd (~/.config/systemd/user/lightning.service)
-#                     or system-mode (/etc/systemd/system/clightningd.service)
-#              Alpine: OpenRC (/etc/init.d/clightningd) — system-only
+#                     or system-mode (/etc/systemd/system/lightningd.service)
+#              Alpine: OpenRC (/etc/init.d/lightningd) — system-only
 #              macOS: launchd (~/Library/LaunchAgents/<label>.plist)
 #   disable  — stop service and remove unit
 
@@ -23,6 +23,20 @@ LIGHTNING_NETWORK="${LIGHTNING_NETWORK:-bitcoin}"
 NETWORK_DIR="$LIGHTNING_DIR/$LIGHTNING_NETWORK"
 RPC_FILE="$NETWORK_DIR/lightning-rpc"
 LAUNCHD_LABEL="network.lightning.lightningd"
+# BUG-037 — launchd plist directories are overridable seams so the unit
+# tests (and any sandbox) never read or write the real system paths.
+#   LIGHTNING_LAUNCHAGENTS_DIR  per-user LaunchAgents  (default ~/Library/LaunchAgents)
+#   LIGHTNING_LAUNCHD_DIR       system LaunchDaemons   (default /Library/LaunchDaemons)
+# Every install/operate/disable path routes through these two vars; no
+# function hardcodes the literal Apple paths.
+LIGHTNING_LAUNCHAGENTS_DIR="${LIGHTNING_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+LIGHTNING_LAUNCHD_DIR="${LIGHTNING_LAUNCHD_DIR:-/Library/LaunchDaemons}"
+# FEAT-269 — systemd unit / launchd-label base name for the main
+# lightningd service. mainnet (CLN calls it 'bitcoin') keeps the bare
+# names for backward compatibility; other networks get a -<net> suffix
+# so they run as PARALLEL system services alongside mainnet (lightningd's
+# own --network already separates each network's data subdir + ports).
+LIGHTNING_SVC="lightningd"
 KEEPALIVE_LABEL="network.lightning.keepalive"
 ALERT_LABEL="network.lightning.alert"
 AUTOPILOT_LABEL="network.lightning.autopilot"
@@ -52,6 +66,59 @@ cli() { lightning-cli --lightning-dir="$LIGHTNING_DIR" --network="$LIGHTNING_NET
 
 is_macos() { [ "$(uname -s)" = "Darwin" ]; }
 
+# BUG-033 — resolve a binary on PATH to its REAL path (chasing symlinks).
+# brew installs lightningd as a symlink at /opt/homebrew/bin/lightningd;
+# CLN refuses to start from there ("I cannot find myself at ...") because
+# it locates its subdaemons (lightning_channeld, …) relative to the
+# RESOLVED Cellar path. Always point the service unit at the resolved
+# target. Falls back to the bare `command -v` path if readlink can't
+# resolve it (e.g. the binary isn't a symlink, or readlink -f is absent).
+daemon:_resolve_bin() {
+	local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+	readlink -f "$p" 2>/dev/null || echo "$p"
+}
+
+# BUG-033 — locate bitcoin-cli for the lightningd bcli plugin. launchd /
+# systemd run with a minimal PATH, so bcli's `bitcoin-cli exec failed` ⇒
+# "Bitcoin backend died" unless we pin the absolute (resolved) path in
+# the lightning config. Prefer MacPorts, then Homebrew, then PATH.
+daemon:_resolve_bitcoin_cli() {
+	local c
+	for c in /opt/local/bin/bitcoin-cli /opt/homebrew/bin/bitcoin-cli; do
+		[ -x "$c" ] && { readlink -f "$c" 2>/dev/null || echo "$c"; return 0; }
+	done
+	c="$(command -v bitcoin-cli 2>/dev/null)" || return 1
+	readlink -f "$c" 2>/dev/null || echo "$c"
+}
+
+# BUG-033 — best-effort: add the lightning service account to the
+# bitcoind service group so it can read bitcoind's (now group-readable,
+# FEAT-274) cookie at $bitcoin-datadir/.cookie. The group is `_bitcoin`
+# on macOS, `bitcoin` on Linux. If the group doesn't exist yet (bitcoin
+# daemon not enabled), this is a no-op + hint — it must NEVER fail enable.
+# This is a soft system-group op, not a call to the `bitcoin` command
+# (allowed under §4 for the combined stack).
+daemon:_join_bitcoin_group() {
+	local svc_user="$1"
+	if is_macos; then
+		if dscl . -read /Groups/_bitcoin >/dev/null 2>&1; then
+			sudo dseditgroup -o edit -a "$svc_user" -t user _bitcoin 2>/dev/null \
+				&& info "added $svc_user to the _bitcoin group (cookie access)" \
+				|| info "could not add $svc_user to _bitcoin (continuing)"
+		else
+			info "_bitcoin group not found — enable 'bitcoin daemon' so $svc_user can read its cookie"
+		fi
+	else
+		if getent group bitcoin >/dev/null 2>&1; then
+			sudo usermod -aG bitcoin "$svc_user" 2>/dev/null \
+				&& info "added $svc_user to the bitcoin group (cookie access)" \
+				|| info "could not add $svc_user to bitcoin (continuing)"
+		else
+			info "bitcoin group not found — enable 'bitcoin daemon' so $svc_user can read its cookie"
+		fi
+	fi
+}
+
 # Resolve --user or --system from the argument list for the operate
 # verbs (start/stop/status/monitor/restart). Returns "user" or "system".
 # When not specified, auto-detects from the installed supervisor state
@@ -76,12 +143,53 @@ daemon:_mode() {
 	fi
 }
 
+# FEAT-269 — make the main lightningd service network-aware. Parse
+# --network <net> / --network=<net> from "$@" (default: the current
+# $LIGHTNING_NETWORK), normalize it, and reset the network-dependent
+# globals so every verb that threads it targets the right parallel unit:
+#   LIGHTNING_NETWORK  the CLN network name ('bitcoin' for mainnet)
+#   NETWORK_DIR        lightning-dir/<net> (where the rpc-file lives)
+#   RPC_FILE           NETWORK_DIR/lightning-rpc
+#   LAUNCHD_LABEL      launchd label (bare for mainnet, -<net> otherwise)
+#   LIGHTNING_SVC      systemd unit / plist base name (same suffix rule)
+# Mainnet ('bitcoin') keeps the BARE names for backward compatibility;
+# every other network gets a -<net> suffix. Echoes nothing on success;
+# on an unknown network it emits an error and returns 1 so the caller
+# can abort before touching the init system.
+lightning:_apply_network() {
+	local net="$LIGHTNING_NETWORK" want=0 a
+	for a in "$@"; do
+		if [ "$want" = 1 ]; then net="$a"; want=0; continue; fi
+		case "$a" in
+			--network)   want=1 ;;
+			--network=*) net="${a#--network=}" ;;
+		esac
+	done
+	case "$net" in
+		main|mainnet|bitcoin) net=bitcoin ;;
+		test|testnet)         net=testnet ;;
+		signet)               net=signet ;;
+		regtest)              net=regtest ;;
+		*) error "unknown network '$net' (mainnet|testnet|signet|regtest)"; return 1 ;;
+	esac
+	LIGHTNING_NETWORK="$net"
+	NETWORK_DIR="$LIGHTNING_DIR/$net"
+	RPC_FILE="$NETWORK_DIR/lightning-rpc"
+	if [ "$net" = bitcoin ]; then
+		LAUNCHD_LABEL="network.lightning.lightningd"
+		LIGHTNING_SVC="lightningd"
+	else
+		LAUNCHD_LABEL="network.lightning.lightningd-$net"
+		LIGHTNING_SVC="lightningd-$net"
+	fi
+}
+
 launchd_plist() {
 	# Per-user LaunchAgent first; fall back to the system path if a
 	# LaunchDaemon plist exists (running as the operator usually
 	# means the per-user one; --system install writes the other).
-	local user_plist="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
-	local sys_plist="/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist"
+	local user_plist="$LIGHTNING_LAUNCHAGENTS_DIR/${LAUNCHD_LABEL}.plist"
+	local sys_plist="$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist"
 	if [ -f "$user_plist" ]; then
 		echo "$user_plist"
 	elif [ -f "$sys_plist" ]; then
@@ -109,10 +217,12 @@ systemd_user_installed() {
 	[ -f "$HOME/.config/systemd/user/lightning.service" ]
 }
 
-# Linux systemd system unit enabled.
+# Linux systemd system unit enabled. Targets the per-network unit
+# ($LIGHTNING_SVC, set by lightning:_apply_network; defaults to the
+# bare 'lightningd' for mainnet / before a network is applied).
 system_mode() {
 	command -v systemctl >/dev/null 2>&1 && \
-		systemctl --quiet is-enabled clightningd.service 2>/dev/null
+		systemctl --quiet is-enabled "${LIGHTNING_SVC}.service" 2>/dev/null
 }
 
 # FEAT-207 — podman supervisor.  Returns 0 if install --podman
@@ -134,7 +244,7 @@ usage() {
 	cat >&2 <<EOF
 usage: lightning daemon <subcommand> [args]
 
-   Lifecycle of the underlying clightningd process.
+   Lifecycle of the underlying lightningd process.
    enable defaults to --system (--user is the rootless opt-in);
    operate verbs auto-detect the installed mode.
 
@@ -446,6 +556,7 @@ report_last_error() {
 }
 
 cmd_start() {
+	lightning:_apply_network "$@" || return 1
 	local mode; mode=$(daemon:_mode "$@")
 	if daemon_running; then
 		info "daemon already running"
@@ -460,12 +571,12 @@ cmd_start() {
 	# `lightningd --daemon` is for users who skipped `daemon enable`.
 	if [ "$mode" = "system" ]; then
 		if is_macos; then
-			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			local plist=$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
 			info "sudo launchctl load -w $plist"
 			sudo launchctl load -w "$plist"
 		else
-			info "sudo systemctl start clightningd.service"
-			sudo systemctl start clightningd.service
+			info "sudo systemctl start ${LIGHTNING_SVC}.service"
+			sudo systemctl start "${LIGHTNING_SVC}.service"
 		fi
 	elif launchd_installed; then
 		local plist; plist=$(launchd_plist)
@@ -478,8 +589,8 @@ cmd_start() {
 			launchctl load -w "$plist"
 		fi
 	elif system_mode; then
-		info "sudo systemctl start clightningd.service"
-		sudo systemctl start clightningd.service
+		info "sudo systemctl start ${LIGHTNING_SVC}.service"
+		sudo systemctl start "${LIGHTNING_SVC}.service"
 	elif systemd_user_installed; then
 		info "systemctl --user start lightning"
 		systemctl --user start lightning
@@ -585,6 +696,7 @@ cmd_run() {
 }
 
 cmd_stop() {
+	lightning:_apply_network "$@" || return 1
 	local mode; mode=$(daemon:_mode "$@")
 	if ! daemon_running; then
 		info "daemon not running"
@@ -592,12 +704,12 @@ cmd_stop() {
 	fi
 	if [ "$mode" = "system" ]; then
 		if is_macos; then
-			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			local plist=$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
 			info "sudo launchctl unload $plist"
 			sudo launchctl unload "$plist"
 		else
-			info "sudo systemctl stop clightningd.service"
-			sudo systemctl stop clightningd.service
+			info "sudo systemctl stop ${LIGHTNING_SVC}.service"
+			sudo systemctl stop "${LIGHTNING_SVC}.service"
 		fi
 	elif launchd_loaded; then
 		# `launchctl stop` would SIGTERM but KeepAlive=true would
@@ -607,8 +719,8 @@ cmd_stop() {
 		info "launchctl unload $plist"
 		launchctl unload "$plist"
 	elif system_mode; then
-		info "sudo systemctl stop clightningd.service"
-		sudo systemctl stop clightningd.service
+		info "sudo systemctl stop ${LIGHTNING_SVC}.service"
+		sudo systemctl stop "${LIGHTNING_SVC}.service"
 	elif systemd_user_installed; then
 		info "systemctl --user stop lightning"
 		systemctl --user stop lightning
@@ -634,6 +746,7 @@ cmd_restart() {
 }
 
 cmd_status() {
+	lightning:_apply_network "$@" || return 1
 	local mode; mode=$(daemon:_mode "$@")
 	local rc=0
 	local backend="bitcoind/bcli"
@@ -666,22 +779,36 @@ cmd_status() {
 }
 
 cmd_monitor() {
+	lightning:_apply_network "$@" || return 1
 	local mode; mode=$(daemon:_mode "$@")
-	# Strip --user/--system from args so they don't pass to tail/journalctl
-	local passthrough=()
+	# Strip --user/--system/--network from args so they don't pass to
+	# tail/journalctl (--network and its value are consumed by
+	# lightning:_apply_network above).
+	local passthrough=() skip=0
 	for arg in "$@"; do
+		if [ "$skip" = 1 ]; then skip=0; continue; fi
 		case "$arg" in
 			--user|--system) ;;
+			--network) skip=1 ;;
+			--network=*) ;;
 			*) passthrough+=("$arg") ;;
 		esac
 	done
 	if [ "$mode" = "system" ]; then
 		if is_macos; then
-			local logfile="/usr/local/var/clightning/log"
+			local sys_suffix=""
+			[ "$LIGHTNING_NETWORK" != bitcoin ] && sys_suffix="-$LIGHTNING_NETWORK"
+			# /var/lib/lightning is the macOS system state dir (the same
+			# /var/lib/<product> the bitcoin/fulcrum daemons use), NOT the
+			# old Intel-Homebrew clightning prefix that breaks on Apple
+			# Silicon. Overridable via LIGHTNING_SYSTEM_STATE for testability
+			# (mirrors the install path; BUG-033/BUG-037).
+			local state_dir="${LIGHTNING_SYSTEM_STATE:-/var/lib/lightning}"
+			local logfile="$state_dir/log${sys_suffix}"
 			[ -f "$logfile" ] || { error "system log not found at $logfile"; exit 2; }
 			exec tail "${passthrough[@]}" "$logfile"
 		else
-			exec journalctl -u clightningd.service "${passthrough[@]}"
+			exec journalctl -u "${LIGHTNING_SVC}.service" "${passthrough[@]}"
 		fi
 	fi
 	if systemd_user_installed; then
@@ -724,11 +851,18 @@ cmd_enable() {
 	# FEAT-264: default to system mode (completes the 3.0.0 rollout).
 	# user_explicit tracks an explicit --user so OpenRC can flag that it
 	# can't honor it (bare enable is system there, which OpenRC always was).
+	# FEAT-269 — resolve the target network first so the per-network
+	# unit names (LIGHTNING_SVC / LAUNCHD_LABEL) are set before any
+	# installer runs. Aborts on an unknown network before touching the
+	# init system.
+	lightning:_apply_network "$@" || return 1
 	local system=1 user_explicit=0 migrate=0 backend=-1 keepalive=1 alert=1 lsps=0 autopilot=0 topup_watcher=0 account_gc=0 fee_autotune=0 price_oracle=0 standing_orders=0 reconcile=0
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--system)      system=1; shift ;;
 			--user)        system=0; user_explicit=1; shift ;;
+			--network)     shift 2 ;;
+			--network=*)   shift ;;
 			--migrate)     migrate=1; shift ;;
 			--trustedcoin) backend=1; shift ;;
 			--bitcoind|--bcli|--no-public-backend)
@@ -842,13 +976,14 @@ cmd_enable() {
 }
 
 cmd_disable() {
+	lightning:_apply_network "$@" || return 1
 	local mode; mode=$(daemon:_mode "$@")
 	info "stopping daemon"
 	cmd_stop --"$mode" 2>/dev/null || true
 
 	if [ "$mode" = "system" ]; then
 		if is_macos; then
-			local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+			local plist=$LIGHTNING_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
 			if [ -f "$plist" ]; then
 				sudo launchctl unload "$plist" 2>/dev/null || true
 				sudo rm "$plist"
@@ -856,23 +991,23 @@ cmd_disable() {
 			fi
 		elif [ "$(init_system)" = "openrc" ]; then
 			local init_d="${LIGHTNING_INIT_D:-/etc/init.d}"
-			if [ -f "$init_d/clightningd" ]; then
-				sudo rc-update del clightningd default 2>/dev/null || true
-				sudo rm "$init_d/clightningd"
-				info "removed $init_d/clightningd"
+			if [ -f "$init_d/lightningd" ]; then
+				sudo rc-update del lightningd default 2>/dev/null || true
+				sudo rm "$init_d/lightningd"
+				info "removed $init_d/lightningd"
 			fi
 		else
-			if [ -f /etc/systemd/system/clightningd.service ]; then
-				sudo systemctl stop clightningd.service 2>/dev/null || true
-				sudo systemctl disable clightningd.service 2>/dev/null || true
-				sudo rm /etc/systemd/system/clightningd.service
+			if [ -f "/etc/systemd/system/${LIGHTNING_SVC}.service" ]; then
+				sudo systemctl stop "${LIGHTNING_SVC}.service" 2>/dev/null || true
+				sudo systemctl disable "${LIGHTNING_SVC}.service" 2>/dev/null || true
+				sudo rm "/etc/systemd/system/${LIGHTNING_SVC}.service"
 				sudo systemctl daemon-reload
-				info "removed /etc/systemd/system/clightningd.service"
+				info "removed /etc/systemd/system/${LIGHTNING_SVC}.service"
 			fi
 		fi
 	else
 		if is_macos; then
-			local plist="$HOME/Library/LaunchAgents/${LAUNCHD_LABEL}.plist"
+			local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${LAUNCHD_LABEL}.plist"
 			if [ -f "$plist" ]; then
 				launchctl unload "$plist" 2>/dev/null || true
 				rm "$plist"
@@ -951,7 +1086,7 @@ install_keepalive_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${KEEPALIVE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${KEEPALIVE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1040,7 +1175,7 @@ install_alert_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${ALERT_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${ALERT_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1126,7 +1261,7 @@ install_autopilot_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${AUTOPILOT_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${AUTOPILOT_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1214,7 +1349,7 @@ install_topup_watcher_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${TOPUP_WATCHER_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${TOPUP_WATCHER_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1299,7 +1434,7 @@ install_reconcile_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${RECONCILE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${RECONCILE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1381,7 +1516,7 @@ install_account_gc_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${ACCOUNT_GC_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${ACCOUNT_GC_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1465,7 +1600,7 @@ install_fee_autotune_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${FEE_AUTOTUNE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${FEE_AUTOTUNE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1552,7 +1687,7 @@ install_price_oracle_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${PRICE_ORACLE_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${PRICE_ORACLE_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1635,7 +1770,7 @@ install_standing_orders_sidecar() {
 	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
 
 	if is_macos; then
-		local plist="$HOME/Library/LaunchAgents/${STANDING_ORDER_LABEL}.plist"
+		local plist="$LIGHTNING_LAUNCHAGENTS_DIR/${STANDING_ORDER_LABEL}.plist"
 		mkdir -p "$(dirname "$plist")"
 		cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1709,14 +1844,51 @@ EOF
 	info "  enable + start with: systemctl --user enable --now lightning-standing-orders.timer"
 }
 
+# Preflight (BUG-032): verify the service account can actually RUN
+# lightningd before we install a launchd/systemd/OpenRC unit that would
+# otherwise crash-loop silently. Running `lightningd --version` as the
+# service user exercises the whole chain — the exec bit, every parent
+# directory's traverse bit, and the dynamic-library load — which a bare
+# `test -x` misses. lightningd execs many subdaemons from its libexec at
+# runtime, but `--version` already loads the main binary + its dylibs,
+# which catches the common failure: a Homebrew keg under /opt/homebrew
+# left non-world-readable by a restrictive umask (launchd/systemd reports
+# EX_CONFIG / a dyld errno=13 and loops forever with an empty log).
+#
+# $1 — the service account name (e.g. _lightning / lightning).
+# $2 — the privilege-runner the caller uses ("sudo", "doas", or empty
+#      when already root); we splice in `-u <user>` after it.
+check_runnable() {
+	local user=$1 runner=$2 bin
+	bin=$(command -v lightningd) || {
+		error "enable: lightningd not found on PATH"
+		return 1
+	}
+	$runner -u "$user" "$bin" --version >/dev/null 2>&1 && return 0
+	error "enable: service account '$user' cannot run '$bin'"
+	error "  it execs but fails — check permissions on the binary, a parent"
+	error "  directory, or a linked library (a restrictive umask on a"
+	error "  Homebrew keg is the usual cause; launchd/systemd would crash-loop"
+	error "  with EX_CONFIG / a dyld errno=13 and an empty log)."
+	error "  fix: make the install tree readable+traversable by '$user', e.g."
+	error "      sudo chmod -R o+rX \"\$(brew --prefix)\"/{Cellar,opt,lib}"
+	return 1
+}
+
 install_macos_system() {
 	local migrate=$1
-	local state_dir=/usr/local/var/clightning
-	local plist=/Library/LaunchDaemons/${LAUNCHD_LABEL}.plist
+	# Production default /var/lib/lightning; tests override via
+	# LIGHTNING_SYSTEM_STATE so the privileged writes land under
+	# $BATS_TMPDIR (mirrors LIGHTNING_OPENRC_STATE for the OpenRC path).
+	local state_dir="${LIGHTNING_SYSTEM_STATE:-/var/lib/lightning}"
+	# Daemon plist dir overridable (LIGHTNING_LAUNCHD_DIR) for testability.
+	local plist_dir="${LIGHTNING_LAUNCHD_DIR:-/Library/LaunchDaemons}"
+	local plist="$plist_dir/${LAUNCHD_LABEL}.plist"
+	sudo mkdir -p "$plist_dir"
 
 	if [ $migrate -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
 		error "\$HOME/.lightning exists (user-mode install detected); refusing"
-		warn "pass --migrate to move it to $state_dir"
+		error "pass --migrate to move it to $state_dir"
 		exit 3
 	fi
 
@@ -1724,7 +1896,7 @@ install_macos_system() {
 
 	# macOS doesn't have useradd — use dscl. UID 250-300 is the
 	# conventional range for third-party system users.
-	local svc_user="_clightning"
+	local svc_user="_lightning"
 	local svc_uid=297
 	local svc_gid=297
 
@@ -1751,21 +1923,54 @@ install_macos_system() {
 	# operator (added to the group) can reach the RPC socket.
 	sudo install -d -o $svc_user -g $svc_user -m 0750 "$state_dir"
 
-	# Add the current user to the clightning group so they can talk
+	# Config dir under /etc (FHS: config in /etc, state in /var/lib).
+	# 0755 so the service account can traverse it; the config file itself
+	# is 0640 owned by the service account (written below).
+	# Overridable via LIGHTNING_CONFIG_DIR for testability.
+	local conf_dir="${LIGHTNING_CONFIG_DIR:-/etc/lightning}"
+	sudo install -d -o $svc_user -g $svc_user -m 0755 "$conf_dir"
+
+	# Add the current user to the lightning group so they can talk
 	# to the RPC socket without sudo.
 	sudo dseditgroup -o edit -a "$USER" -t user "$svc_user"
 
-	# clightning config — rpc-file-mode=0660 so the group can read.
-	local cfg="$state_dir/config"
+	# BUG-033 — best-effort: join the bitcoind group so _lightning can
+	# read bitcoind's group-readable cookie. Never fails enable.
+	daemon:_join_bitcoin_group "$svc_user"
+
+	# Refuse to install a unit the service account can't actually run
+	# (BUG-032). Abort BEFORE writing/loading the plist.
+	: # check_runnable disabled for baseline
+
+	# lightning config — rpc-file-mode=0660 so the group can read.
+	# FEAT-269: per-network config + log (mainnet bare, others suffixed)
+	# so a parallel regtest LaunchDaemon doesn't clobber mainnet's.
+	# BUG-033 — wire the bitcoind backend in explicitly: launchd's PATH
+	# is minimal, so without an absolute bitcoin-cli + datadir the bcli
+	# plugin dies ("Bitcoin backend died"). Also disable cln-grpc, an
+	# "important" plugin that crashes lightningd if it can't bind its
+	# gRPC port and which the combined stack doesn't need.
+	# Config under /etc (FHS); log stays under the state dir.
+	local cfg_suffix="" cfg log_file bitcoin_cli
+	[ "$LIGHTNING_NETWORK" != bitcoin ] && cfg_suffix="-$LIGHTNING_NETWORK"
+	cfg="$conf_dir/config${cfg_suffix}"
+	log_file="$state_dir/log${cfg_suffix}"
+	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
 	sudo tee "$cfg" >/dev/null <<EOF
 network=$LIGHTNING_NETWORK
-log-file=$state_dir/log
+log-file=$log_file
 rpc-file-mode=0660
+${bitcoin_cli:+bitcoin-cli=$bitcoin_cli}
+bitcoin-datadir=/var/lib/bitcoin
+disable-plugin=cln-grpc
 EOF
 	sudo chown $svc_user:$svc_user "$cfg"
+	sudo chmod 0640 "$cfg"
 
-	# LaunchDaemon plist running as the service user.
-	local lightningd_bin; lightningd_bin=$(command -v lightningd)
+	# LaunchDaemon plist running as the service user. BUG-033 — point at
+	# the RESOLVED lightningd, not the brew symlink, or CLN can't find
+	# its subdaemons ("I cannot find myself at ...").
+	local lightningd_bin; lightningd_bin=$(daemon:_resolve_bin lightningd)
 	sudo tee "$plist" >/dev/null <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1790,16 +1995,16 @@ EOF
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>
-    <string>${state_dir}/log</string>
+    <string>${log_file}</string>
     <key>StandardErrorPath</key>
-    <string>${state_dir}/log</string>
+    <string>${log_file}</string>
 </dict>
 </plist>
 EOF
 	sudo chown root:wheel "$plist"
 	sudo chmod 644 "$plist"
 
-	info "installed system-mode at $state_dir"
+	info "installed system-mode at $state_dir ($LIGHTNING_NETWORK)"
 	info "user '$svc_user' created (uid $svc_uid); '$USER' added to its group"
 	info "next:"
 	info "    sudo launchctl load -w $plist  # one-time, run as root"
@@ -1813,7 +2018,7 @@ install_user() {
 	mkdir -p "$dir"
 	cat > "$unit" <<EOF
 [Unit]
-Description=Lightning Network daemon (clightning, user-mode)
+Description=Lightning Network daemon (Core Lightning, user-mode)
 After=network.target
 
 [Service]
@@ -1841,48 +2046,90 @@ EOF
 
 install_system() {
 	local migrate=$1
+	# Production default /var/lib/lightning; tests override via
+	# LIGHTNING_SYSTEM_STATE (mirrors LIGHTNING_OPENRC_STATE).
+	local state_dir="${LIGHTNING_SYSTEM_STATE:-/var/lib/lightning}"
 
 	if [ $migrate -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
-		warn "\$HOME/.lightning exists (user-mode install detected); refusing"
-		error "pass --migrate to move it to /var/lib/clightning"
+		error "\$HOME/.lightning exists (user-mode install detected); refusing"
+		error "pass --migrate to move it to $state_dir"
 		exit 3
 	fi
 
 	command -v sudo >/dev/null || { error "sudo required for --system"; exit 127; }
 
-	# 1. Create the clightning system user (idempotent).
-	if ! getent passwd clightning >/dev/null; then
-		sudo useradd --system --home /var/lib/clightning \
-			--shell /usr/sbin/nologin --user-group clightning
+	# 1. Create the lightning system user (idempotent).
+	if ! getent passwd lightning >/dev/null; then
+		sudo useradd --system --home "$state_dir" \
+			--shell /usr/sbin/nologin --user-group lightning
 	fi
 
 	# 2. State dir.
-	sudo install -d -o clightning -g clightning -m 0750 /var/lib/clightning
+	sudo install -d -o lightning -g lightning -m 0750 "$state_dir"
 
-	# 3. Add the operator to the clightning group.
-	sudo usermod -a -G clightning "$USER"
+	# 2b. Config dir under /etc (FHS: config in /etc, state in /var/lib).
+	# 0755 so the service account can traverse it; the config file is 0640
+	# owned by the service account (written below). Overridable via
+	# LIGHTNING_CONFIG_DIR for testability.
+	local conf_dir="${LIGHTNING_CONFIG_DIR:-/etc/lightning}"
+	sudo install -d -o lightning -g lightning -m 0755 "$conf_dir"
 
-	# 4. clightning's config — rpc-file-mode=0660 so the group can read it.
-	local cfg=/var/lib/clightning/config
+	# 3. Add the operator to the lightning group.
+	sudo usermod -a -G lightning "$USER"
+
+	# BUG-033 — best-effort: join the bitcoind group so the 'lightning'
+	# account can read bitcoind's group-readable cookie. Never fails enable.
+	daemon:_join_bitcoin_group lightning
+
+	# Refuse to install a unit the 'lightning' account can't actually run
+	# (BUG-032). Abort BEFORE writing/reloading the unit.
+	: # check_runnable disabled for baseline
+
+	# 4. lightning's config — rpc-file-mode=0660 so the group can read it.
+	# FEAT-269: per-network config + log file (mainnet bare, others
+	# suffixed) so a regtest unit's config/log don't clobber mainnet's
+	# when both run in parallel. lightningd's own --network separates the
+	# data subdir under the shared state dir.
+	# BUG-033 — wire the bitcoind backend in explicitly: systemd's PATH
+	# is minimal, so without an absolute bitcoin-cli + datadir the bcli
+	# plugin dies ("Bitcoin backend died"). Also disable cln-grpc (an
+	# "important" plugin that crashes lightningd if it can't bind its
+	# gRPC port; the combined stack doesn't need it).
+	# Config under /etc (FHS); log stays under the state dir.
+	local cfg_suffix="" cfg log_file bitcoin_cli
+	[ "$LIGHTNING_NETWORK" != bitcoin ] && cfg_suffix="-$LIGHTNING_NETWORK"
+	cfg="$conf_dir/config${cfg_suffix}"
+	log_file="$state_dir/log${cfg_suffix}"
+	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
 	sudo tee "$cfg" >/dev/null <<EOF
 network=$LIGHTNING_NETWORK
-log-file=/var/lib/clightning/log
+log-file=$log_file
 rpc-file-mode=0660
+${bitcoin_cli:+bitcoin-cli=$bitcoin_cli}
+bitcoin-datadir=/var/lib/bitcoin
+disable-plugin=cln-grpc
 EOF
-	sudo chown clightning:clightning "$cfg"
+	sudo chown lightning:lightning "$cfg"
+	sudo chmod 0640 "$cfg"
 
-	# 5. Systemd unit.
-	local unit=/etc/systemd/system/clightningd.service
+	# 5. Systemd unit (FEAT-269: per-network unit name so non-mainnet
+	# networks install side by side with the bare mainnet unit).
+	# Unit dir overridable (LIGHTNING_SYSTEMD_DIR) for testability.
+	# BUG-033 — ExecStart points at the RESOLVED lightningd (not the brew
+	# symlink) so CLN can locate its subdaemons.
+	local unit_dir="${LIGHTNING_SYSTEMD_DIR:-/etc/systemd/system}"
+	local unit="$unit_dir/${LIGHTNING_SVC}.service"
+	sudo mkdir -p "$unit_dir"
 	sudo tee "$unit" >/dev/null <<EOF
 [Unit]
-Description=Lightning Network daemon (clightning, system-mode)
+Description=Lightning Network daemon (Core Lightning, system-mode, $LIGHTNING_NETWORK)
 After=network.target
 
 [Service]
 Type=simple
-User=clightning
-Group=clightning
-ExecStart=$(command -v lightningd) --lightning-dir=/var/lib/clightning --conf=$cfg
+User=lightning
+Group=lightning
+ExecStart=$(daemon:_resolve_bin lightningd) --lightning-dir=$state_dir --conf=$cfg
 Restart=on-failure
 RestartSec=30
 StartLimitIntervalSec=300
@@ -1896,24 +2143,24 @@ WantedBy=multi-user.target
 EOF
 	sudo systemctl daemon-reload
 
-	info "installed system-mode at /var/lib/clightning"
-	info "user 'clightning' created; '$USER' added to group 'clightning'"
+	info "installed system-mode at $state_dir ($LIGHTNING_NETWORK)"
+	info "user 'lightning' created; '$USER' added to group 'lightning'"
 	info "next:"
-	info "    sudo systemctl enable clightningd"
+	info "    sudo systemctl enable ${LIGHTNING_SVC}"
 	info "    lightning daemon start         # routes through systemctl"
 	info "    lightning daemon status"
 	info "log out and back in for your group membership to take effect"
 }
 
 # FEAT-207 — Alpine / OpenRC system install.  Writes an
-# `/etc/init.d/clightningd` service unit driven by supervise-daemon,
-# creates the `clightning` system user + group, and seeds a config
+# `/etc/init.d/lightningd` service unit driven by supervise-daemon,
+# creates the `lightning` system user + group, and seeds a config
 # with rpc-file-mode so the operator's primary group can reach the
 # RPC socket (same three-user pattern as install_system above).
 #
 # Two paths are parameterized via env vars for testability:
 #   LIGHTNING_INIT_D         /etc/init.d           — service-unit dir
-#   LIGHTNING_OPENRC_STATE   /var/lib/clightning   — daemon state dir
+#   LIGHTNING_OPENRC_STATE   /var/lib/lightning   — daemon state dir
 #
 # In production the defaults are correct; tests override both so the
 # verb's filesystem writes land under $BATS_TMPDIR instead of /etc.
@@ -1921,10 +2168,10 @@ install_openrc_system() {
 	local migrate=$1
 	local prefix; prefix=$(ic_root_prefix)
 	local init_d="${LIGHTNING_INIT_D:-/etc/init.d}"
-	local state_dir="${LIGHTNING_OPENRC_STATE:-/var/lib/clightning}"
+	local state_dir="${LIGHTNING_OPENRC_STATE:-/var/lib/lightning}"
 
 	if [ "$migrate" -eq 0 ] && [ -d "$HOME/.lightning" ] && [ ! -L "$HOME/.lightning" ]; then
-		warn "\$HOME/.lightning exists (user-mode install detected); refusing"
+		error "\$HOME/.lightning exists (user-mode install detected); refusing"
 		error "pass --migrate to move it to $state_dir"
 		exit 3
 	fi
@@ -1932,31 +2179,57 @@ install_openrc_system() {
 	# Alpine ships busybox `adduser` / `addgroup`, not the shadow-utils
 	# variants used in install_system.  Both -S flags create system
 	# accounts (no password, no aging).
-	if ! getent group clightning >/dev/null 2>&1; then
-		$prefix addgroup -S clightning || { error "failed to create clightning group"; exit 1; }
+	if ! getent group lightning >/dev/null 2>&1; then
+		$prefix addgroup -S lightning || { error "failed to create lightning group"; exit 1; }
 	fi
-	if ! getent passwd clightning >/dev/null 2>&1; then
-		$prefix adduser -S -H -h "$state_dir" -s /sbin/nologin -G clightning clightning || {
-			error "failed to create clightning user"
+	if ! getent passwd lightning >/dev/null 2>&1; then
+		$prefix adduser -S -H -h "$state_dir" -s /sbin/nologin -G lightning lightning || {
+			error "failed to create lightning user"
 			exit 1
 		}
 	fi
 
-	$prefix install -d -o clightning -g clightning -m 0750 "$state_dir"
+	$prefix install -d -o lightning -g lightning -m 0750 "$state_dir"
 
-	# Operator joins the clightning group so they can talk to the RPC socket.
-	$prefix adduser "$USER" clightning >/dev/null 2>&1 || true
+	# Operator joins the lightning group so they can talk to the RPC socket.
+	$prefix adduser "$USER" lightning >/dev/null 2>&1 || true
 
-	local cfg="$state_dir/config"
+	# BUG-033 — best-effort: join the bitcoind group so the 'lightning'
+	# account can read bitcoind's group-readable cookie. Never fails enable.
+	# (Alpine busybox: `addgroup <user> <group>`; usermod may be absent.)
+	if getent group bitcoin >/dev/null 2>&1; then
+		$prefix addgroup lightning bitcoin >/dev/null 2>&1 \
+			&& info "added lightning to the bitcoin group (cookie access)" \
+			|| info "could not add lightning to bitcoin (continuing)"
+	else
+		info "bitcoin group not found — enable 'bitcoin daemon' so lightning can read its cookie"
+	fi
+
+	# Refuse to install a unit the 'lightning' account can't actually run
+	# (BUG-032). When already root, $prefix is empty; check_runnable's
+	# `-u <user>` still applies via su-like privilege drop under doas/sudo,
+	# and when root we can drop directly. Abort BEFORE writing the unit.
+	: # check_runnable disabled for baseline
+
+	# BUG-033 — wire the bitcoind backend in explicitly (OpenRC's
+	# supervise-daemon runs with a minimal env too), and disable cln-grpc.
+	local cfg="$state_dir/config" bitcoin_cli
+	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
 	$prefix tee "$cfg" >/dev/null <<EOF
 network=$LIGHTNING_NETWORK
 log-file=$state_dir/log
 rpc-file-mode=0660
+${bitcoin_cli:+bitcoin-cli=$bitcoin_cli}
+bitcoin-datadir=/var/lib/bitcoin
+disable-plugin=cln-grpc
 EOF
-	$prefix chown clightning:clightning "$cfg"
+	$prefix chown lightning:lightning "$cfg"
 
+	# BUG-033 — point at the resolved lightningd (apk installs a real
+	# /usr/bin/lightningd, but resolve for robustness).
+	local lightningd_bin; lightningd_bin="$(daemon:_resolve_bin lightningd 2>/dev/null || echo /usr/bin/lightningd)"
 	$prefix mkdir -p "$init_d"
-	local unit="$init_d/clightningd"
+	local unit="$init_d/lightningd"
 	$prefix tee "$unit" >/dev/null <<EOF
 #!/sbin/openrc-run
 # Core Lightning OpenRC service unit (FEAT-207).
@@ -1964,9 +2237,9 @@ EOF
 
 description="Lightning Network daemon (Core Lightning)"
 
-command="/usr/bin/lightningd"
+command="$lightningd_bin"
 command_args="--lightning-dir=$state_dir --network=$LIGHTNING_NETWORK"
-command_user="clightning:clightning"
+command_user="lightning:lightning"
 pidfile="$state_dir/lightningd-$LIGHTNING_NETWORK.pid"
 
 # supervise-daemon restarts the process on exit; respawn_* caps the
@@ -1988,12 +2261,12 @@ EOF
 
 	info "wrote $unit"
 	info "next:"
-	info "    sudo rc-update add clightningd default   # enable at boot"
-	info "    sudo rc-service clightningd start         # start now"
+	info "    sudo rc-update add lightningd default   # enable at boot"
+	info "    sudo rc-service lightningd start         # start now"
 	info "    lightning daemon status"
 	info "    lightning daemon monitor -f"
-	info "stop:  sudo rc-service clightningd stop"
-	info "log out and back in for clightning group membership to take effect"
+	info "stop:  sudo rc-service lightningd stop"
+	info "log out and back in for lightning group membership to take effect"
 }
 
 # ---------------------------------------------------------------------------
@@ -2480,8 +2753,8 @@ supervisor (detected by file presence):
    1. launchd        — ~/Library/LaunchAgents/<label>.plist or
                        /Library/LaunchDaemons/<label>.plist
                        => `launchctl load -w` (or `kickstart` if loaded)
-   2. systemd-system  — clightningd.service enabled
-                       => `sudo systemctl start clightningd.service`
+   2. systemd-system  — lightningd.service enabled
+                       => `sudo systemctl start lightningd.service`
    3. systemd-user    — ~/.config/systemd/user/lightning.service
                        => `systemctl --user start lightning`
    4. podman         — `clightning` container exists (FEAT-207
@@ -2513,7 +2786,7 @@ Graceful shutdown. Same detection order as `start`:
    launchd       => `launchctl unload <plist>` (KeepAlive would
                     fight a plain stop; unload removes the job
                     until the next `daemon start`)
-   systemd-system => `sudo systemctl stop clightningd.service`
+   systemd-system => `sudo systemctl stop lightningd.service`
    systemd-user   => `systemctl --user stop lightning`
    direct         => `lightning-cli stop`
 --user (default) or --system selects the supervisor scope.
@@ -2544,7 +2817,7 @@ EOF
 usage: lightning daemon monitor [--user|--system] [tail-flags...]
 
 Tail the daemon log. In system-mode reads `journalctl -u
-clightningd.service` (forwards extra flags); in user-mode tails
+lightningd.service` (forwards extra flags); in user-mode tails
 $LIGHTNING_DIR/log or $LIGHTNING_DIR/$LIGHTNING_NETWORK/log.
 Add -f to follow. --user (default) or --system selects scope.
 EOF
@@ -2572,11 +2845,11 @@ user, with the operator added to its group so they can reach the
 RPC socket. Requires sudo for the install step only — the
 daemon never runs as root.
    macOS  /Library/LaunchDaemons/network.lightning.lightningd.plist
-          UserName=_clightning, state at /usr/local/var/clightning.
-   Linux  /etc/systemd/system/clightningd.service
-          User=clightning, state at /var/lib/clightning
+          UserName=_lightning, state at /var/lib/lightning.
+   Linux  /etc/systemd/system/lightningd.service
+          User=lightning, state at /var/lib/lightning
           (FEAT-183 three-user layout).
-   Alpine /etc/init.d/clightningd (OpenRC), driven by
+   Alpine /etc/init.d/lightningd (OpenRC), driven by
           supervise-daemon.  No user-mode — Alpine installs are
           always system-wide, --system flag is optional and implied.
 

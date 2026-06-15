@@ -968,6 +968,10 @@ url=""
 for a in "$@"; do case "$a" in http*://*) url="$a";; esac; done
 # Any coingecko history URL → a fixed EUR price keyed by the date arg.
 case "$url" in
+	*simple/price*)
+		# FEAT-266 spot endpoint → fixed current price.
+		echo '{"bitcoin":{"eur":43210.0}}'
+		exit 0 ;;
 	*coins/bitcoin/history*)
 		d="$(printf '%s' "$url" | sed -n 's/.*date=\([0-9-]*\).*/\1/p')"
 		# DD-MM-YYYY → deterministic price (just echo a fixed value).
@@ -1002,10 +1006,118 @@ STUB
 	echo "$output" | grep -q "unknown price subcommand"
 }
 
-@test "FEAT-040 — price get with no arg usage-errors" {
+@test "FEAT-266 — price get with no date returns the current spot price" {
+	feat040_coingecko_stub
+	run "$BITCOIN_BIN" price get
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "43210"
+}
+
+@test "FEAT-266 — price get spot errors clearly for a non-coingecko source" {
+	export BITCOIN_PRICE_SOURCE="kraken"
 	run "$BITCOIN_BIN" price get
 	[ "$status" -ne 0 ]
-	echo "$output" | grep -q "usage: price get"
+	echo "$output" | grep -q "only supported for the coingecko source"
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-271: bitcoin config (list/get/set/unset/path). A temp datadir holds
+# bitcoin.conf; a stub bitcoind serves -help so 'get' can resolve defaults.
+# ---------------------------------------------------------------------------
+feat271_env() {
+	export BITCOIN_CONFIG_DATADIR="$HOME/cfgdir"
+	# Config lives under a dir now (FHS /etc on a real host); point the
+	# frontend at the tmp dir so the suite stays hermetic even when a real
+	# /etc/bitcoin/bitcoin.conf exists on the dev box.
+	export BITCOIN_CONFIG_DIR="$HOME/cfgdir"
+	mkdir -p "$BITCOIN_CONFIG_DATADIR"
+	printf '# bitcoin.conf\nserver=1\ndbcache=600\n' > "$BITCOIN_CONFIG_DATADIR/bitcoin.conf"
+	export BITCOIN_BITCOIND="$HOME/bitcoind-help-stub"
+	# Covers: a comma-form default "(4 to 16384, default: 450)", a multi-line
+	# wrapped description, and an option with NO default (alertnotify).
+	cat > "$BITCOIN_BITCOIND" <<-'STUB'
+		#!/usr/bin/env bash
+		[ "$1" = -help ] && printf '%s\n' \
+		  '  -maxconnections=<n>' \
+		  '       Maintain at most <n> connections (default: 125).' \
+		  '  -dbcache=<n>' \
+		  '       Maximum database cache size <n> MiB (4 to 16384, default:' \
+		  '       450). In addition, unused mempool memory is shared.' \
+		  '  -alertnotify=<cmd>' \
+		  '       Execute command when an alert is raised.'
+		exit 0
+	STUB
+	chmod +x "$BITCOIN_BITCOIND"
+}
+
+@test "FEAT-271 — config list is TSV (name/value/description) with effective values + defaults" {
+	feat271_env
+	run "$BITCOIN_BIN" config list
+	[ "$status" -eq 0 ]
+	echo "$output" | head -1 | grep -q 'NAME'
+	# conf value overrides the default:
+	echo "$output" | awk -F'\t' '$1=="dbcache"&&$2=="600"{f=1} END{exit !f}'
+	# an unset option shows its compiled-in default + description:
+	echo "$output" | awk -F'\t' '$1=="maxconnections"&&$2=="125"&&$3~/Maintain at most/{f=1} END{exit !f}'
+	# a conf-only key (not in -help) still appears:
+	echo "$output" | awk -F'\t' '$1=="server"&&$2=="1"{f=1} END{exit !f}'
+	# a no-default option shows an EMPTY value, not its description (the
+	# `read`-collapsing / multi-line-default bug the user hit):
+	echo "$output" | awk -F'\t' '$1=="alertnotify"&&$2==""&&$3~/Execute command/{f=1} END{exit !f}'
+	# the (4 to 16384, default: 450) clause is stripped from the description:
+	echo "$output" | awk -F'\t' '$1=="dbcache"&&$3!~/default:/{f=1} END{exit !f}'
+}
+
+@test "FEAT-271 — config list --set shows only the conf-set keys" {
+	feat271_env
+	run "$BITCOIN_BIN" config list --set
+	[ "$status" -eq 0 ]
+	echo "$output" | awk -F'\t' '$1=="server"&&$2=="1"{f=1} END{exit !f}'
+	echo "$output" | awk -F'\t' '$1=="dbcache"&&$2=="600"{f=1} END{exit !f}'
+	# maxconnections is a default-only key → excluded by --set
+	! echo "$output" | awk -F'\t' '$1=="maxconnections"{f=1} END{exit !f}'
+}
+
+@test "FEAT-271 — config get returns the conf value (source: conf)" {
+	feat271_env
+	run "$BITCOIN_BIN" config get dbcache
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q '600'
+}
+
+@test "FEAT-271 — config get falls back to the bitcoind default" {
+	feat271_env
+	run "$BITCOIN_BIN" config get maxconnections
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q '125'
+}
+
+@test "FEAT-271 — config set replaces/adds a key and warns to restart" {
+	feat271_env
+	run "$BITCOIN_BIN" config set prune 550
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qi 'restart'
+	grep -q '^prune=550' "$BITCOIN_CONFIG_DATADIR/bitcoin.conf"
+}
+
+@test "FEAT-271 — config unset removes a key" {
+	feat271_env
+	"$BITCOIN_BIN" config set foo bar
+	"$BITCOIN_BIN" config unset foo
+	! grep -q '^foo=' "$BITCOIN_CONFIG_DATADIR/bitcoin.conf"
+}
+
+@test "FEAT-271 — config get errors for an unknown key with no default" {
+	feat271_env
+	run "$BITCOIN_BIN" config get totallyboguskey
+	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-271 — config path prints the conf file" {
+	feat271_env
+	run "$BITCOIN_BIN" config path
+	[ "$status" -eq 0 ]
+	[ "$output" = "$BITCOIN_CONFIG_DATADIR/bitcoin.conf" ]
 }
 
 @test "FEAT-040 — price get rejects a malformed date" {
@@ -1118,7 +1230,7 @@ feat034_env() {
 
 	local stub="$HOME/daemon-stub" c
 	mkdir -p "$stub"
-	for c in systemctl launchctl useradd sysadminctl chown; do
+	for c in systemctl launchctl useradd sysadminctl chown dscl dseditgroup usermod; do
 		cat > "$stub/$c" <<-STUB
 			#!/usr/bin/env bash
 			printf '%s %s\n' "$c" "\$*" >> "$FEAT034_CALLS"
@@ -1126,14 +1238,36 @@ feat034_env() {
 		STUB
 		chmod +x "$stub/$c"
 	done
-	cat > "$stub/sudo" <<-'STUB'
+	# BUG-035: on a host that already runs the live stack a real
+	# 'bitcoin'/'_bitcoin' account exists, so daemon:_ensure_account's
+	# `id "$user"` short-circuits and the account-creation branch never
+	# runs. This stub makes any *username* lookup report not-found (so the
+	# creation path is always exercised) while passing the option forms
+	# (-u / -un / -g …) through to the real id (daemon:_domain needs them).
+	cat > "$stub/id" <<-'STUB'
 		#!/usr/bin/env bash
-		exec "$@"
+		case "$1" in
+			-*) exec /usr/bin/id "$@" ;;
+			"") exec /usr/bin/id ;;
+			*)  exit 1 ;;
+		esac
+	STUB
+	chmod +x "$stub/id"
+	# Transparent sudo, but it records its invocation so tests can assert
+	# that privileged steps (e.g. installing bitcoin.conf into the root-
+	# owned datadir, BUG-030) actually route through sudo.
+	cat > "$stub/sudo" <<-STUB
+		#!/usr/bin/env bash
+		printf 'sudo %s\n' "\$*" >> "$FEAT034_CALLS"
+		# Emulate sudo's '-u <user>' (tests run under a single uid).
+		if [ "\$1" = "-u" ]; then shift 2; fi
+		exec "\$@"
 	STUB
 	chmod +x "$stub/sudo"
 	export PATH="$stub:$PATH"
 
-	# enable() resolves bitcoind through this override.
+	# enable() resolves bitcoind through this override. Honors --version
+	# so the enable preflight (daemon:_check_runnable) passes.
 	export BITCOIN_BITCOIND="$HOME/bitcoind-stub"
 	printf '#!/usr/bin/env bash\n:\n' > "$BITCOIN_BITCOIND"
 	chmod +x "$BITCOIN_BITCOIND"
@@ -1185,6 +1319,111 @@ feat034_env() {
 	grep -q 'launchctl bootstrap system' "$FEAT034_CALLS"
 }
 
+@test "FEAT-268 — enable --network regtest installs a parallel suffixed unit (linux)" {
+	feat034_env linux
+	"$BITCOIN_BIN" daemon enable --user --network regtest
+	local unit="$XDG_CONFIG_HOME/systemd/user/bitcoind-regtest.service"
+	[ -f "$unit" ]
+	grep -q -- '-chain=regtest' "$unit"
+	grep -q 'bitcoind-regtest.pid' "$unit"
+	grep -q 'systemctl --user enable --now bitcoind-regtest' "$FEAT034_CALLS"
+}
+
+@test "FEAT-268 — enable --network regtest uses a suffixed label + -chain (macos)" {
+	feat034_env macos
+	"$BITCOIN_BIN" daemon enable --user --network regtest
+	local unit="$HOME/Library/LaunchAgents/org.bitcoin.bitcoind-regtest.plist"
+	[ -f "$unit" ]
+	grep -q '<string>org.bitcoin.bitcoind-regtest</string>' "$unit"
+	grep -q -- '<string>-chain=regtest</string>' "$unit"
+	grep -q 'bitcoind-regtest.log' "$unit"
+}
+
+@test "FEAT-268 — mainnet unit carries no -chain and the bare label (macos)" {
+	feat034_env macos
+	"$BITCOIN_BIN" daemon enable --user
+	local unit="$HOME/Library/LaunchAgents/org.bitcoin.bitcoind.plist"
+	[ -f "$unit" ]
+	! grep -q -- '-chain=' "$unit"
+	# no empty ProgramArguments string left behind by the stripped @CHAIN@
+	! grep -q '<string></string>' "$unit"
+	grep -q '<string>org.bitcoin.bitcoind</string>' "$unit"
+}
+
+@test "FEAT-268 — enable rejects an unknown network" {
+	feat034_env linux
+	run --separate-stderr "$BITCOIN_BIN" daemon enable --user --network frobnet
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q "unknown network 'frobnet'"
+}
+
+@test "FEAT-268 — regtest and mainnet user units coexist" {
+	feat034_env linux
+	"$BITCOIN_BIN" daemon enable --user
+	"$BITCOIN_BIN" daemon enable --user --network regtest
+	[ -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
+	[ -f "$XDG_CONFIG_HOME/systemd/user/bitcoind-regtest.service" ]
+}
+
+@test "BUG-030 — enable (system) installs bitcoin.conf via sudo, not a bare redirect" {
+	feat034_env linux
+	run "$BITCOIN_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	# The datadir is owned by the dedicated 'bitcoin' account, so a bare
+	# `cat > "$conf"` would run as the invoking user and fail with EACCES
+	# while still printing "created". The write must route through sudo,
+	# at 0640 owned by the service group.
+	local conf="$BITCOIN_DAEMON_ROOT/etc/bitcoin/bitcoin.conf"
+	grep -Eq 'sudo install -m 0640 .*bitcoin\.conf' "$FEAT034_CALLS"
+	grep -q 'chown bitcoin:bitcoin .*bitcoin\.conf' "$FEAT034_CALLS"
+	[ -f "$conf" ]
+	grep -q '^server=1' "$conf"
+}
+
+@test "FEAT-274 — enable (system) sets rpccookieperms=group when bitcoind supports it" {
+	feat034_env linux
+	# bitcoind stub that advertises -rpccookieperms in -help (Core 28+).
+	printf '#!/usr/bin/env bash\n[ "$1" = -help ] && echo "  -rpccookieperms=<readable-by>"\nexit 0\n' > "$BITCOIN_BITCOIND"
+	chmod +x "$BITCOIN_BITCOIND"
+	run "$BITCOIN_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	# Makes the .cookie group-readable so sibling daemons authenticate.
+	grep -q '^rpccookieperms=group' "$BITCOIN_DAEMON_ROOT/etc/bitcoin/bitcoin.conf"
+}
+
+@test "FEAT-274 — enable omits rpccookieperms on a node that predates it" {
+	feat034_env linux
+	# default stub emits no -help output → option unsupported → not written.
+	run "$BITCOIN_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	! grep -q 'rpccookieperms' "$BITCOIN_DAEMON_ROOT/etc/bitcoin/bitcoin.conf"
+}
+
+@test "BUG-030 — enable (system) provisions a dedicated group and joins the operator" {
+	feat034_env linux
+	run "$BITCOIN_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	# Three-user model: a same-named group is created (--user-group), the
+	# datadir is group-owned and 0750, and the operator joins the group so
+	# they reach config/cookie/log without sudo.
+	grep -q 'useradd .*--user-group .*bitcoin' "$FEAT034_CALLS"
+	grep -q 'usermod -a -G bitcoin' "$FEAT034_CALLS"
+	grep -q 'chown bitcoin:bitcoin .*var/lib/bitcoin' "$FEAT034_CALLS"
+}
+
+@test "BUG-030 — enable (system) refuses to install a unit the service account can't run" {
+	feat034_env linux
+	# Simulate the Homebrew-keg/dyld crash-loop: a binary that execs but
+	# fails (here, fails its --version preflight).
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$BITCOIN_BITCOIND"
+	chmod +x "$BITCOIN_BITCOIND"
+	run --separate-stderr "$BITCOIN_BIN" daemon enable --system
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q "cannot run"
+	# Must bail BEFORE installing the unit (no silent crash-loop left behind).
+	[ ! -f "$BITCOIN_DAEMON_ROOT/etc/systemd/system/bitcoind.service" ]
+}
+
 @test "FEAT-261 — enable defaults to --system when no mode is given" {
 	feat034_env linux
 	run "$BITCOIN_BIN" daemon enable
@@ -1219,10 +1458,37 @@ feat034_env() {
 @test "FEAT-034 — enable errors clearly when bitcoind is absent" {
 	feat034_env linux
 	unset BITCOIN_BITCOIND
+	# BUG-035: daemon:_bitcoind_candidates also probes the absolute
+	# MacPorts / Homebrew dirs, which exist on a host running the live
+	# stack. Empty the $BITCOIN_SYSTEM_BINDIRS seam (and keep
+	# BITCOIN_BITCOIND unset) so the absolute-dir probe finds nothing,
+	# and pin PATH to the stub dir + the system bindirs (no bitcoind on
+	# any of them) so the PATH probe finds nothing either → the
+	# absent-error path runs.
+	export BITCOIN_SYSTEM_BINDIRS=""
+	export PATH="$HOME/daemon-stub:/usr/bin:/bin:/usr/sbin:/sbin"
 	run --separate-stderr "$BITCOIN_BIN" daemon enable --user
 	[ "$status" -ne 0 ]
-	echo "$stderr" | grep -q "no 'bitcoind' on PATH"
+	echo "$stderr" | grep -q "no 'bitcoind' found"
 	echo "$stderr" | grep -q 'bitcoin daemon install'
+}
+
+@test "BUG-035 — daemon honors the \$BITCOIN_SYSTEM_BINDIRS override" {
+	feat034_env linux
+	unset BITCOIN_BITCOIND
+	# Point the seam at a temp dir holding our own runnable bitcoind, and
+	# scrub PATH so the host's real binaries can't leak in. enable must
+	# discover the seam binary and wire it into the rendered unit.
+	local bindir="$HOME/seam-bin"
+	mkdir -p "$bindir"
+	printf '#!/usr/bin/env bash\n:\n' > "$bindir/bitcoind"
+	chmod +x "$bindir/bitcoind"
+	export BITCOIN_SYSTEM_BINDIRS="$bindir"
+	export PATH="$HOME/daemon-stub:/usr/bin:/bin:/usr/sbin:/sbin"
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -eq 0 ]
+	grep -q "ExecStart=$bindir/bitcoind " \
+		"$XDG_CONFIG_HOME/systemd/user/bitcoind.service"
 }
 
 @test "FEAT-034 — disable --user removes the unit and tears the service down" {
@@ -1294,7 +1560,11 @@ feat033_env() {
 		exit 0
 	STUB
 	chmod +x "$stub/bitcoind"
-	export PATH="$stub:$PATH"
+	# BUG-035: pin PATH to the stub dir + the system bindirs only — NOT the
+	# inherited PATH — so a real brew / port / bitcoind on the host (the live
+	# stack) can't leak in. The package-manager-absent test removes the stub
+	# 'brew' and must then see it as genuinely not-found.
+	export PATH="$stub:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 @test "FEAT-033 — install --from brew runs 'brew install bitcoin'" {
@@ -1332,11 +1602,13 @@ feat033_env() {
 	grep -q 'apk add bitcoin' "$FEAT033_CALLS"
 }
 
-@test "FEAT-033 — install auto-detects brew on macos" {
+@test "FEAT-033 — install auto-detects macports on macos (macports-first)" {
 	feat033_env
 	ACCT_PLATFORM=macos run "$BITCOIN_BIN" daemon install
 	[ "$status" -eq 0 ]
-	grep -q 'brew install bitcoin' "$FEAT033_CALLS"
+	# macports-first: /opt/local is world-readable, so a dedicated
+	# service account can run the binary (brew is the fallback).
+	grep -q 'port install bitcoin' "$FEAT033_CALLS"
 }
 
 @test "FEAT-033 — install errors when the package manager is absent" {
@@ -1390,7 +1662,9 @@ bug015_env() {
 	: > "$BUG015_CALLS"
 	local stub="$HOME/lifecycle-stub" c
 	mkdir -p "$stub"
-	for c in systemctl launchctl journalctl; do
+	# `tail` is stubbed so monitor's macOS `tail -f` records instead of
+	# blocking; it also lets BUG-030 assert the sudo-wrapped log read.
+	for c in systemctl launchctl journalctl tail; do
 		cat > "$stub/$c" <<-STUB
 			#!/usr/bin/env bash
 			printf '%s %s\n' "$c" "\$*" >> "$BUG015_CALLS"
@@ -1398,9 +1672,11 @@ bug015_env() {
 		STUB
 		chmod +x "$stub/$c"
 	done
-	cat > "$stub/sudo" <<-'STUB'
+	# Transparent sudo that records its invocation (see BUG-030).
+	cat > "$stub/sudo" <<-STUB
 		#!/usr/bin/env bash
-		exec "$@"
+		printf 'sudo %s\n' "\$*" >> "$BUG015_CALLS"
+		exec "\$@"
 	STUB
 	chmod +x "$stub/sudo"
 	export PATH="$stub:$PATH"
@@ -1460,6 +1736,16 @@ bug015_env() {
 	grep -q 'journalctl --user -u bitcoind -f' "$BUG015_CALLS"
 }
 
+@test "BUG-030 — monitor (system, macos) reads the log directly via group access (no sudo)" {
+	bug015_env
+	BITCOIN_DAEMON_OS=macos run "$BITCOIN_BIN" daemon monitor --system
+	[ "$status" -eq 0 ]
+	# Three-user model: the operator is in the service group and the datadir
+	# is group-readable, so the log is tailed directly — no sudo.
+	grep -Eq 'tail -f .*bitcoind\.log' "$BUG015_CALLS"
+	! grep -q 'sudo' "$BUG015_CALLS"
+}
+
 @test "BUG-015 — space errors when the data dir is absent" {
 	bug015_env
 	# setup() gives a fresh $HOME with no ~/.bitcoin, so the user-mode
@@ -1472,6 +1758,11 @@ bug015_env() {
 
 @test "BUG-015 — space reports the data dir's disk usage" {
 	bug015_env
+	# BUG-035: pin the OS to linux so daemon:_datadir resolves to the
+	# $HOME/.bitcoin path this test populates (on a macOS host the user-mode
+	# datadir would otherwise be "$HOME/Library/Application Support/Bitcoin",
+	# leaving the created dir unseen and `space` hitting the absent-error).
+	export BITCOIN_DAEMON_OS=linux
 	mkdir -p "$HOME/.bitcoin"
 	head -c 4096 /dev/zero > "$HOME/.bitcoin/blk"
 	run "$BITCOIN_BIN" daemon space --user

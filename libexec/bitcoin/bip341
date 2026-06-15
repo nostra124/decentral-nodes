@@ -27,6 +27,13 @@ declare -r BIP341_N=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD036
 declare -r BIP341_GX=79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
 declare -r BIP341_GY=483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
 
+# dc wraps long output at a column limit with `\`+newline by default
+# (Gavin Howard's dc, the macOS default; GNU dc honours the same env
+# var). The 256-bit EC arithmetic here prints values that wrapping would
+# corrupt with stray `\`/newline chars, silently dropping high bits so
+# only small scalars work; disable it for tooling-portability (BUG-039).
+export DC_LINE_LENGTH=0
+
 ec_double() {
 	dc -e "16o16i $BIP341_P sp $1 sX $2 sY [lp + lp %]sN
 		lX lX * lp % 3 * lp %                  sA

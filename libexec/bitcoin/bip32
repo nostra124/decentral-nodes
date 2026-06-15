@@ -39,6 +39,13 @@ error() {
 	echo -e "$SELF: error - \033[31;1;m$@\033[0m" >&2
 }
 
+# dc wraps long output at a column limit with `\`+newline by default
+# (Gavin Howard's dc, the macOS default; GNU dc honours the same env
+# var). The 256-bit EC arithmetic here prints values that wrapping would
+# corrupt with stray `\`/newline chars; disable it so the engine is
+# tooling-portable (BUG-039).
+export DC_LINE_LENGTH=0
+
 # checks if a certain function exists: eg. has command update
 has() {
 	local KIND=$1
@@ -189,6 +196,30 @@ sP[[[INFINITY]nLIs@q]SI3Rd0=I_3RLIs@IO_5R_5Rlfx1d+d+d*doi2 100^d
 # This file requires extended globs to be parsed
 shopt -s extglob
 
+# The secp256k1 engine above packs bytes with a 2^100 output radix. GNU dc
+# tolerates that (it warns and continues); Gavin Howard's dc — the current
+# macOS/Homebrew default `/usr/bin/dc` — hard-aborts with a "Math error:
+# overflow" mid-derivation, silently corrupting the result. So resolve a
+# GNU-compatible dc once: probe each candidate with the 2^100-radix trick
+# the engine relies on and use the first that survives it. On Linux the
+# PATH `dc` is GNU dc and the first probe wins (no-op); on macOS we fall
+# through to a Homebrew/MacPorts GNU dc (`brew install bc`). The coproc is
+# named DC, so the resolved binary lives in DC_BIN to avoid clobbering it.
+# (BUG-039.)
+_bip32_dc() {
+	local c
+	for c in dc "${HOMEBREW_PREFIX:-/opt/homebrew}/opt/bc/bin/dc" \
+	           /usr/local/opt/bc/bin/dc /opt/local/bin/gdc gdc; do
+		command -v "$c" >/dev/null 2>&1 || continue
+		[ "$(echo '2 100^ o 255 p' | "$c" 2>/dev/null)" = 255 ] && {
+			printf '%s' "$c"; return 0
+		}
+	done
+	warn "no GNU-compatible dc found; bip32 derivation requires GNU dc (e.g. 'brew install bc'). Falling back to '$(command -v dc)', which will error."
+	printf 'dc'
+}
+declare -r DC_BIN="$(_bip32_dc)"
+
 # bip32 (Hierarchical Deterministic Wallets) commands
 command:ser32() {
 	if local -i i=$1; ((i >= 0 && i < 1<<32)); then
@@ -335,7 +366,7 @@ command:derive() {
 		
 		path="${path#[mM]}"
 		if test -n "$path"; then
-			coproc DC { dc -e "$secp256k1" -; }
+			coproc DC { "$DC_BIN" -e "$secp256k1" -; }
 			trap 'echo q >&"${DC[1]}"' EXIT RETURN
 			while [[ "$path" =~ ^/(N|[[:digit:]]+h?) ]]; do
 				path="${path#/${BASH_REMATCH[1]}}"

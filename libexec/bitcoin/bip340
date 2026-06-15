@@ -27,6 +27,15 @@ declare -r BIP340_N=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD036
 declare -r BIP340_GX=79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
 declare -r BIP340_GY=483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
 
+# dc wraps long output at a column limit with `\`+newline by default
+# (70 cols on Gavin Howard's dc — the current macOS/Homebrew default;
+# GNU dc honours the same env var). The scalar-bit decomposition in
+# ec_mul prints a 256-char line that wrapping would corrupt with stray
+# `\`/newline chars, silently dropping high bits so only small scalars
+# work. Disable wrapping for every dc invocation in this plugin so the
+# affine engine is tooling-portable (BUG-039).
+export DC_LINE_LENGTH=0
+
 # ---------------------------------------------------------------------------
 # Affine secp256k1: ec_double, ec_add, ec_mul, lift_x. Validated against
 # G-multiples produced by an independent reference and against the official

@@ -13,15 +13,16 @@ teardown() { sit_teardown; }
 
 # §1 Setup — covered by the container CMD. Smoke: getinfo works.
 @test "§1 setup: alice's node is reachable" {
-	run lightning info
+	run lightning node info
 	[ "$status" -eq 0 ]
 }
 
 # §2 Create a wallet.
 @test "§2 wallet new + account list" {
+	rm -rf "$HOME/.lightning/wallet/walkthrough"
 	lightning wallet new walkthrough >/dev/null
 	lightning wallet use walkthrough >/dev/null
-	lightning account create personal --description "everyday" >/dev/null
+	lightning account create personal "everyday" >/dev/null
 	run lightning account list
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"personal"* ]]
@@ -46,12 +47,13 @@ teardown() { sit_teardown; }
 	local offer
 	offer=$(lightning-cli --lightning-dir="$BOB_DIR" --network="$LIGHTNING_NETWORK" \
 	        offer 1000msat walk-§5 | jq -r .bolt12)
-	run lightning offer-pay "$offer"
+	run lightning pay offer "$offer"
 	[ "$status" -eq 0 ]
 }
 
 # §7 Lightning Address create.
 @test "§7 address create" {
+	rm -rf "$HOME/.lightning/wallet/walkthrough-§7"
 	lightning wallet new walkthrough-§7 >/dev/null
 	lightning account create alice >/dev/null
 	run lightning address create alice@example.com --account alice

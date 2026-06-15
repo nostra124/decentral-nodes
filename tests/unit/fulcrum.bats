@@ -25,7 +25,13 @@ setup() {
 	export FULCRUM_CONFIG_DIR="$FROOT/cfg"
 	export FULCRUM_DATADIR="$FROOT/db"
 	export FULCRUM_ROOT="$FROOT/root"
-	export FULCRUM_FULCRUMD="/opt/fulcrum/Fulcrum"
+	# A real stub binary stands in for Fulcrum: enable's preflight
+	# (service:_check_runnable) runs `<bin> --version` AS the service
+	# account, so the override must point at something executable that
+	# exits 0 on --version (BUG-031, mirrors streamline.bats).
+	export FULCRUM_FULCRUMD="$FROOT/fulcrumd-stub"
+	printf '#!/usr/bin/env bash\n:\n' > "$FULCRUM_FULCRUMD"
+	chmod +x "$FULCRUM_FULCRUMD"
 	unset FULCRUM_OS FULCRUM_NODE_OK FULCRUM_ADMIN_FIXTURE \
 	      FULCRUM_ADMIN_ADDR FULCRUM_PORT_BUSY
 
@@ -33,15 +39,38 @@ setup() {
 	MOCKBIN="$FROOT/mockbin"; mkdir -p "$MOCKBIN"
 	CALLLOG="$FROOT/calls.log"; : > "$CALLLOG"
 	local c
-	for c in systemctl launchctl journalctl useradd sysadminctl log du; do
+	for c in systemctl launchctl journalctl useradd sysadminctl log du \
+	         dscl dseditgroup usermod chown tail; do
 		printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\n' "$c" "$CALLLOG" > "$MOCKBIN/$c"
 		chmod +x "$MOCKBIN/$c"
 	done
 	# du must still print a size for `space`.
 	printf '#!/usr/bin/env bash\necho "du $*" >> "%s"\necho "123M\t."\n' "$CALLLOG" > "$MOCKBIN/du"
 	chmod +x "$MOCKBIN/du"
-	# sudo logs then execs its args (so 'sudo systemctl' still records systemctl).
-	printf '#!/usr/bin/env bash\necho "sudo $*" >> "%s"\nexec "$@"\n' "$CALLLOG" > "$MOCKBIN/sudo"
+	# Hermeticity (BUG-036): a host that already has a real '_fulcrum' account
+	# (from a live --system deploy) would short-circuit daemon:_ensure_account's
+	# `id "$user"` existence check and skip the dscl account-creation branch the
+	# BUG-031 macos test asserts. Stub `id` so any *username* lookup reports
+	# "not found", while flag forms (`id -u`, `id -un`) pass through to real id.
+	cat > "$MOCKBIN/id" <<-STUB
+		#!/usr/bin/env bash
+		case "\$1" in
+		  -*) exec /usr/bin/id "\$@" ;;
+		  "") exec /usr/bin/id ;;
+		  *) exit 1 ;;
+		esac
+	STUB
+	chmod +x "$MOCKBIN/id"
+	# sudo logs then execs its args (so 'sudo systemctl' still records
+	# systemctl). It strips a leading '-u <user>' so the enable preflight's
+	# `sudo -u <svc> <bin> --version` execs the binary directly under the
+	# single test uid (BUG-031, mirrors streamline.bats).
+	cat > "$MOCKBIN/sudo" <<-STUB
+		#!/usr/bin/env bash
+		echo "sudo \$*" >> "$CALLLOG"
+		if [ "\$1" = "-u" ]; then shift 2; fi
+		exec "\$@"
+	STUB
 	chmod +x "$MOCKBIN/sudo"
 	export PATH="$MOCKBIN:$PATH"
 }
@@ -67,7 +96,7 @@ fixdir() {  # create a fixture dir with one <method>.json; echo its path
 	[ "$status" -eq 0 ] || [ -n "$output" ]
 	run "$FULCRUM" modules
 	[ "$status" -eq 0 ]
-	[[ "$output" == *service* ]]
+	[[ "$output" == *daemon* ]]
 	[[ "$output" == *config* ]]
 	[[ "$output" == *info* ]]
 }
@@ -76,11 +105,18 @@ fixdir() {  # create a fixture dir with one <method>.json; echo its path
 	command -v stow >/dev/null 2>&1 || skip "stow not installed"
 	local prefix="$FROOT/prefix"; mkdir -p "$prefix"
 	( cd "$REPO" && ./configure --prefix="$prefix" >/dev/null 2>&1 && make install >/dev/null 2>&1 )
-	# Staged build tree (stow source) carries every command.
-	[ -f "$REPO/build/bitcoin$prefix/bin/bitcoin" ]
-	[ -f "$REPO/build/bitcoin$prefix/bin/fulcrum" ]
-	[ -d "$REPO/build/bitcoin$prefix/libexec/bitcoin" ]
-	[ -d "$REPO/build/bitcoin$prefix/libexec/fulcrum" ]
+	# Staged build tree (stow source) mirrors $PREFIX *relative* —
+	# build/bitcoin/bin, not build/bitcoin$prefix/bin. The latter was the
+	# double-prefix packaging bug (BUG-038): absolute staging + `stow -t
+	# $PREFIX` left files at $PREFIX$PREFIX/… and never on PATH.
+	[ -f "$REPO/build/bitcoin/bin/bitcoin" ]
+	[ -f "$REPO/build/bitcoin/bin/fulcrum" ]
+	[ -d "$REPO/build/bitcoin/libexec/bitcoin" ]
+	[ -d "$REPO/build/bitcoin/libexec/fulcrum" ]
+	# …and `stow -t $PREFIX` installs directly into $PREFIX.
+	[ -x "$prefix/bin/bitcoin" ]
+	[ -x "$prefix/bin/fulcrum" ]
+	[ -f "$prefix/share/lightning/apache/lnurlp.conf" ]
 	( cd "$REPO" && make uninstall >/dev/null 2>&1; rm -rf build Makefile )
 }
 
@@ -138,7 +174,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	[ "$status" -eq 0 ]
 	local unit="$XDG_CONFIG_HOME/systemd/user/fulcrumd.service"
 	[ -f "$unit" ]
-	grep -q "ExecStart=/opt/fulcrum/Fulcrum" "$unit"
+	grep -q "ExecStart=$FULCRUM_FULCRUMD" "$unit"
 	grep -q "$FULCRUM_DATADIR" "$unit"
 	! grep -q "^User=" "$unit"
 	run "$FULCRUM" disable --user
@@ -242,6 +278,318 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	[[ "$output" == *"unknown source"* ]]
 }
 
+@test "FEAT-270: install --from release downloads, SHA256-verifies, and installs the prebuilt binary" {
+	local td="$BATS_TEST_TMPDIR/rel"; mkdir -p "$td/stub" "$td/pfx/bin" "$td/pkg/Fulcrum-9.9.9-x86_64-linux"
+	printf '#!/bin/sh\necho fake-fulcrum\n' > "$td/pkg/Fulcrum-9.9.9-x86_64-linux/Fulcrum"
+	chmod +x "$td/pkg/Fulcrum-9.9.9-x86_64-linux/Fulcrum"
+	( cd "$td/pkg" && tar -czf "$td/asset.tar.gz" Fulcrum-9.9.9-x86_64-linux )
+	local sum; sum="$(sha256sum "$td/asset.tar.gz" | awk '{print $1}')"
+	printf '%s  Fulcrum-9.9.9-x86_64-linux.tar.gz\n' "$sum" > "$td/sums.txt"
+	cat > "$td/latest.json" <<-JSON
+		{"tag_name":"v9.9.9","assets":[
+		 {"name":"Fulcrum-9.9.9-x86_64-linux.tar.gz","browser_download_url":"http://stub/tarball"},
+		 {"name":"Fulcrum-9.9.9-shasums.txt","browser_download_url":"http://stub/sums"}]}
+	JSON
+	cat > "$td/stub/uname" <<-STUB
+		#!/usr/bin/env bash
+		case "\$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo Linux ;; esac
+	STUB
+	cat > "$td/stub/curl" <<-STUB
+		#!/usr/bin/env bash
+		out=""; url=""
+		while [ \$# -gt 0 ]; do case "\$1" in -o) out="\$2"; shift 2 ;; -*) shift ;; *) url="\$1"; shift ;; esac; done
+		case "\$url" in
+		  */latest)  cat "$td/latest.json" ;;
+		  */tarball) cp "$td/asset.tar.gz" "\$out" ;;
+		  */sums)    cp "$td/sums.txt" "\$out" ;;
+		  *) exit 22 ;;
+		esac
+	STUB
+	printf '#!/usr/bin/env bash\nexec "$@"\n' > "$td/stub/sudo"
+	chmod +x "$td/stub/"*
+	PATH="$td/stub:$PATH" FULCRUM_RELEASE_API="http://stub" run "$FULCRUM" install --from release --prefix "$td/pfx"
+	[ "$status" -eq 0 ]
+	[ -x "$td/pfx/bin/Fulcrum" ]
+	echo "$output" | grep -q "sha256 verified"
+	echo "$output" | grep -q "installed Fulcrum v9.9.9"
+}
+
+@test "FEAT-270: install --from release refuses on a non-Linux host (no prebuilt mac binary)" {
+	local stub="$BATS_TEST_TMPDIR/macuname"; mkdir -p "$stub"
+	printf '#!/usr/bin/env bash\ncase "$1" in -s) echo Darwin ;; -m) echo arm64 ;; *) echo Darwin ;; esac\n' > "$stub/uname"
+	chmod +x "$stub/uname"
+	PATH="$stub:$PATH" run "$FULCRUM" install --from release
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "only for Linux"
+}
+
+@test "FEAT-270: install help lists release, source, and docker" {
+	run "$FULCRUM" install --help
+	[ "$status" -eq 0 ]
+	for s in release source docker; do echo "$output" | grep -q "$s" || { echo "missing: $s"; return 1; }; done
+}
+
+# ===========================================================================
+# BUG-031 — fulcrum enable/config: privileged datadir/config ops via sudo
+#
+# Mirrors BUG-030 (bitcoin). The setup() sudo stub already logs its argv
+# to $CALLLOG and execs, and dscl/dseditgroup/usermod/chown are stubbed
+# (logging only), so these tests assert the *privileged call shape* of
+# the three-user service-account model rather than the EACCES literally.
+#
+# A system enable must route the system datadir at $FULCRUM_ROOT/var/lib/
+# fulcrum (not the test-only $FULCRUM_DATADIR override), so unset the
+# override for the system-mode enable tests.
+# ===========================================================================
+
+@test "BUG-031: enable (system, linux) provisions a dedicated group and joins the operator" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR
+	run "$FULCRUM" enable --system
+	[ "$status" -eq 0 ]
+	# A --user-group account so the dedicated 'fulcrum' group exists, and
+	# the invoking operator is added to it (group access, no sudo).
+	grep -q 'useradd .*--user-group .*fulcrum' "$CALLLOG"
+	grep -q 'usermod -a -G fulcrum' "$CALLLOG"
+}
+
+@test "BUG-031: enable (system, linux) owns the datadir <svc>:<svc> at 0750" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR
+	run "$FULCRUM" enable --system
+	[ "$status" -eq 0 ]
+	grep -q 'chown fulcrum:fulcrum .*var/lib/fulcrum' "$CALLLOG"
+	grep -Eq 'chmod 0750 .*var/lib/fulcrum' "$CALLLOG"
+}
+
+@test "BUG-031: enable (system) refuses to install a unit the service account can't run" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR
+	# Simulate the Homebrew-keg/dyld crash-loop: a binary that execs but
+	# fails its --version preflight (a non-traversable parent dir or an
+	# unreadable linked dylib has the same observable shape).
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$FULCRUM_FULCRUMD"
+	chmod +x "$FULCRUM_FULCRUMD"
+	run --separate-stderr "$FULCRUM" enable --system
+	[ "$status" -ne 0 ]
+	echo "$stderr" | grep -q "cannot run"
+	# Must bail BEFORE installing the unit (no silent crash-loop left behind).
+	[ ! -f "$FULCRUM_ROOT/etc/systemd/system/fulcrumd.service" ]
+}
+
+@test "BUG-031: config init (system) installs fulcrum.conf via sudo install -m 0640, not a bare redirect" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	export FULCRUM_CONFIG_DIR="$FULCRUM_ROOT/etc/fulcrum"
+	run "$FULCRUM" config init --system
+	[ "$status" -eq 0 ]
+	local conf="$FULCRUM_CONFIG_DIR/fulcrum.conf"
+	grep -Eq 'sudo install -m 0640 .*fulcrum\.conf' "$CALLLOG"
+	grep -q 'chown fulcrum:fulcrum .*fulcrum\.conf' "$CALLLOG"
+	[ -f "$conf" ]
+	grep -q '^bitcoind = ' "$conf"
+}
+
+@test "BUG-031: config init (system) fails loudly when the privileged write fails" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	export FULCRUM_CONFIG_DIR="$FULCRUM_ROOT/etc/fulcrum"
+	# Make 'sudo install …' fail so we prove the failure is detected and
+	# never reported as success.
+	cat > "$MOCKBIN/sudo" <<-STUB
+		#!/usr/bin/env bash
+		echo "sudo \$*" >> "$CALLLOG"
+		if [ "\$1" = install ]; then exit 1; fi
+		exec "\$@"
+	STUB
+	chmod +x "$MOCKBIN/sudo"
+	run "$FULCRUM" config init --system
+	[ "$status" -ne 0 ]
+	[[ "$output" != *"wrote "* ]]
+	[[ "$output" == *error* ]]
+}
+
+@test "BUG-031: enable (system, macos) creates a hidden UID-296 _fulcrum dscl account" {
+	export FULCRUM_OS=macos FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR
+	run "$FULCRUM" enable --system
+	[ "$status" -eq 0 ]
+	grep -q 'dscl . -create /Users/_fulcrum UniqueID 296' "$CALLLOG"
+	grep -q 'dscl . -create /Users/_fulcrum IsHidden 1' "$CALLLOG"
+	grep -q 'dscl . -create /Users/_fulcrum UserShell /usr/bin/false' "$CALLLOG"
+	grep -q 'dseditgroup -o edit -a .* -t user _fulcrum' "$CALLLOG"
+}
+
+@test "BUG-031: monitor (system, macos) reads the log directly via group access (no sudo)" {
+	export FULCRUM_OS=macos
+	# monitor fails fast with a hint when there's no log yet (BUG-034), so
+	# seed one (the system datadir is $FULCRUM_DATADIR via the harness).
+	mkdir -p "$FULCRUM_DATADIR"; : > "$FULCRUM_DATADIR/fulcrum.log"
+	run "$FULCRUM" monitor --system
+	[ "$status" -eq 0 ]
+	! grep -q 'sudo' "$CALLLOG"
+}
+
+@test "BUG-034: monitor errors with a hint when no log exists yet" {
+	export FULCRUM_OS=macos
+	mkdir -p "$FULCRUM_DATADIR"; rm -f "$FULCRUM_DATADIR/fulcrum.log"
+	run "$FULCRUM" monitor --system
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q 'no log yet'
+}
+
+@test "BUG-031: monitor (system, linux) uses journalctl with no sudo" {
+	export FULCRUM_OS=linux
+	run "$FULCRUM" monitor --system
+	[ "$status" -eq 0 ]
+	grep -q 'journalctl -u fulcrumd' "$CALLLOG"
+	! grep -q 'sudo journalctl' "$CALLLOG"
+}
+
+@test "BUG-031: enable usage hint shows [--user] only, prose keeps --system default" {
+	run "$FULCRUM" enable --help
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q 'usage:.*\[--user\]'
+	! echo "$output" | grep -Eq 'usage:.*--system \| --user'
+	! echo "$output" | grep -Eq 'usage:.*--user \| --system'
+	echo "$output" | grep -q -- '--system (default)'
+}
+
+# ===========================================================================
+# BUG-034 — fulcrum enable/config deployment wiring
+#
+# Five fixes from a live --system deployment that needed manual steps:
+#   1. config init --system scaffolds SYSTEM paths (datadir/cookie), not user
+#   2. the scaffold drops the removed 'fast-sync' option (fulcrumd 2.x refuses
+#      to start if present)
+#   3. enable makes the system config dir traversable by the service account
+#   4. binary resolution prefers the real Fulcrum in known system dirs over a
+#      PATH name-collision with this package's own dispatcher
+#   5. enable best-effort-joins the bitcoin service group so the svc reads the
+#      node's group-readable cookie
+# ===========================================================================
+
+@test "BUG-034: config init --system scaffolds SYSTEM datadir + system cookie, not user paths" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	export FULCRUM_CONFIG_DIR="$FULCRUM_ROOT/etc/fulcrum"
+	# The system datadir/cookie are derived from $FULCRUM_ROOT; unset the
+	# test datadir override so the mode branch is exercised.
+	unset FULCRUM_DATADIR FULCRUM_NODE_DATADIR
+	run "$FULCRUM" config init --system
+	[ "$status" -eq 0 ]
+	local conf="$FULCRUM_CONFIG_DIR/fulcrum.conf"
+	grep -q "^datadir = $FULCRUM_ROOT/var/lib/fulcrum\$" "$conf"
+	grep -q "^rpccookie = $FULCRUM_ROOT/var/lib/bitcoin/.cookie\$" "$conf"
+	# Must NOT scaffold the operator's user paths in system mode.
+	! grep -q "^datadir = $HOME/.fulcrum\$" "$conf"
+	! grep -q "$HOME/.bitcoin/.cookie" "$conf"
+}
+
+@test "BUG-034: config init (user) still scaffolds the per-user datadir + cookie" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR FULCRUM_NODE_DATADIR
+	run "$FULCRUM" config init --user
+	[ "$status" -eq 0 ]
+	local conf="$FULCRUM_CONFIG_DIR/fulcrum.conf"
+	grep -q "^datadir = $HOME/.fulcrum\$" "$conf"
+	grep -q "^rpccookie = $HOME/.bitcoin/.cookie\$" "$conf"
+}
+
+@test "BUG-034: the scaffold contains NO removed 'fast-sync' option (keeps db_mem)" {
+	export FULCRUM_NODE_OK=yes
+	run "$FULCRUM" config init
+	[ "$status" -eq 0 ]
+	local conf="$FULCRUM_CONFIG_DIR/fulcrum.conf"
+	! grep -q "fast-sync" "$conf"
+	grep -q "^db_mem = " "$conf"
+}
+
+@test "BUG-034: 'fast-sync' is no longer in the editable allow-list" {
+	"$FULCRUM" config init >/dev/null 2>&1
+	run "$FULCRUM" config set fast-sync 1024
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"allow-list"* ]]
+}
+
+@test "BUG-034: enable (system, linux) makes the config dir traversable by the svc account" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR FULCRUM_CONFIG_DIR
+	run "$FULCRUM" enable --system
+	[ "$status" -eq 0 ]
+	# Config dir owned by the service account and chmod'd traversable (0755),
+	# so the daemon can open fulcrum.conf (was 0750 root:wheel → EACCES).
+	grep -Eq 'chown fulcrum:fulcrum .*etc/fulcrum' "$CALLLOG"
+	grep -Eq 'chmod 0755 .*etc/fulcrum' "$CALLLOG"
+}
+
+@test "BUG-034: binary resolution prefers a real system Fulcrum over a PATH dispatcher shim" {
+	# Fake the package's own dispatcher leaking onto PATH as 'Fulcrum'.
+	local pathdir="$FROOT/pathbin"; mkdir -p "$pathdir"
+	printf '#!/usr/bin/env bash\necho dispatcher-shim\n' > "$pathdir/Fulcrum"
+	chmod +x "$pathdir/Fulcrum"
+	# A real Electrum server in a fake system bin dir.
+	local sysdir="$FROOT/usr-local-bin"; mkdir -p "$sysdir"
+	printf '#!/usr/bin/env bash\n:\n' > "$sysdir/Fulcrum"
+	chmod +x "$sysdir/Fulcrum"
+	# Source the daemon and resolve with the override unset; the system dir
+	# (via the test-only $FULCRUM_SYSTEM_BINDIRS knob) must win over PATH.
+	run env -u FULCRUM_FULCRUMD FULCRUM_SYSTEM_BINDIRS="$sysdir" \
+		PATH="$pathdir:$PATH" bash -c \
+		'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum/daemon"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$sysdir/Fulcrum" ]
+}
+
+@test "BUG-034: binary resolution falls back to PATH when no system Fulcrum exists" {
+	local pathdir="$FROOT/pathbin2"; mkdir -p "$pathdir"
+	printf '#!/usr/bin/env bash\n:\n' > "$pathdir/Fulcrum"
+	chmod +x "$pathdir/Fulcrum"
+	local emptydir="$FROOT/empty-sys"; mkdir -p "$emptydir"
+	run env -u FULCRUM_FULCRUMD FULCRUM_SYSTEM_BINDIRS="$emptydir" \
+		PATH="$pathdir:$PATH" bash -c \
+		'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum/daemon"
+	[ "$status" -eq 0 ]
+	[ "$output" = "$pathdir/Fulcrum" ]
+}
+
+@test "BUG-034: \$FULCRUM_FULCRUMD override beats the system-dir list" {
+	local sysdir="$FROOT/usr-local-bin3"; mkdir -p "$sysdir"
+	printf '#!/usr/bin/env bash\n:\n' > "$sysdir/Fulcrum"
+	chmod +x "$sysdir/Fulcrum"
+	run env FULCRUM_FULCRUMD=/my/override/Fulcrum FULCRUM_SYSTEM_BINDIRS="$sysdir" \
+		bash -c 'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum/daemon"
+	[ "$status" -eq 0 ]
+	[ "$output" = "/my/override/Fulcrum" ]
+}
+
+@test "BUG-034: enable (system, linux) best-effort-adds the svc to the bitcoin group when present" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR
+	# The default usermod stub succeeds → the join is recorded.
+	run "$FULCRUM" enable --system
+	[ "$status" -eq 0 ]
+	grep -q 'usermod -aG bitcoin fulcrum' "$CALLLOG"
+}
+
+@test "BUG-034: enable (system, macos) best-effort-adds the svc to the _bitcoin group" {
+	export FULCRUM_OS=macos FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR
+	run "$FULCRUM" enable --system
+	[ "$status" -eq 0 ]
+	grep -q 'dseditgroup -o edit -a _fulcrum -t user _bitcoin' "$CALLLOG"
+}
+
+@test "BUG-034: enable does NOT fail when the bitcoin group is absent" {
+	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
+	unset FULCRUM_DATADIR
+	# Make usermod fail (group absent) — enable must still succeed.
+	printf '#!/usr/bin/env bash\necho "usermod $*" >> "%s"\nexit 1\n' "$CALLLOG" > "$MOCKBIN/usermod"
+	chmod +x "$MOCKBIN/usermod"
+	run "$FULCRUM" enable --system
+	[ "$status" -eq 0 ]
+	# A hint is emitted, but enable does not abort.
+	[[ "$output" == *"could not add"* ]]
+	[ -f "$FULCRUM_ROOT/etc/systemd/system/fulcrumd.service" ]
+}
+
 # ===========================================================================
 # FEAT-057 — config + cert
 # ===========================================================================
@@ -322,6 +670,102 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	[[ "$output" == *"--force"* ]]
 	run "$FULCRUM" cert --force
 	[ "$status" -eq 0 ]
+}
+
+# ===========================================================================
+# FEAT-273 — config list/get/set/unset/path (modeled on bitcoin's FEAT-271,
+# minus the default fallback: Fulcrum has no -help default dump, so a key
+# not in the conf is an error). A temp config dir holds fulcrum.conf with
+# both spaced ('key = value') and unspaced ('key=value') lines.
+# ===========================================================================
+
+feat273_env() {
+	mkdir -p "$FULCRUM_CONFIG_DIR"
+	printf '# fulcrum.conf\ndb_mem = 2048\ntcp=0.0.0.0:50001\n' \
+		> "$FULCRUM_CONFIG_DIR/fulcrum.conf"
+}
+
+@test "FEAT-273 — config list shows the conf-set keys" {
+	feat273_env
+	run "$FULCRUM" config list
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q 'db_mem'
+	echo "$output" | grep -q 'tcp'
+}
+
+@test "FEAT-273 — config get returns the conf value (spaced and unspaced)" {
+	feat273_env
+	run "$FULCRUM" config get db_mem
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q '2048'
+	run "$FULCRUM" config get tcp
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q '0.0.0.0:50001'
+}
+
+@test "FEAT-273 — config get errors for an unknown key (no Fulcrum default)" {
+	feat273_env
+	run "$FULCRUM" config get totallyboguskey
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"no default source for Fulcrum"* ]]
+}
+
+@test "FEAT-273 — config set replaces/adds a key and warns to restart" {
+	feat273_env
+	run "$FULCRUM" config set db_mem 4096
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -qi 'restart'
+	grep -qE '^db_mem = 4096' "$FULCRUM_CONFIG_DIR/fulcrum.conf"
+}
+
+@test "FEAT-273 — config unset removes a key" {
+	feat273_env
+	"$FULCRUM" config set banner hi >/dev/null 2>&1
+	"$FULCRUM" config unset banner
+	! grep -qE '^[[:space:]]*banner[[:space:]]*=' "$FULCRUM_CONFIG_DIR/fulcrum.conf"
+}
+
+@test "FEAT-273 — config path prints the conf file" {
+	feat273_env
+	run "$FULCRUM" config path
+	[ "$status" -eq 0 ]
+	[ "$output" = "$FULCRUM_CONFIG_DIR/fulcrum.conf" ]
+}
+
+# ---------------------------------------------------------------------------
+# FEAT-298: fulcrum config list = TSV (NAME<TAB>VALUE<TAB>DESCRIPTION),
+# mirroring bitcoin's FEAT-271. Fulcrum has no --help default dump, so
+# VALUE is always the conf value and DESCRIPTION comes from a built-in
+# map (empty for keys not in it). Hermetic via FULCRUM_CONFIG_DIR.
+# ---------------------------------------------------------------------------
+feat298_env() {
+	mkdir -p "$FULCRUM_CONFIG_DIR"
+	printf '# fulcrum.conf\ndb_mem = 2048\ntcp=0.0.0.0:50001\nsome_custom_key = 7\n' \
+		> "$FULCRUM_CONFIG_DIR/fulcrum.conf"
+}
+
+@test "FEAT-298 — config list is TSV (name/value/description) from the conf + desc map" {
+	feat298_env
+	# fulcrum's setup() doesn't export SELF_QUIET, so a stderr info line may
+	# merge into $output; the awk field tests skip it (it has no tabs).
+	run "$FULCRUM" config list
+	[ "$status" -eq 0 ]
+	# Header row is present, tab-separated:
+	echo "$output" | awk -F'\t' '$1=="NAME"&&$2=="VALUE"&&$3=="DESCRIPTION"{f=1} END{exit !f}'
+	# conf value + a description from the built-in map:
+	echo "$output" | awk -F'\t' '$1=="db_mem"&&$2=="2048"&&$3~/memory cache/{f=1} END{exit !f}'
+	# unspaced 'key=value' line is parsed the same way:
+	echo "$output" | awk -F'\t' '$1=="tcp"&&$2=="0.0.0.0:50001"{f=1} END{exit !f}'
+	# a key not in the map gets an empty description (3 fields, blank 3rd):
+	echo "$output" | awk -F'\t' '$1=="some_custom_key"&&$2=="7"&&$3==""{f=1} END{exit !f}'
+}
+
+@test "FEAT-298 — config list --set is accepted and lists the conf-set keys" {
+	feat298_env
+	run "$FULCRUM" config list --set
+	[ "$status" -eq 0 ]
+	echo "$output" | awk -F'\t' '$1=="NAME"{f=1} END{exit !f}'
+	echo "$output" | awk -F'\t' '$1=="db_mem"&&$2=="2048"{f=1} END{exit !f}'
 }
 
 # ===========================================================================

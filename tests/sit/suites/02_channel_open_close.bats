@@ -15,7 +15,7 @@ teardown() { sit_teardown; }
 
 @test "channel close + pending shows it closing" {
 	sit_open_channel
-	local cid; cid=$(lightning channels | awk 'NR==2{print $1}')
+	local cid; cid=$(lightning channel list | awk 'NR==2{print $1}')
 	run lightning channel close "$cid"
 	[ "$status" -eq 0 ]
 	sit_mine 1

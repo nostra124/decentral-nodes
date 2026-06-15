@@ -258,7 +258,7 @@ shopt -s extglob
 # A wallet is a per-name git repo at
 # $XDG_DATA_HOME/bitcoin/wallets/<name>/ holding the *signing context*
 # (config, descriptors, ledger). The seed phrase lives in `secret`, not
-# here — `bitcoin wallet new` calls `secret put <name>/seed` with the
+# here — `bitcoin wallet new` calls `secret set <name>/seed` with the
 # generated BIP-39 mnemonic so the wallet repo can be pushed (FEAT-011)
 # without leaking the seed.
 # ---------------------------------------------------------------------------
@@ -2239,11 +2239,13 @@ command:price() {
 			cat <<-ENDHELP
 			Usage: $SELF price <subcommand>
 
-			  get <YYYY-MM-DD>      EUR per BTC for the date, read from
-			                       the local cache. Errors (pointing at
-			                       'price fetch') if the date isn't cached
-			                       — reports must be reproducible, so there
-			                       are no silent network fetches here.
+			  get [<YYYY-MM-DD>]   With a date: EUR per BTC for the date,
+			                       read from the local cache. Errors
+			                       (pointing at 'price fetch') if the date
+			                       isn't cached — reports must be
+			                       reproducible, so no silent network
+			                       fetches. Without a date: the current
+			                       spot price (a live source query).
 			  fetch [--from D] [--to D]
 			                       Populate the cache from the active
 			                       source for the date range (default:
@@ -2275,8 +2277,15 @@ help:price() {
 price:get() {
 	local date="${1:-}"
 	if [ -z "$date" ]; then
-		error "price get: usage: price get <YYYY-MM-DD>"
-		return 2
+		# FEAT-266: no date → the current spot price (live). The dated
+		# form stays cache-only for reproducible reports; "now" is
+		# inherently a live value, so it queries the active source.
+		local source; source="$(price:_active_source)"
+		case "$source" in
+			coingecko) price:_spot_coingecko; return $? ;;
+			*) error "price get: live spot price is only supported for the coingecko source (active: $source); pass a date to read $source from the cache"
+			   return 2 ;;
+		esac
 	fi
 	if ! price:_valid_date "$date"; then
 		error "price get: '$date' is not a valid ISO-8601 date (YYYY-MM-DD)"
@@ -2336,6 +2345,23 @@ price:_cache_put() {
 	fi
 	printf '%s\t%s\t%s\n' "$date" "$eur" "$source" >> "$cache"
 	return 0
+}
+
+# Fetch the CURRENT spot EUR/BTC from coingecko's simple-price
+# endpoint (FEAT-266). Echoes the price; non-zero on failure.
+price:_spot_coingecko() {
+	local url="$BITCOIN_COINGECKO_URL/api/v3/simple/price?ids=bitcoin&vs_currencies=eur"
+	local out eur
+	if ! out="$(curl -sfL "$url")"; then
+		error "price get: coingecko GET $url failed (curl exit $?)"
+		return 1
+	fi
+	eur="$(printf '%s' "$out" | jq -r '.bitcoin.eur // empty' 2>/dev/null)"
+	if [[ ! "$eur" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+		error "price get: coingecko spot response missing .bitcoin.eur"
+		return 2
+	fi
+	printf '%s\n' "$eur"
 }
 
 # Fetch one date's EUR/BTC from the coingecko historical endpoint.
@@ -2475,7 +2501,7 @@ wallet:help() {
 
 	  new <name>        create a new wallet at $(wallet:_root)/<name>
 	                    generates a BIP-39 mnemonic and stores it via
-	                    'secret put <name>/seed'
+	                    'secret set <name>/seed'
 	  watch <name> <xpub>
 	                    create a watch-only wallet from an account xpub
 	                    (m/84h/0h/0h). Derives addresses without a seed.
@@ -4169,8 +4195,15 @@ wallet:new() {
 		return 8
 	fi
 
-	if ! printf '%s\n' "$mnemonic" | secret put "$name/seed"; then
-		error "wallet new: 'secret put $name/seed' failed"
+	# The seed lives in `secret`, not the wallet repo. `secret set` requires
+	# the store to exist, so create it first (idempotent). A missing GPG
+	# identity surfaces here — the operator runs `secret setup` once.
+	if ! secret init "$name" >/dev/null 2>&1; then
+		error "wallet new: 'secret init $name' failed (run 'secret setup' once to configure a GPG identity)"
+		return 9
+	fi
+	if ! printf '%s\n' "$mnemonic" | secret set "$name/seed"; then
+		error "wallet new: 'secret set $name/seed' failed"
 		return 9
 	fi
 

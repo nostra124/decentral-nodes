@@ -64,13 +64,13 @@ On `lightning daemon install --system`:
 
 | User         | Role                                                       |
 |--------------|------------------------------------------------------------|
-| `clightning` | runs `lightningd`; owns `/var/lib/clightning/`             |
+| `lightning`  | runs `lightningd`; owns `/var/lib/lightning/`              |
 | operator     | runs `lightning` CLI; owns the wallet repo + secret store; |
-|              | added to group `clightning` on install                     |
+|              | added to group `lightning` on install                      |
 | `www-data`   | runs Apache + the CGI scripts; bridges to operator via     |
 |              | a narrow sudoers fragment                                  |
 
-The RPC socket is mode 0660, group `clightning`. Apache is
+The RPC socket is mode 0660, group `lightning`. Apache is
 not in that group; the CGI scripts cross the privilege
 boundary via `sudo -u <operator> lightning api-* <args>`
 with argument-shape validation enforced both in sudoers and

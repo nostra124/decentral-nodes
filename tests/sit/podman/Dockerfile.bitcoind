@@ -19,12 +19,16 @@ RUN arch="$(dpkg --print-architecture)" && \
     ln -s "/opt/bitcoin-${BITCOIN_VERSION}/bin/bitcoin-cli" /usr/local/bin/bitcoin-cli && \
     rm /tmp/bitcoin.tar.gz
 
-# bitcoin.conf for regtest daemon accessible from the host
+# bitcoin.conf for regtest daemon accessible from the host. Bitcoin Core 27+
+# rejects network-scoped options (rpcbind/rpcallowip/fallbackfee) in the global
+# section ("only applied on regtest network when in [regtest] section") and
+# *exits*, so they live under [regtest] (BUG-046).
 RUN mkdir -p /root/.bitcoin && printf '%s\n' \
     regtest=1 \
     server=1 \
     rpcuser=regtest \
     rpcpassword=regtest \
+    '[regtest]' \
     rpcbind=0.0.0.0 \
     rpcallowip=0.0.0.0/0 \
     fallbackfee=0.0001 \

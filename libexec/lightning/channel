@@ -171,11 +171,14 @@ cmd_open() {
 cmd_close() {
 	[ $# -lt 1 ] && { echo "usage: lightning channel close <channel-id>" >&2; exit 1; }
 	local id="$1"
-	result=$(cli close "$id")
-	type=$(jq -r .type <<<"$result")
+	# lightning-cli streams `# …` progress notices to stdout during the
+	# mutual-close fee negotiation; strip them so jq sees only the JSON reply
+	# (otherwise `jq .type` dies on "Invalid numeric literal"). BUG-042.
+	result=$(cli close "$id" | grep -v '^#')
+	type=$(jq -r '.type // "-"' <<<"$result")
 	echo "ok"
 	echo "type: $type"
-	echo "txid: $(jq -r '.txid // "-"' <<<"$result")"
+	echo "txid: $(jq -r '(.txid // .txs[0]) // "-"' <<<"$result")"
 }
 
 cmd_force_close() {

@@ -5,10 +5,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=@BITCOIND@ -datadir=@DATADIR@ -conf=@DATADIR@/bitcoin.conf -pid=@DATADIR@/bitcoind.pid
+ExecStart=@BITCOIND@ -datadir=@DATADIR@ -conf=@CONF@ -pid=@PIDFILE@ @CHAIN@
 Type=simple
 User=@USER@
-PIDFile=@DATADIR@/bitcoind.pid
+PIDFile=@PIDFILE@
 Restart=on-failure
 TimeoutStopSec=600
 

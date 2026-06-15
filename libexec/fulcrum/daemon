@@ -1,0 +1,701 @@
+#!/usr/bin/env bash
+
+############################################################################
+# fulcrum service lifecycle (FEAT-056).
+#
+# install / enable / disable / start / stop / monitor / space — modelled
+# directly on libexec/bitcoin/daemon (FEAT-034). One file holds every
+# lifecycle verb as a `command:` function; the top-level entries
+# (libexec/fulcrum/enable, …/start, …) are symlinks to this file, so
+# `fulcrum enable` dispatches here by SELF (no shared library, §4/§5).
+#
+# Every privileged step routes through $SUDO; every absolute system path
+# through $FULCRUM_ROOT; the OS family through $FULCRUM_OS — so the bats
+# matrix can mock the init system and redirect writes into a temp dir.
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+has() { type -t "$1:$2" | grep -q function; }
+
+# ---------------------------------------------------------------------------
+# Environment / path helpers (keyed to test overrides).
+# ---------------------------------------------------------------------------
+
+# OS family: "linux" | "macos". $FULCRUM_OS overrides uname.
+daemon:_os() {
+	local os="${FULCRUM_OS:-}"
+	if [ -z "$os" ]; then
+		case "$(uname -s)" in
+			Linux)  os=linux ;;
+			Darwin) os=macos ;;
+			*)      os=unknown ;;
+		esac
+	fi
+	printf '%s\n' "$os"
+}
+
+# DESTDIR-style prefix for system-level absolute paths (default none).
+daemon:_root() { printf '%s' "${FULCRUM_ROOT:-}"; }
+
+# Absolute path to the Fulcrum (Electrum server) binary.
+#
+# BUG-034: a plain `command -v Fulcrum` is unsafe — this combined package's
+# own dispatcher is often symlinked onto PATH as ~/.local/bin/Fulcrum (a
+# bash script), so PATH lookup finds the dispatcher instead of the real
+# Electrum server and the preflight runs the wrong binary. Resolution order:
+#   1. $FULCRUM_FULCRUMD            explicit override (highest priority)
+#   2. known system install dirs    where the real server actually lands
+#   3. PATH (Fulcrum, then fulcrum) last resort
+daemon:_fulcrumd() {
+	if [ -n "${FULCRUM_FULCRUMD:-}" ]; then
+		printf '%s\n' "$FULCRUM_FULCRUMD"
+		return 0
+	fi
+	# $FULCRUM_SYSTEM_BINDIRS overrides the known-dir list (test harness);
+	# defaults to the real install locations of the Electrum server.
+	local dirs="${FULCRUM_SYSTEM_BINDIRS:-/usr/local/bin /opt/local/bin /opt/homebrew/bin}"
+	local d cand
+	for d in $dirs; do
+		cand="$d/Fulcrum"
+		if [ -x "$cand" ]; then printf '%s\n' "$cand"; return 0; fi
+	done
+	command -v Fulcrum 2>/dev/null || command -v fulcrum 2>/dev/null
+}
+
+# Directory holding the unit-file templates.
+daemon:_units_dir() {
+	if [ -n "${SELF_UNITS:-}" ]; then
+		printf '%s\n' "$SELF_UNITS"
+		return 0
+	fi
+	(cd "$(dirname "$0")/../../share/bitcoin/units" 2>/dev/null && pwd)
+}
+
+# Index data directory (the Fulcrum DB) for a mode. $FULCRUM_DATADIR wins.
+daemon:_datadir() {
+	local mode=$1
+	if [ -n "${FULCRUM_DATADIR:-}" ]; then printf '%s\n' "$FULCRUM_DATADIR"; return 0; fi
+	if [ "$mode" = system ]; then
+		printf '%s/var/lib/fulcrum\n' "$(daemon:_root)"
+	elif [ "$(daemon:_os)" = macos ]; then
+		printf '%s/Library/Application Support/Fulcrum\n' "$HOME"
+	else
+		printf '%s/.fulcrum\n' "$HOME"
+	fi
+}
+
+# Config directory (holds fulcrum.conf + cert/key). $FULCRUM_CONFIG_DIR wins.
+daemon:_config_dir() {
+	local mode=$1
+	if [ -n "${FULCRUM_CONFIG_DIR:-}" ]; then printf '%s\n' "$FULCRUM_CONFIG_DIR"; return 0; fi
+	if [ "$mode" = system ]; then
+		printf '%s/etc/fulcrum\n' "$(daemon:_root)"
+	elif [ "$(daemon:_os)" = macos ]; then
+		printf '%s/Library/Application Support/Fulcrum\n' "$HOME"
+	else
+		printf '%s/fulcrum\n' "${XDG_CONFIG_HOME:-$HOME/.config}"
+	fi
+}
+
+daemon:_config_file() { printf '%s/fulcrum.conf\n' "$(daemon:_config_dir "$1")"; }
+
+# Service account the daemon runs as. macOS uses the '_'-prefixed hidden
+# account convention; both OSes get a dedicated same-named group (the
+# account's primary group), so files the daemon writes are reachable by
+# the operator once they join it (BUG-031, mirrors libexec/bitcoin/daemon).
+daemon:_user() {
+	local mode=$1
+	if [ "$mode" != system ]; then
+		printf '%s\n' "${USER:-$(id -un)}"
+	elif [ "$(daemon:_os)" = macos ]; then
+		printf '_fulcrum\n'
+	else
+		printf 'fulcrum\n'
+	fi
+}
+
+# Create the dedicated service account + group (idempotent). macOS gets a
+# hidden account pinned in the system UID range (UID/GID 296, with a
+# collision-increment fallback); Linux a --system user with a matching
+# --user-group. Relies on the caller's $SUDO. (BUG-031.)
+daemon:_ensure_account() {
+	local os=$1 user=$2 datadir=$3
+	id "$user" >/dev/null 2>&1 && return 0
+	info "creating system user '$user'"
+	if [ "$os" = macos ]; then
+		local uid=296 gid
+		while dscl . -list /Users UniqueID 2>/dev/null | awk '{print $2}' | grep -qx "$uid"; do
+			uid=$((uid + 1))
+		done
+		gid=$uid
+		$SUDO dscl . -create "/Groups/$user" PrimaryGroupID "$gid" || return 1
+		$SUDO dscl . -create "/Users/$user" UniqueID "$uid"
+		$SUDO dscl . -create "/Users/$user" PrimaryGroupID "$gid"
+		$SUDO dscl . -create "/Users/$user" UserShell /usr/bin/false
+		$SUDO dscl . -create "/Users/$user" NFSHomeDirectory "$datadir"
+		$SUDO dscl . -create "/Users/$user" RealName "Fulcrum Electrum server"
+		$SUDO dscl . -create "/Users/$user" IsHidden 1
+	else
+		$SUDO useradd --system --no-create-home --user-group \
+			--shell /usr/sbin/nologin "$user" || return 1
+	fi
+}
+
+# Add the invoking operator to the service group so they reach the datadir
+# (config, log) without sudo. Takes effect on next login. (BUG-031.)
+daemon:_join_group() {
+	local os=$1 group=$2 op="${USER:-$(id -un)}"
+	if [ "$os" = macos ]; then
+		$SUDO dseditgroup -o edit -a "$op" -t user "$group" 2>/dev/null || true
+	else
+		$SUDO usermod -a -G "$group" "$op" 2>/dev/null || true
+	fi
+	info "added '$op' to group '$group'; log out and back in for membership to take effect"
+}
+
+# Add the service account to bitcoind's service group so it can read the
+# node's group-readable cookie (FEAT-274 / BUG-034). The bitcoin group is
+# '_bitcoin' on macOS, 'bitcoin' on Linux. Soft system-group op (not a call
+# to the bitcoin command — allowed for the combined stack, §4). Best-effort:
+# if the group does not exist (bitcoind not installed system-wide), info a
+# hint and continue — never fail enable.
+daemon:_join_bitcoin_group() {
+	local os=$1 svc=$2 bgroup
+	if [ "$os" = macos ]; then bgroup=_bitcoin; else bgroup=bitcoin; fi
+	if [ "$os" = macos ]; then
+		if $SUDO dseditgroup -o edit -a "$svc" -t user "$bgroup" 2>/dev/null; then
+			info "added '$svc' to bitcoin group '$bgroup' (reads bitcoind's cookie)"
+		else
+			info "could not add '$svc' to bitcoin group '$bgroup' (not present?); if Fulcrum can't read bitcoind's cookie, add it by hand"
+		fi
+	else
+		if $SUDO usermod -aG "$bgroup" "$svc" 2>/dev/null; then
+			info "added '$svc' to bitcoin group '$bgroup' (reads bitcoind's cookie)"
+		else
+			info "could not add '$svc' to bitcoin group '$bgroup' (not present?); if Fulcrum can't read bitcoind's cookie, add it by hand"
+		fi
+	fi
+}
+
+# Preflight: verify the service account can actually RUN the binary before
+# we install a launchd/systemd unit that would otherwise crash-loop
+# silently. Running `<bin> --version` as the service user exercises the
+# whole chain — the exec bit, every parent directory's traverse bit, and
+# the dynamic-library load — which a bare `test -x` misses. The classic
+# failure is a Homebrew keg under /opt/homebrew left non-world-readable by
+# a restrictive umask (launchd reports EX_CONFIG / a dyld errno=13 and
+# loops forever with an empty log). Fulcrum's `--version` prints its
+# version banner and exits 0 without starting the server. (BUG-031.)
+daemon:_check_runnable() {
+	local user=$1 bin=$2
+	$SUDO -u "$user" "$bin" --version >/dev/null 2>&1 && return 0
+	error "enable: service account '$user' cannot run '$bin'"
+	error "  it execs but fails — check permissions on the binary, a parent"
+	error "  directory, or a linked library (a restrictive umask on a"
+	error "  Homebrew keg is the usual cause; launchd would crash-loop with"
+	error "  EX_CONFIG / a dyld errno=13 and an empty log)."
+	error "  fix: make the install tree readable+traversable by '$user', e.g."
+	error "      sudo chmod -R o+rX \"\$(brew --prefix)\"/{Cellar,opt,lib}"
+	return 1
+}
+
+# Installed unit-file path for os × mode.
+daemon:_unit_path() {
+	local os=$1 mode=$2
+	case "$os:$mode" in
+		linux:user)
+			printf '%s/systemd/user/fulcrumd.service\n' "${XDG_CONFIG_HOME:-$HOME/.config}" ;;
+		linux:system)
+			printf '%s/etc/systemd/system/fulcrumd.service\n' "$(daemon:_root)" ;;
+		macos:user)
+			printf '%s/Library/LaunchAgents/org.fulcrum.fulcrumd.plist\n' "$HOME" ;;
+		macos:system)
+			printf '%s/Library/LaunchDaemons/org.fulcrum.fulcrumd.plist\n' "$(daemon:_root)" ;;
+		*) return 1 ;;
+	esac
+}
+
+# Render a unit from its template, substituting @FULCRUMD@ / @DATADIR@ /
+# @CONFIG@ / @USER@. In --user mode the privilege-drop directive is
+# stripped (a `systemctl --user` unit may not carry User=, a LaunchAgent
+# has no UserName).
+daemon:_render() {
+	local os=$1 mode=$2 datadir=$3 config=$4 user=$5 fulcrumd=$6 tmpl rendered
+	if [ "$os" = macos ]; then tmpl="$(daemon:_units_dir)/fulcrumd.plist"
+	else tmpl="$(daemon:_units_dir)/fulcrumd.service"; fi
+	[ -r "$tmpl" ] || { error "template not found: $tmpl"; return 1; }
+	rendered="$(sed \
+		-e "s|@FULCRUMD@|$fulcrumd|g" \
+		-e "s|@DATADIR@|$datadir|g" \
+		-e "s|@CONFIG@|$config|g" \
+		-e "s|@USER@|$user|g" "$tmpl")"
+	if [ "$mode" = user ]; then
+		if [ "$os" = macos ]; then
+			rendered="$(printf '%s\n' "$rendered" | sed '/<key>UserName<\/key>/{N;d;}')"
+		else
+			rendered="$(printf '%s\n' "$rendered" | sed '/^User=/d')"
+		fi
+	fi
+	printf '%s\n' "$rendered"
+}
+
+# Is the local bitcoind RPC reachable? $FULCRUM_NODE_OK forces the answer
+# (yes/no) for the test matrix; otherwise probe the RPC port over TCP.
+daemon:_node_reachable() {
+	case "${FULCRUM_NODE_OK:-}" in
+		yes|1|true)  return 0 ;;
+		no|0|false)  return 1 ;;
+	esac
+	local hp="${FULCRUM_RPC_ADDR:-127.0.0.1:8332}" host port
+	host="${hp%:*}"; port="${hp##*:}"
+	(exec 3<>"/dev/tcp/$host/$port") 2>/dev/null && return 0
+	return 1
+}
+
+# Resolve [--user|--system] from an argument list. Default is --system
+# (FEAT-262): the deployment-ready posture; --user is the explicit
+# rootless / personal / CI opt-in.
+daemon:_mode() {
+	local mode=system a
+	for a in "$@"; do
+		case "$a" in
+			--system) mode=system ;;
+			--user)   mode=user ;;
+		esac
+	done
+	printf '%s\n' "$mode"
+}
+
+# macOS launchctl domain for a mode.
+daemon:_domain() {
+	if [ "$1" = system ]; then printf 'system\n'; else printf 'gui/%s\n' "$(id -u)"; fi
+}
+
+# ---------------------------------------------------------------------------
+# install (FEAT-056 AC6)
+# ---------------------------------------------------------------------------
+
+daemon:_need() {
+	command -v "$1" >/dev/null 2>&1 && return 0
+	error "install: required tool '$1' not found"; return 1
+}
+
+# Default install source by host OS: Linux ships prebuilt release
+# binaries; macOS ships none (Fulcrum has no mac build), so it builds
+# from source.
+daemon:_default_install_source() {
+	case "$(uname -s)" in
+		Linux) echo release ;;
+		*)     echo source ;;
+	esac
+}
+
+# --from release: download the prebuilt Fulcrum binary for this Linux
+# host from a GitHub release, verify its SHA256, and install Fulcrum +
+# FulcrumAdmin into <prefix>/bin. $FULCRUM_RELEASE_API overrides the
+# GitHub API base (test harness).
+daemon:_install_release() {
+	local prefix="$1" tag="$2" os arch api json url name work
+	case "$(uname -s)" in
+		Linux) os=linux ;;
+		*) error "install: prebuilt Fulcrum binaries exist only for Linux; use --from source on $(uname -s)"; return 1 ;;
+	esac
+	case "$(uname -m)" in
+		aarch64|arm64) arch=arm64 ;;
+		x86_64|amd64)  arch=x86_64 ;;
+		*) error "install: no prebuilt Fulcrum for arch '$(uname -m)'; use --from source"; return 1 ;;
+	esac
+	local tool; for tool in curl jq tar sha256sum; do daemon:_need "$tool" || return 1; done
+	api="${FULCRUM_RELEASE_API:-https://api.github.com/repos/cculianu/Fulcrum/releases}"
+	if [ -n "$tag" ]; then json="$(curl -sfL "$api/tags/$tag")"
+	else json="$(curl -sfL "$api/latest")"; fi
+	[ -n "$json" ] || { error "install: cannot reach the Fulcrum release API"; return 1; }
+	[ -n "$tag" ] || tag="$(printf '%s' "$json" | jq -r '.tag_name')"
+	name="Fulcrum-${tag#v}-${arch}-${os}.tar.gz"
+	url="$(printf '%s' "$json" | jq -r --arg n "$name" '.assets[]|select(.name==$n)|.browser_download_url' | head -1)"
+	[ -n "$url" ] && [ "$url" != null ] || { error "install: release asset '$name' not found in $tag"; return 1; }
+	work="$(mktemp -d)"
+	info "downloading $name ($tag)"
+	curl -sfL "$url" -o "$work/$name" || { error "install: download failed: $url"; rm -rf "$work"; return 1; }
+	# SHA256 verify against the release shasums file (best-effort).
+	local sname="Fulcrum-${tag#v}-shasums.txt" surl want got
+	surl="$(printf '%s' "$json" | jq -r --arg n "$sname" '.assets[]|select(.name==$n)|.browser_download_url' | head -1)"
+	if [ -n "$surl" ] && [ "$surl" != null ] && curl -sfL "$surl" -o "$work/sums" 2>/dev/null; then
+		want="$(awk -v n="$name" 'index($2,n){print $1}' "$work/sums" | head -1)"
+		got="$(sha256sum "$work/$name" | awk '{print $1}')"
+		[ -z "$want" ] || [ "$want" = "$got" ] || { error "install: SHA256 mismatch for $name"; rm -rf "$work"; return 1; }
+		[ -n "$want" ] && info "sha256 verified"
+	else
+		warn "install: shasums unavailable; skipping checksum verification"
+	fi
+	tar -xzf "$work/$name" -C "$work" || { error "install: extract failed"; rm -rf "$work"; return 1; }
+	local src admin; src="$(find "$work" -type f -name Fulcrum -perm -u+x 2>/dev/null | head -1)"
+	[ -n "$src" ] || { error "install: Fulcrum binary not found in archive"; rm -rf "$work"; return 1; }
+	sudo install -m 0755 "$src" "$prefix/bin/Fulcrum" || { error "install: cannot install to $prefix/bin"; rm -rf "$work"; return 1; }
+	admin="$(find "$work" -type f -name FulcrumAdmin 2>/dev/null | head -1)"
+	[ -n "$admin" ] && sudo install -m 0755 "$admin" "$prefix/bin/FulcrumAdmin"
+	rm -rf "$work"
+	info "installed Fulcrum $tag to $prefix/bin"
+}
+
+# --from source: build Fulcrum (C++/Qt5). $FULCRUM_SOURCE_REPO overrides
+# the upstream URL (test harness).
+daemon:_install_source() {
+	local prefix="$1" tag="$2" repo work tool
+	for tool in git make qmake; do
+		daemon:_need "$tool" || { [ "$tool" = qmake ] && error "  Fulcrum needs Qt5 (qmake): 'brew install qt@5' / 'port install qt5' / apt 'qtbase5-dev qttools5-dev-tools', then add Qt's bin to PATH"; return 1; }
+	done
+	repo="${FULCRUM_SOURCE_REPO:-https://github.com/cculianu/Fulcrum}"
+	work="$(mktemp -d)"
+	# shellcheck disable=SC2086
+	git clone --depth 1 ${tag:+--branch} ${tag:+"$tag"} "$repo" "$work/Fulcrum" \
+		|| { error "install: git clone of '$repo' failed"; rm -rf "$work"; return 1; }
+	(
+		cd "$work/Fulcrum" || exit 1
+		info "building Fulcrum ${tag:-HEAD} (C++/Qt5 — this takes a while)"
+		qmake Fulcrum.pro && make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
+	) || { error "install: source build failed (need Qt5 + rocksdb dev libraries)"; rm -rf "$work"; return 1; }
+	sudo install -m 0755 "$work/Fulcrum/Fulcrum" "$prefix/bin/Fulcrum" \
+		|| { error "install: cannot install to $prefix/bin"; rm -rf "$work"; return 1; }
+	[ -f "$work/Fulcrum/FulcrumAdmin" ] && sudo install -m 0755 "$work/Fulcrum/FulcrumAdmin" "$prefix/bin/FulcrumAdmin"
+	rm -rf "$work"
+	info "installed Fulcrum to $prefix/bin (built from source)"
+}
+
+help:install() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF install [--from release|source|docker] [--tag <v>] [--prefix <path>]
+
+	  Install the Fulcrum server binary. The default is chosen from the
+	  host: Linux pulls a prebuilt release; macOS builds from source
+	  (Fulcrum ships no macOS binary).
+	    release  download + SHA256-verify the prebuilt binary from
+	             github.com/cculianu/Fulcrum/releases (Linux only)
+	    source   clone + build (C++/Qt5; needs Qt5 + rocksdb dev libs)
+	    docker   pull the cculianu/fulcrum image
+	  --tag and --prefix apply to release/source (default prefix
+	  /usr/local).
+	ENDHELP
+}
+
+command:install() {
+	local source="" tag="" prefix="/usr/local"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--from)     source="$2"; shift 2 ;;
+			--from=*)   source="${1#--from=}"; shift ;;
+			--tag)      tag="$2"; shift 2 ;;
+			--tag=*)    tag="${1#--tag=}"; shift ;;
+			--prefix)   prefix="$2"; shift 2 ;;
+			--prefix=*) prefix="${1#--prefix=}"; shift ;;
+			-h|--help|help) help:install; return 0 ;;
+			*) warn "install: unknown argument '$1'"; return 1 ;;
+		esac
+	done
+	[ -n "$source" ] || source="$(daemon:_default_install_source)"
+	case "$source" in
+		release) daemon:_install_release "$prefix" "$tag" ;;
+		source)  daemon:_install_source  "$prefix" "$tag" ;;
+		docker)
+			daemon:_need docker || return 1
+			docker pull cculianu/fulcrum || { error "install: 'docker pull cculianu/fulcrum' failed"; return 1; } ;;
+		*)
+			error "install: unknown source '$source' (accepted: release, source, docker)"
+			return 1 ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# enable / disable (FEAT-056 AC1/AC2/AC3)
+# ---------------------------------------------------------------------------
+
+help:enable() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF enable [--user]
+
+	  Render a Fulcrum service unit from share/bitcoin/units/, install
+	  it, and bring the server up. --system (default) runs it as a
+	  dedicated 'fulcrum' account (needs root) and adds the operator to
+	  its group; --user installs a rootless per-user service. Fails if
+	  the local bitcoind RPC is unreachable — Fulcrum cannot index
+	  without it.
+	ENDHELP
+}
+
+command:enable() {
+	local mode=system
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user)         mode=user ;;
+			--system)       mode=system ;;
+			-h|--help|help) help:enable; return 0 ;;
+			*) warn "enable: unknown argument '$1'"; return 1 ;;
+		esac
+		shift
+	done
+
+	local os; os="$(daemon:_os)"
+	case "$os" in linux|macos) ;; *)
+		error "enable: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+
+	local fulcrumd; fulcrumd="$(daemon:_fulcrumd)"
+	if [ -z "$fulcrumd" ]; then
+		error "enable: no 'Fulcrum' on PATH; run 'fulcrum install' first"
+		return 1
+	fi
+
+	# Fulcrum cannot index without bitcoind — refuse loudly (AC2).
+	if ! daemon:_node_reachable; then
+		error "enable: bitcoind RPC unreachable at ${FULCRUM_RPC_ADDR:-127.0.0.1:8332}; start bitcoind first"
+		return 1
+	fi
+
+	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
+	local datadir config user unit
+	datadir="$(daemon:_datadir "$mode")"
+	config="$(daemon:_config_file "$mode")"
+	user="$(daemon:_user "$mode")"
+	unit="$(daemon:_unit_path "$os" "$mode")" \
+		|| { error "enable: no unit path for $os/$mode"; return 1; }
+
+	# --system: dedicated service account + group; the operator joins the
+	# group so they read config/log without sudo (three-user model, mirrors
+	# the bitcoin/lightning daemons — BUG-031).
+	local group="$user"
+	if [ "$mode" = system ]; then
+		daemon:_ensure_account "$os" "$user" "$datadir" \
+			|| { error "enable: failed to provision service account '$user'"; return 1; }
+		daemon:_join_group "$os" "$group"
+		# BUG-034: also add the service account to bitcoind's group so it can
+		# read the node's group-readable cookie (FEAT-274). Best-effort.
+		daemon:_join_bitcoin_group "$os" "$user"
+		# Refuse to install a unit the service account can't actually run.
+		daemon:_check_runnable "$user" "$fulcrumd" || return 1
+	fi
+
+	$SUDO mkdir -p "$datadir" \
+		|| { error "enable: cannot create data dir '$datadir'"; return 1; }
+	local config_dir; config_dir="$(dirname "$config")"
+	$SUDO mkdir -p "$config_dir" \
+		|| { error "enable: cannot create config dir '$config_dir'"; return 1; }
+	# State dir: owned by the service account, group-readable (0750) so the
+	# operator (a group member) can reach it; world gets no access.
+	if [ "$mode" = system ]; then
+		$SUDO chmod 0750 "$datadir" 2>/dev/null
+		$SUDO chown "$user:$group" "$datadir" 2>/dev/null
+		# BUG-034: the config dir was left 0750 root:wheel, so the service
+		# account got "Unable to open config file" (it couldn't traverse the
+		# dir). Own it by the service account and keep it group-traversable so
+		# both the daemon and the operator (a group member) can read the conf.
+		$SUDO chown "$user:$group" "$config_dir" 2>/dev/null
+		$SUDO chmod 0755 "$config_dir" 2>/dev/null
+	fi
+
+	if [ ! -f "$config" ]; then
+		warn "enable: no config at '$config' yet; run 'fulcrum config init' to create one"
+	fi
+
+	local tmp; tmp="$(mktemp)"
+	daemon:_render "$os" "$mode" "$datadir" "$config" "$user" "$fulcrumd" > "$tmp" \
+		|| { rm -f "$tmp"; return 1; }
+	$SUDO mkdir -p "$(dirname "$unit")" \
+		|| { rm -f "$tmp"; error "enable: cannot create unit dir"; return 1; }
+	$SUDO install -m 0644 "$tmp" "$unit" \
+		|| { rm -f "$tmp"; error "enable: cannot install unit '$unit'"; return 1; }
+	rm -f "$tmp"
+	info "installed $unit"
+
+	if [ "$os" = macos ]; then
+		local domain; domain="$(daemon:_domain "$mode")"
+		$SUDO launchctl bootstrap "$domain" "$unit" 2>/dev/null
+		$SUDO launchctl enable "$domain/org.fulcrum.fulcrumd" 2>/dev/null
+	elif [ "$mode" = system ]; then
+		$SUDO systemctl daemon-reload
+		$SUDO systemctl enable --now fulcrumd
+	else
+		systemctl --user daemon-reload
+		systemctl --user enable --now fulcrumd
+	fi
+	info "fulcrum service enabled ($mode/$os)"
+}
+
+help:disable() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF disable [--user]
+
+	  Stop the Fulcrum service and remove its unit (--system is the
+	  default). The index data directory is preserved.
+	ENDHELP
+}
+
+command:disable() {
+	local mode=system
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user)         mode=user ;;
+			--system)       mode=system ;;
+			-h|--help|help) help:disable; return 0 ;;
+			*) warn "disable: unknown argument '$1'"; return 1 ;;
+		esac
+		shift
+	done
+
+	local os; os="$(daemon:_os)"
+	case "$os" in linux|macos) ;; *)
+		error "disable: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+
+	local SUDO=""; [ "$mode" = system ] && SUDO=sudo
+	local unit; unit="$(daemon:_unit_path "$os" "$mode")" \
+		|| { error "disable: no unit path for $os/$mode"; return 1; }
+
+	if [ "$os" = macos ]; then
+		$SUDO launchctl bootout "$(daemon:_domain "$mode")/org.fulcrum.fulcrumd" 2>/dev/null
+	elif [ "$mode" = system ]; then
+		$SUDO systemctl disable --now fulcrumd 2>/dev/null
+		$SUDO systemctl daemon-reload
+	else
+		systemctl --user disable --now fulcrumd 2>/dev/null
+		systemctl --user daemon-reload
+	fi
+
+	if [ -e "$unit" ]; then
+		$SUDO rm -f "$unit" && info "removed $unit"
+	fi
+	info "fulcrum service disabled ($mode/$os); data dir preserved"
+}
+
+# ---------------------------------------------------------------------------
+# start / stop / monitor (FEAT-056 AC4)
+# ---------------------------------------------------------------------------
+
+help:start()   { echo "usage: $SELF start [--user]   — start the Fulcrum service (default: system)" >&2; }
+help:stop()    { echo "usage: $SELF stop [--user]    — stop the Fulcrum service (default: system)" >&2; }
+help:monitor() { echo "usage: $SELF monitor [--user] — follow the Fulcrum log (default: system)" >&2; }
+
+command:start() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:start; return 0 ;; esac; done
+	local mode os SUDO=""; mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	[ "$mode" = system ] && SUDO=sudo
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then $SUDO systemctl start fulcrumd
+			else systemctl --user start fulcrumd; fi ;;
+		macos)
+			$SUDO launchctl kickstart "$(daemon:_domain "$mode")/org.fulcrum.fulcrumd" || true ;;
+		*) error "start: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+}
+
+command:stop() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:stop; return 0 ;; esac; done
+	local mode os SUDO=""; mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	[ "$mode" = system ] && SUDO=sudo
+	case "$os" in
+		linux)
+			if [ "$mode" = system ]; then $SUDO systemctl stop fulcrumd
+			else systemctl --user stop fulcrumd; fi ;;
+		macos)
+			$SUDO launchctl kill SIGTERM "$(daemon:_domain "$mode")/org.fulcrum.fulcrumd" ;;
+		*) error "stop: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+}
+
+command:monitor() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:monitor; return 0 ;; esac; done
+	local mode os; mode="$(daemon:_mode "$@")"; os="$(daemon:_os)"
+	case "$os" in
+		linux)
+			# BUG-031: the operator is in the service group and the system
+			# unit logs to the journal, so journalctl needs no sudo (like
+			# the lightning daemon).
+			if [ "$mode" = system ]; then journalctl -u fulcrumd -f
+			else journalctl --user -u fulcrumd -f; fi ;;
+		macos)
+			# BUG-031: the datadir is group-readable and the operator is in
+			# the service group, so the log is read directly (no sudo).
+			local log; log="$(daemon:_datadir "$mode")/fulcrum.log"
+			if [ ! -e "$log" ]; then
+				error "monitor: no log yet at '$log' — is the service running?"
+				warn  "  install + start it:  fulcrum daemon enable"
+				return 1
+			fi
+			tail -f "$log" ;;
+		*) error "monitor: unsupported platform '$(uname -s)'"; return 1 ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# space (FEAT-056 AC5)
+# ---------------------------------------------------------------------------
+
+help:space() { echo "usage: $SELF space [--user]   — show Fulcrum index disk usage (default: system)" >&2; }
+
+command:space() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:space; return 0 ;; esac; done
+	local mode datadir SUDO=""
+	mode="$(daemon:_mode "$@")"
+	datadir="$(daemon:_datadir "$mode")"
+	[ "$mode" = system ] && SUDO=sudo
+	if [ ! -d "$datadir" ]; then
+		error "space: index dir '$datadir' does not exist (run 'fulcrum enable' first)"
+		return 1
+	fi
+	$SUDO du -sh "$datadir" | cut -f1
+}
+
+# ---------------------------------------------------------------------------
+# Help / dispatch
+# ---------------------------------------------------------------------------
+
+command:help() {
+	cat >&2 <<-ENDHELP
+	usage: fulcrum daemon <verb> [--user]   (default mode: --system)
+
+	  Fulcrum service lifecycle (FEAT-056):
+	    install [--from release|source|docker] [--tag <v>] [--prefix <p>]
+	                         install the Fulcrum binary (Linux: release;
+	                         macOS: source — no prebuilt mac binary)
+	    enable / disable     install + (de)activate the service unit
+	    start / stop         start / stop the running service
+	    monitor              follow the service log
+	    space                show the index disk usage
+
+	  (fulcrum.conf is managed by the top-level 'fulcrum config' verb:
+	   list / get / set / unset / path / init)
+	ENDHELP
+}
+
+# When sourced (e.g. a bats test exercising a single helper like
+# daemon:_fulcrumd), skip dispatch entirely — only run the lifecycle verbs
+# when this file is executed directly or via a per-verb symlink. The
+# dispatcher execs us (BASH_SOURCE[0] == $0), so normal use is unaffected.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+	# Multi-call dispatch: invoked as the real file 'daemon' the verb is
+	# $1; invoked via a per-verb symlink (enable, start, …) the verb is SELF.
+	if [ "$SELF" = daemon ]; then
+		verb="${1:-help}"; [ $# -gt 0 ] && shift
+	else
+		verb="$SELF"
+	fi
+
+	if has command "$verb"; then
+		command:"$verb" "$@"
+		exit $?
+	else
+		error "unknown verb '$verb'"
+		command:help
+		exit 1
+	fi
+fi

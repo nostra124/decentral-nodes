@@ -25,6 +25,20 @@ SYSCONFDIR = @SYSCONFDIR@
 DATADIR   = @DATADIR@
 MANDIR    = @MANDIR@
 
+# Stow stages a $PREFIX-relative tree under $(BUILD_DIR), then
+# `stow -t $(PREFIX)` symlinks it into place. The configure dir vars are
+# absolute ($PREFIX/bin, …), so strip the prefix here: the stow source
+# must mirror $PREFIX *relative* (build/bitcoin/bin), not $PREFIX/$PREFIX
+# (build/bitcoin/usr/local/bin) — the latter is the old double-prefix
+# packaging bug that left files at $PREFIX$PREFIX/… and never on PATH
+# (BUG-038). Dirs configured outside $PREFIX keep their absolute path and
+# are not stow-relocatable; that was never supported.
+REL_BINDIR     = $(patsubst $(PREFIX)/%,%,$(BINDIR))
+REL_LIBEXECDIR = $(patsubst $(PREFIX)/%,%,$(LIBEXECDIR))
+REL_SYSCONFDIR = $(patsubst $(PREFIX)/%,%,$(SYSCONFDIR))
+REL_DATADIR    = $(patsubst $(PREFIX)/%,%,$(DATADIR))
+REL_MANDIR     = $(patsubst $(PREFIX)/%,%,$(MANDIR))
+
 # The commands this one package ships. Each has bin/<cmd>, libexec/<cmd>/,
 # share/<cmd>/, share/doc/<cmd>/. Add fulcrum here when it lands.
 PACKAGES = bitcoin lightning fulcrum
@@ -51,56 +65,54 @@ help:
 # the one $(BUILD_DIR) tree, then stowed once under the $(PACKAGE) identity.
 install:
 	@command -v stow >/dev/null || { echo "stow not installed"; exit 1; }
-	@mkdir -p $(BUILD_DIR)$(BINDIR) \
-	          $(BUILD_DIR)$(SYSCONFDIR)/bash_completion.d \
-	          $(BUILD_DIR)$(MANDIR)/man1
+	@mkdir -p $(BUILD_DIR)/$(REL_BINDIR) \
+	          $(BUILD_DIR)/$(REL_SYSCONFDIR)/bash_completion.d \
+	          $(BUILD_DIR)/$(REL_MANDIR)/man1
 	@for p in $(PACKAGES); do \
-		mkdir -p $(BUILD_DIR)$(LIBEXECDIR)/$$p \
-		         $(BUILD_DIR)$(DATADIR)/doc/$$p \
-		         $(BUILD_DIR)$(DATADIR)/$$p; \
+		mkdir -p $(BUILD_DIR)/$(REL_LIBEXECDIR)/$$p \
+		         $(BUILD_DIR)/$(REL_DATADIR)/doc/$$p \
+		         $(BUILD_DIR)/$(REL_DATADIR)/$$p; \
 	done
-	@cp -a bin/* $(BUILD_DIR)$(BINDIR)/
+	@cp -a bin/* $(BUILD_DIR)/$(REL_BINDIR)/
 	@for p in $(PACKAGES); do \
 		if [ -d libexec/$$p ]; then \
-			cp -a libexec/$$p/* $(BUILD_DIR)$(LIBEXECDIR)/$$p/; \
+			cp -a libexec/$$p/* $(BUILD_DIR)/$(REL_LIBEXECDIR)/$$p/; \
 		fi; \
 		if [ -d share/doc/$$p ]; then \
-			cp -a share/doc/$$p/* $(BUILD_DIR)$(DATADIR)/doc/$$p/; \
+			cp -a share/doc/$$p/* $(BUILD_DIR)/$(REL_DATADIR)/doc/$$p/; \
 		fi; \
 		if [ -d share/$$p ]; then \
-			cp -a share/$$p/* $(BUILD_DIR)$(DATADIR)/$$p/; \
+			cp -a share/$$p/* $(BUILD_DIR)/$(REL_DATADIR)/$$p/; \
 		fi; \
 	done
 	@if [ -d etc/bash_completion.d ]; then \
 		cp -a etc/bash_completion.d/* \
-		      $(BUILD_DIR)$(SYSCONFDIR)/bash_completion.d/; \
+		      $(BUILD_DIR)/$(REL_SYSCONFDIR)/bash_completion.d/; \
 	fi
 	@if [ -d share/man/man1 ]; then \
-		cp -a share/man/man1/* $(BUILD_DIR)$(MANDIR)/man1/; \
+		cp -a share/man/man1/* $(BUILD_DIR)/$(REL_MANDIR)/man1/; \
 	fi
-	# FEAT-019 / FEAT-048: agent skills, following the rpk skill
-	# convention (https://github.com/nostra124/rpk, docs/PACKAGING.md).
-	# Each skills/<cmd>-<name>/ ships its SKILL.md to BOTH
-	# share/claude/skills/<name>/ and share/raven/skills/<name>/
-	# (Claude and Raven consume the same SKILL.md) and its opencode.md
-	# to share/opencode/commands/<name>.md.
-	@if ls -d skills/*-* >/dev/null 2>&1; then \
-		for skill in skills/*-*; do \
-			[ -d "$$skill" ] || continue; \
-			name=$$(basename $$skill); \
-			if [ -f "$$skill/SKILL.md" ]; then \
-				mkdir -p $(BUILD_DIR)$(DATADIR)/claude/skills/$$name; \
-				install -m 644 "$$skill/SKILL.md" \
-				    $(BUILD_DIR)$(DATADIR)/claude/skills/$$name/SKILL.md; \
-				mkdir -p $(BUILD_DIR)$(DATADIR)/raven/skills/$$name; \
-				install -m 644 "$$skill/SKILL.md" \
-				    $(BUILD_DIR)$(DATADIR)/raven/skills/$$name/SKILL.md; \
-			fi; \
-			if [ -f "$$skill/opencode.md" ]; then \
-				mkdir -p $(BUILD_DIR)$(DATADIR)/opencode/commands; \
-				install -m 644 "$$skill/opencode.md" \
-				    $(BUILD_DIR)$(DATADIR)/opencode/commands/$$name.md; \
-			fi; \
+	# FEAT-019 / FEAT-048: agent skills, following the rpk skill convention
+	# (https://github.com/nostra124/rpk, docs/PACKAGING.md). Skills are the
+	# rpk-native flat files under .rpk/skills/<name>.md (migrated there from
+	# skills/<name>/SKILL.md so `rpk skills` discovers them — commit ad723c4;
+	# BUG-040). Each single file installs to BOTH
+	# share/claude/skills/<name>/SKILL.md and share/raven/skills/<name>/
+	# SKILL.md (Claude and Raven consume the same file) and to
+	# share/opencode/commands/<name>.md.
+	@if ls .rpk/skills/*.md >/dev/null 2>&1; then \
+		for skill in .rpk/skills/*.md; do \
+			[ -f "$$skill" ] || continue; \
+			name=$$(basename "$$skill" .md); \
+			mkdir -p $(BUILD_DIR)/$(REL_DATADIR)/claude/skills/$$name; \
+			install -m 644 "$$skill" \
+			    $(BUILD_DIR)/$(REL_DATADIR)/claude/skills/$$name/SKILL.md; \
+			mkdir -p $(BUILD_DIR)/$(REL_DATADIR)/raven/skills/$$name; \
+			install -m 644 "$$skill" \
+			    $(BUILD_DIR)/$(REL_DATADIR)/raven/skills/$$name/SKILL.md; \
+			mkdir -p $(BUILD_DIR)/$(REL_DATADIR)/opencode/commands; \
+			install -m 644 "$$skill" \
+			    $(BUILD_DIR)/$(REL_DATADIR)/opencode/commands/$$name.md; \
 		done; \
 	fi
 	# VERSION → $DATADIR/<cmd>/version : the runtime version string each
@@ -108,9 +120,12 @@ install:
 	# when invoked as the installed entry, and to ./VERSION in a dev tree.
 	@if [ -f VERSION ]; then \
 		for p in $(PACKAGES); do \
-			install -m 644 VERSION $(BUILD_DIR)$(DATADIR)/$$p/version; \
+			install -m 644 VERSION $(BUILD_DIR)/$(REL_DATADIR)/$$p/version; \
 		done; \
 	fi
+	@# stow refuses a non-existent target, so ensure $(PREFIX) exists for a
+	@# fresh prefix (e.g. the SIT host-side install into a tmp HOME) — BUG-046.
+	@mkdir -p $(PREFIX)
 	@stow -d build -t $(PREFIX) $(PACKAGE)
 
 uninstall:
@@ -166,10 +181,19 @@ check-sit:
 	@echo "==> building lightning-clightning (with the local working tree)"
 	@podman build -t lightning-clightning -f tests/sit/podman/Dockerfile.clightning .
 	@echo "==> running lightning bats suites inside the container"
-	@podman run --rm \
-		-v $(PWD)/tests/sit/suites:/suites:ro \
+	@# Mount the whole tests/sit tree (not just suites/) so each suite's
+	@# `load ../helpers` resolves to /sit/helpers.bash — mounting suites/
+	@# alone left the relative include dangling (BUG-038).
+	@# Run the suites as the operator `alice` (whose lightningd the entrypoint
+	@# brought up) with the regtest network exported — the daemon-lifecycle and
+	@# channel/pay suites talk to alice's node directly (BUG-038 SIT harness).
+	@# Wrap in `timeout` (if available) so a hung live-flow test fails the
+	@# target fast instead of blocking CI indefinitely.
+	@to=$$(command -v timeout || command -v gtimeout || true); \
+	$${to:+$$to 900} podman run --rm \
+		-v $(PWD)/tests/sit:/sit:ro \
 		lightning-clightning \
-		/bin/bash -lc 'bats /suites/0[1-9]_*lightning* /suites/1[0-4]_*.bats 2>/dev/null || bats /suites/*daemon* /suites/*channel* /suites/*invoice* /suites/*offer* /suites/*lnurl* /suites/*wellknown* /suites/*walkthrough* /suites/*softdep* /suites/*tower* /suites/*fee*'
+		sudo -u alice -i env LIGHTNING_NETWORK=regtest LIGHTNING_NO_BOOTSTRAP=1 bash -lc 'export PATH=/usr/sbin:/sbin:$$PATH; bats /sit/suites/01_daemon_lifecycle.bats /sit/suites/02_channel_open_close.bats /sit/suites/03_invoice_pay_bolt11.bats /sit/suites/04_offer_pay_bolt12.bats /sit/suites/05_lnurl_flow.bats /sit/suites/06_address_create_pay.bats /sit/suites/07_wallet_account_ledger.bats /sit/suites/08_wallet_push_pull.bats /sit/suites/09_inbound_liquidity_lsps1.bats /sit/suites/10_wellknown_api.bats /sit/suites/11_walkthrough.bats /sit/suites/12_softdep_probe.bats /sit/suites/13_tower.bats /sit/suites/14_fee_forward.bats'
 	@echo "==> running bitcoin host-side suites"
 	@bats tests/sit/suites/*wallet* tests/sit/suites/*derive* tests/sit/suites/*send* tests/sit/suites/*psbt* tests/sit/suites/*push_pull* 2>/dev/null || true
 
@@ -242,27 +266,27 @@ test: check
 # Claude and Raven point at the SKILL.md dir; opencode points at
 # the single .md command file. `ln -sf` makes this idempotent.
 install-skills-user:
-	@for skill in skills/*-*; do \
-		[ -d "$$skill" ] || continue; \
-		name=$$(basename $$skill); \
-		if [ -d "$$HOME/.claude/skills" ] && [ -f "$$skill/SKILL.md" ]; then \
+	@for skill in .rpk/skills/*.md; do \
+		[ -f "$$skill" ] || continue; \
+		name=$$(basename "$$skill" .md); \
+		if [ -d "$$HOME/.claude/skills" ]; then \
 			ln -sf $(PREFIX)/share/claude/skills/$$name \
 			    "$$HOME/.claude/skills/$$name"; \
 		fi; \
-		if [ -d "$$HOME/.raven/workspace/skills" ] && [ -f "$$skill/SKILL.md" ]; then \
+		if [ -d "$$HOME/.raven/workspace/skills" ]; then \
 			ln -sf $(PREFIX)/share/raven/skills/$$name \
 			    "$$HOME/.raven/workspace/skills/$$name"; \
 		fi; \
-		if [ -d "$$HOME/.config/opencode/commands" ] && [ -f "$$skill/opencode.md" ]; then \
+		if [ -d "$$HOME/.config/opencode/commands" ]; then \
 			ln -sf $(PREFIX)/share/opencode/commands/$$name.md \
 			    "$$HOME/.config/opencode/commands/$$name.md"; \
 		fi; \
 	done
 
 uninstall-skills-user:
-	@for skill in skills/*-*; do \
-		[ -d "$$skill" ] || continue; \
-		name=$$(basename $$skill); \
+	@for skill in .rpk/skills/*.md; do \
+		[ -f "$$skill" ] || continue; \
+		name=$$(basename "$$skill" .md); \
 		find $$HOME/.claude/skills $$HOME/.raven/workspace/skills \
 		  -maxdepth 1 -name "$$name" -type l -delete 2>/dev/null || true; \
 		find $$HOME/.config/opencode/commands \

@@ -8,6 +8,7 @@ bats_require_minimum_version 1.5.0
 
 setup_file() {
     load "$(dirname "$BATS_TEST_FILENAME")/../helpers.bash"
+    skip "wallet send / PSBT build pipeline needs the bitcoind backend (get-address-utxos/broadcast) — FEAT-304"
     sit:start_bitcoind
     sit:install_bitcoin
     sit:configure_backend

@@ -39,6 +39,12 @@ error() {
 	echo -e "$SELF: error - \033[31;1;m$@\033[0m" >&2
 }
 
+# dc wraps long output at a column limit with `\`+newline by default
+# (Gavin Howard's dc, the macOS default; GNU dc honours the same env
+# var). The entropy/checksum bit strings here are long enough to wrap,
+# which would corrupt parsing; disable it (BUG-039).
+export DC_LINE_LENGTH=0
+
 # checks if a certain function exists: eg. has command update
 has() {
 	local KIND=$1
