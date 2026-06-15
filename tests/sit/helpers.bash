@@ -77,7 +77,7 @@ sit:fund_address() {
 # repo to have been configured (./configure run). Sets SIT_HOME and
 # exports it.
 sit:install_bitcoin() {
-    SIT_HOME="$(mktemp -d)"
+    export SIT_HOME="$(mktemp -d)"
     export HOME="$SIT_HOME"
     export XDG_DATA_HOME="$SIT_HOME/.local/share"
     export XDG_CONFIG_HOME="$SIT_HOME/.config"
@@ -93,6 +93,13 @@ sit:install_bitcoin() {
         && make install >/dev/null 2>&1 )
     export PATH="$SIT_HOME/.local/bin:$PATH"
     hash -r
+
+    # `bitcoin wallet new` stores the seed in `secret`, which needs a
+    # GPG-backed identity. Provision one non-interactively in the throwaway
+    # HOME (account init does a batch, passphrase-less keygen) — BUG-046.
+    export GNUPGHOME="$SIT_HOME/.gnupg"
+    account init   >/dev/null 2>&1 || true
+    secret  setup  >/dev/null 2>&1 || true
 }
 
 # Tear down the test HOME created by sit:install_bitcoin.

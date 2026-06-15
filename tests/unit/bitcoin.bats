@@ -353,6 +353,7 @@ setup_wallet_env() {
 verb="$1"; key="$2"
 store="$SECRET_STORE"
 case "$verb" in
+	init) : ;;
 	set) mkdir -p "$store/$(dirname "$key")"; cat > "$store/$key" ;;
 	get) cat "$store/$key" ;;
 	rm)  rm -f "$store/$key" ;;

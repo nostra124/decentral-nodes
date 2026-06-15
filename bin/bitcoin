@@ -4195,6 +4195,13 @@ wallet:new() {
 		return 8
 	fi
 
+	# The seed lives in `secret`, not the wallet repo. `secret set` requires
+	# the store to exist, so create it first (idempotent). A missing GPG
+	# identity surfaces here — the operator runs `secret setup` once.
+	if ! secret init "$name" >/dev/null 2>&1; then
+		error "wallet new: 'secret init $name' failed (run 'secret setup' once to configure a GPG identity)"
+		return 9
+	fi
 	if ! printf '%s\n' "$mnemonic" | secret set "$name/seed"; then
 		error "wallet new: 'secret set $name/seed' failed"
 		return 9
