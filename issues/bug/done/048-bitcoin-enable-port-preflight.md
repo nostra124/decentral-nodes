@@ -2,7 +2,7 @@
 id: BUG-048
 type: bug
 priority: high
-status: open
+status: closed
 ---
 
 # bitcoin daemon enable installs a second node that crash-loops on the RPC port (no preflight)

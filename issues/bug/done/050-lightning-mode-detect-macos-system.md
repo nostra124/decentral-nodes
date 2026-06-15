@@ -2,7 +2,7 @@
 id: BUG-050
 type: bug
 priority: high
-status: open
+status: closed
 ---
 
 # lightning operate verbs always auto-detect user mode on macOS (system_mode is systemd-only)

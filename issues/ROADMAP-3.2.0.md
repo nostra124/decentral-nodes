@@ -62,13 +62,13 @@ features, so these land first, each with a failing-first regression.
 
 - **BUG-048** — `bitcoin daemon enable` installs a second node that crash-loops
   on the RPC port instead of preflighting it. File:
-  `issues/bug/048-bitcoin-enable-port-preflight.md`.
+  `issues/bug/done/048-bitcoin-enable-port-preflight.md`.
 - **BUG-049** — `lightning peer bootstrap` persists `important-peer=`, which some
   lightningd builds reject as an unknown option → the node won't start. File:
-  `issues/bug/049-lightning-important-peer-bricks-node.md`.
+  `issues/bug/done/049-lightning-important-peer-bricks-node.md`.
 - **BUG-050** — lightning operate verbs always auto-detect *user* mode on macOS
   (`system_mode` is systemd-only), so `monitor`/`status` miss the running system
-  instance. File: `issues/bug/050-lightning-mode-detect-macos-system.md`.
+  instance. File: `issues/bug/done/050-lightning-mode-detect-macos-system.md`.
 
 ## Recommended order
 
