@@ -1045,18 +1045,27 @@ EOF
 }
 
 @test "FEAT-174: wallet push round-trips through a bare-repo remote" {
+	command -v sqlite3 >/dev/null || skip "sqlite3 not installed"
 	export LIGHTNING_WALLETS_ROOT="$BATS_TMPDIR/wallets.$$"
 	"$LIGHTNING_BIN" wallet new alice >/dev/null
+	"$LIGHTNING_BIN" wallet use alice >/dev/null
+	"$LIGHTNING_BIN" account create rent >/dev/null
+	# Mutate state AFTER the initial commit, so `wallet push` must regenerate
+	# and commit state.sql before pushing (BUG-042: it dropped the fresh dump
+	# because the hook had already `git add`ed it, so the working-tree diff
+	# looked clean — the ledger never reached the remote).
+	"$LIGHTNING_BIN" wallet ledger add in 100000 --account rent --message "pingmark" >/dev/null
 	# Set up a bare-repo remote.
 	bare="$BATS_TMPDIR/bare.$$"
 	git init --bare --quiet "$bare"
 	(cd "$LIGHTNING_WALLETS_ROOT/alice" && git remote add origin "$bare")
 	run "$LIGHTNING_BIN" wallet push origin
 	[ "$status" -eq 0 ]
-	# Clone-side: state.sql should be there.
+	# Clone-side: state.sql must carry the ledger row we added.
 	clone="$BATS_TMPDIR/clone.$$"
 	git clone --quiet "$bare" "$clone"
 	[ -f "$clone/state.sql" ]
+	grep -q "pingmark" "$clone/state.sql"
 	rm -rf "$LIGHTNING_WALLETS_ROOT" "$bare" "$clone" "$HOME/.lightning"
 }
 

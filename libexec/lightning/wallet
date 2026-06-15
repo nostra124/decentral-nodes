@@ -187,8 +187,12 @@ cmd_push() {
 	# Trigger the pre-commit hook explicitly to ensure state.sql is current.
 	if [ -f state.db ] && [ -x .git/hooks/pre-commit ]; then
 		.git/hooks/pre-commit
-		# If state.sql changed, commit it.
-		if ! git diff --quiet -- state.sql 2>/dev/null; then
+		# If state.sql changed, commit it. The hook `git add`s state.sql, so
+		# the regenerated dump is already *staged* — check the index against
+		# HEAD (`--cached`), not the working tree against the index, or the
+		# fresh dump is silently dropped and a stale state.sql is pushed
+		# (BUG-042: push -> pull lost the ledger).
+		if ! git diff --cached --quiet -- state.sql 2>/dev/null; then
 			git -c user.email=lightning@localhost -c user.name=lightning \
 				commit --quiet -m "auto-snapshot state.sql"
 		fi

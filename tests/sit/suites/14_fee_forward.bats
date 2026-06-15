@@ -21,8 +21,10 @@ teardown() { sit_teardown; }
 	run lightning channel fee set "$cid" 1234 7
 	[ "$status" -eq 0 ]
 
-	# Wait for the gossip + listpeerchannels to reflect the new fee.
-	for _ in 1 2 3 4 5; do
+	# Wait for the gossip + listpeerchannels to reflect the new fee. Allow
+	# generously — the local channel-update propagation is occasionally
+	# slower than a few seconds even with fast polling.
+	for _ in $(seq 1 20); do
 		lightning channel fee get "$cid" | grep -q $'\t1234\t7$' && return 0
 		sleep 1
 	done
