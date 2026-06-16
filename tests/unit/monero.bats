@@ -120,8 +120,9 @@ PINNED_FPR=81AC591FE9C4B65C5806AFC3F0AF4D462A0BDF92
 # Echoes nothing; exports MONERO_* seams and prepends the stub dir to PATH.
 _mk_release_fixture() {
 	local machine="${1:-x86_64}"
+	local fxver="${2:-v0.18.3.4}"
 	local td="$MROOT/rel"; mkdir -p "$td/stub" "$td/pfx/bin" "$td/pkg"
-	export MONERO_VERSION=v0.18.3.4
+	export MONERO_VERSION="$fxver"
 	local asset="monero-linux-x64-$MONERO_VERSION"
 	[ "$machine" = aarch64 ] && asset="monero-linux-armv8-$MONERO_VERSION"
 	# A real release tree -> real tarball -> real sha256.
@@ -246,6 +247,27 @@ _mk_release_fixture() {
 	run "$MONERO" install --prefix "$REL_PREFIX" --force
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"sha256 verified"* ]]
+}
+
+@test "BUG-055: install auto-detects the version from the verified hashes (no stale pin)" {
+	# The hashes publish a NEWER release than any old hardcoded default; with
+	# no MONERO_VERSION pin the install must track it, not fail-close.
+	_mk_release_fixture x86_64 v0.18.5.0
+	unset MONERO_VERSION                      # no pin → auto-detect
+	run "$MONERO" install --prefix "$REL_PREFIX"
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"release: v0.18.5.0"* ]]
+	[[ "$output" == *"sha256 verified"* ]]
+	[ -x "$REL_PREFIX/monerod" ]
+}
+
+@test "BUG-055: an explicit --version pin that the hashes don't list fails closed" {
+	_mk_release_fixture x86_64 v0.18.5.0     # hashes only have v0.18.5.0
+	unset MONERO_VERSION
+	run "$MONERO" install --prefix "$REL_PREFIX" --version v0.18.3.4
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"no '"*"' release in the verified hashes"* ]]
+	[ ! -e "$REL_PREFIX/monerod" ]
 }
 
 @test "FEAT-300 AC: install help lists release, version, prefix, force" {
