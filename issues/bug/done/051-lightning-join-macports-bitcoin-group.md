@@ -2,7 +2,7 @@
 id: BUG-051
 type: bug
 priority: medium
-status: open
+status: closed
 ---
 
 # lightning daemon enable can't auto-join an external bitcoind's cookie group on macOS
