@@ -119,6 +119,7 @@ commands:
    start [--user]           start bitcoind
    stop [--user]            stop bitcoind
    status [--user]          reachable? block height? (group-read, no sudo)
+   share-cookie             let sibling daemons read the running node's cookie
    monitor [--user]         tail the bitcoind log
    password [--user]        show RPC credentials from config
    space [--user]           show data-dir disk usage
@@ -330,6 +331,122 @@ command:status() {
 		return 0
 	fi
 	echo "healthy ($net, $mode-mode, block ${blocks:-?})"
+}
+
+# --- share-cookie (FEAT-306) ----------------------------------------------
+# Make a RUNNING bitcoind's cookie group-readable so sibling daemons
+# (lightning/fulcrum) can authenticate without their own RPC credentials —
+# the one step that can't be done from `lightning` (§0: the daemons never
+# shell out to each other). Works for an EXTERNAL node (MacPorts/Homebrew)
+# as well as the managed one. §4: only system ops, no sibling-command calls.
+
+# A running bitcoind's -conf / -datadir argument (BUG-052-style ps probe).
+# $BITCOIN_PS overrides the process source for tests.
+daemon:_running_arg() {   # $1 = conf | datadir
+	local flag="-$1" src
+	# $BITCOIN_PS, when SET (even to empty), is the authoritative process
+	# source for tests — so BITCOIN_PS="" means "nothing running".
+	if [ -n "${BITCOIN_PS+x}" ]; then src="$BITCOIN_PS"; else src="$(ps -axo args 2>/dev/null)"; fi
+	printf '%s\n' "$src" | grep '[b]itcoind' \
+		| grep -oE -- "${flag}[= ][^ ]+" | head -n1 | sed -E "s/^${flag}[= ]//"
+}
+
+# Cookie perms, portable (GNU stat -c, else BSD stat -f).
+daemon:_cookie_perms() {
+	stat -c '%A %U:%G' "$1" 2>/dev/null || stat -f '%Sp %Su:%Sg' "$1" 2>/dev/null
+}
+
+# Set rpccookieperms=group in <conf> (idempotent, portable: temp file +
+# install, preserving owner via sudo when needed — no in-place sed, which
+# differs BSD vs GNU; no bare redirect into a root file, BUG-030).
+daemon:_set_cookieperms() {
+	local conf="$1"
+	grep -qE '^[[:space:]]*rpccookieperms[[:space:]]*=[[:space:]]*group' "$conf" 2>/dev/null && return 0
+	local tmp og SUDO=""
+	tmp="$(mktemp)"
+	if grep -qE '^[[:space:]]*rpccookieperms[[:space:]]*=' "$conf" 2>/dev/null; then
+		# Replace an existing (non-group) value.
+		awk '/^[[:space:]]*rpccookieperms[[:space:]]*=/{print "rpccookieperms=group"; next} {print}' "$conf" > "$tmp"
+	else
+		cat "$conf" > "$tmp" 2>/dev/null; printf 'rpccookieperms=group\n' >> "$tmp"
+	fi
+	[ -w "$conf" ] || SUDO=sudo
+	og="$(stat -c '%U:%G' "$conf" 2>/dev/null || stat -f '%Su:%Sg' "$conf" 2>/dev/null)"
+	if ! $SUDO install -m 0644 "$tmp" "$conf"; then
+		rm -f "$tmp"; error "share-cookie: cannot write $conf"; return 1
+	fi
+	[ -n "$og" ] && $SUDO chown "$og" "$conf" 2>/dev/null
+	rm -f "$tmp"
+}
+
+# Restart the running node so it regenerates the cookie with the new perms.
+# Detect the supervisor: macOS launchd label / Linux systemd unit owning a
+# bitcoind. Returns non-zero (caller hints) if it can't.
+daemon:_restart_running_node() {
+	local os; os="$(daemon:_os)"
+	if [ "$os" = macos ]; then
+		local label
+		label="$(sudo launchctl list 2>/dev/null | awk '/bitcoin/{print $3}' | head -n1)"
+		[ -n "$label" ] || return 1
+		sudo launchctl kickstart -k "system/$label" >/dev/null 2>&1
+	else
+		local unit
+		unit="$(systemctl list-units --type=service --no-legend 2>/dev/null | awk '/bitcoin/{print $1}' | head -n1)"
+		[ -n "$unit" ] || unit=bitcoind
+		sudo systemctl restart "$unit" >/dev/null 2>&1
+	fi
+}
+
+help:share-cookie() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF share-cookie [--no-restart]
+
+	  Make the RUNNING bitcoind's RPC cookie group-readable
+	  (rpccookieperms=group) so sibling daemons (lightning, fulcrum) whose
+	  service account is in the node's group can authenticate without their
+	  own credentials. Detects the running node's config + datadir, sets the
+	  option (idempotent), and restarts the node to regenerate the cookie.
+	  Works for an external (MacPorts/Homebrew) node too. --no-restart sets
+	  the option but leaves the restart to you.
+	ENDHELP
+}
+
+command:share-cookie() {
+	local restart=1 a
+	for a in "$@"; do case "$a" in
+		-h|--help|help) help:share-cookie; return 0 ;;
+		--no-restart)   restart=0 ;;
+		*) warn "share-cookie: ignoring unknown argument '$a'" ;;
+	esac; done
+	local conf datadir
+	conf="$(daemon:_running_arg conf)"
+	datadir="$(daemon:_running_arg datadir)"
+	if [ -z "$conf" ] && [ -z "$datadir" ]; then
+		error "share-cookie: no running bitcoind found — start your node first"
+		return 1
+	fi
+	if [ -z "$conf" ]; then
+		error "share-cookie: the running bitcoind has no -conf= to edit (datadir=$datadir)"
+		return 1
+	fi
+	if grep -qE '^[[:space:]]*rpccookieperms[[:space:]]*=[[:space:]]*group' "$conf" 2>/dev/null; then
+		info "share-cookie: rpccookieperms=group already set in $conf"
+	else
+		daemon:_set_cookieperms "$conf" || return 1
+		info "set rpccookieperms=group in $conf"
+	fi
+	if [ "$restart" = 1 ]; then
+		if daemon:_restart_running_node; then
+			info "restarted the node to regenerate the group-readable cookie"
+		else
+			warn "share-cookie: could not auto-restart the node — restart bitcoind to apply"
+		fi
+	else
+		warn "share-cookie: restart bitcoind to regenerate the group-readable cookie"
+	fi
+	[ -n "$datadir" ] && [ -e "$datadir/.cookie" ] && \
+		info "cookie now: $(daemon:_cookie_perms "$datadir/.cookie")"
+	return 0
 }
 
 #------------------------------------------------------------------------------
@@ -688,6 +805,8 @@ command:enable() {
 	if daemon:_port_in_use "$rpcport"; then
 		error "enable: RPC port $rpcport ($net) is already in use — another bitcoind is running"
 		error "  reuse it, stop it, or pick a different --network before enabling a node here"
+		warn  "  to let sibling daemons (lightning/fulcrum) share that running node, run:"
+		warn  "    bitcoin daemon share-cookie"
 		return 1
 	fi
 
