@@ -9889,3 +9889,25 @@ EOF
 		! grep -q "_bitcoin" "$BIN_SHIM/dseditgroup.calls"
 	fi
 }
+
+@test "BUG-051: enable joins the 'bitcoin' cookie group when _bitcoin is absent (macOS)" {
+	if [ "$(uname -s)" != "Darwin" ]; then skip "macOS-only — external MacPorts bitcoind group"; fi
+	_bug033_system_setup
+	# _bitcoin (managed) absent; 'bitcoin' (MacPorts/upstream) present.
+	cat > "$BIN_SHIM/dscl" <<EOF
+#!/bin/sh
+echo "dscl \$*" >> "$BIN_SHIM/dscl.calls"
+case "\$*" in
+	*"-read /Groups/bitcoin"*) exit 0 ;;
+	*-create*) exit 0 ;;
+	*-read*|*-list*) exit 1 ;;
+	*) exit 1 ;;
+esac
+EOF
+	chmod +x "$BIN_SHIM/dscl"
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	[ -f "$BIN_SHIM/dseditgroup.calls" ]
+	grep -q "dseditgroup -o edit -a _lightning -t user bitcoin" "$BIN_SHIM/dseditgroup.calls"
+	! grep -q "user _bitcoin" "$BIN_SHIM/dseditgroup.calls"
+}
