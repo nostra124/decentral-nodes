@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Top-level `lightning install` — harmonized across the stack (FEAT-307):
+# install is a top-level verb on every command. Delegates to the daemon
+# plugin's install verb; `lightning daemon install` keeps working too.
+exec "$(cd "$(dirname "$0")" && pwd)/daemon" install "$@"

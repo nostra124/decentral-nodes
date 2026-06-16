@@ -188,6 +188,17 @@ EOF
 	[ "$output" = "$(cat "$BATS_TEST_DIRNAME/../../VERSION")" ]
 }
 
+@test "FEAT-307: top-level 'lightning install' routes to the daemon installer (canonical)" {
+	# Harmonized: install is a top-level verb on every command; the old
+	# 'lightning daemon install' keeps working as an alias.
+	run "$LIGHTNING_BIN" install --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"install"* ]]
+	run "$LIGHTNING_BIN" daemon install --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"install"* ]]
+}
+
 @test "lightning version comes from the root VERSION file" {
 	local vf="$BATS_TEST_DIRNAME/../../VERSION"
 	[ -f "$vf" ]

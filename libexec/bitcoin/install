@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Top-level `bitcoin install` — harmonized across the stack (FEAT-307):
+# install is a top-level verb on every command (bitcoin / lightning /
+# fulcrum / monero), not buried under `daemon`. This delegates to the
+# daemon plugin's install verb; `bitcoin daemon install` keeps working too.
+exec "$(cd "$(dirname "$0")" && pwd)/daemon" install "$@"
