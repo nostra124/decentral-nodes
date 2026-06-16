@@ -402,14 +402,24 @@ monero_daemon_env() {
 	! grep -q '^sudo ' "$MCALLS"
 }
 
-@test "FEAT-301 AC4: status (up) reports the height from get_info, no sudo" {
+@test "FEAT-301 AC4: status (up, synced) reports the height from get_info, no sudo" {
 	monero_daemon_env linux
-	export MONERO_TEST_RPC_JSON='{"height": 3201234, "status": "OK"}'
+	# target_height 0 (caught up) => healthy.
+	export MONERO_TEST_RPC_JSON='{"height": 3201234, "target_height": 0, "status": "OK"}'
 	run "$MONERO" daemon status --user
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"healthy"* ]]
 	[[ "$output" == *"3201234"* ]]
 	! grep -q '^sudo ' "$MCALLS"
+}
+
+@test "monero daemon status (syncing) shows current/target height like bitcoin" {
+	monero_daemon_env linux
+	export MONERO_TEST_RPC_JSON='{"height": 1193324, "target_height": 3201234, "status": "OK"}'
+	run "$MONERO" daemon status --user
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"syncing"* ]]
+	[[ "$output" == *"1193324/3201234 blocks"* ]]
 }
 
 @test "FEAT-301 AC4: monitor with no log errors naming the path, no sudo" {

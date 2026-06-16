@@ -488,7 +488,7 @@ daemon:_rpc_info() {
 
 command:status() {
 	for a in "$@"; do case "$a" in -h|--help|help) help:status; return 0 ;; esac; done
-	local mode net rpcport info height
+	local mode net rpcport info height target
 	mode="$(daemon:_mode "$@")"
 	net="$(daemon:_network "$@")" || { error "status: unknown network '${net#invalid:}'"; return 1; }
 	rpcport="$(daemon:_rpc_port "$net")"
@@ -499,7 +499,16 @@ command:status() {
 		warn "monerod not reachable on 127.0.0.1:$rpcport — is it running? ('monero daemon start')"
 		return 1
 	fi
-	height="$(printf '%s' "$info" | sed -n 's/.*"height": *\([0-9]*\).*/\1/p' | head -n1)"
+	# get_info reports `height` (current) and `target_height` (the network tip
+	# we're syncing to; 0 once caught up). Show current/target while syncing,
+	# mirroring `bitcoin daemon status`. ("target_height" never contains the
+	# substring "height" preceded by a quote, so the height sed can't match it.)
+	height="$(printf '%s' "$info"  | sed -n 's/.*"height"[: ]*\([0-9][0-9]*\).*/\1/p'        | head -n1)"
+	target="$(printf '%s' "$info" | sed -n 's/.*"target_height"[: ]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
+	if [ -n "$target" ] && [ -n "$height" ] && [ "$target" -gt "$height" ] 2>/dev/null; then
+		echo "syncing ($net, $mode-mode, $height/$target blocks)"
+		return 0
+	fi
 	echo "healthy ($net, $mode-mode, height ${height:-?})"
 }
 
