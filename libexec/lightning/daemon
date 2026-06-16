@@ -98,25 +98,36 @@ daemon:_resolve_bitcoin_cli() {
 # daemon not enabled), this is a no-op + hint — it must NEVER fail enable.
 # This is a soft system-group op, not a call to the `bitcoin` command
 # (allowed under §4 for the combined stack).
+# Does a bitcoind service group exist? dscl on macOS, getent on Linux.
+daemon:_bitcoin_group_exists() {
+	if is_macos; then dscl . -read "/Groups/$1" >/dev/null 2>&1
+	else getent group "$1" >/dev/null 2>&1; fi
+}
+
 daemon:_join_bitcoin_group() {
-	local svc_user="$1"
-	if is_macos; then
-		if dscl . -read /Groups/_bitcoin >/dev/null 2>&1; then
-			sudo dseditgroup -o edit -a "$svc_user" -t user _bitcoin 2>/dev/null \
-				&& info "added $svc_user to the _bitcoin group (cookie access)" \
-				|| info "could not add $svc_user to _bitcoin (continuing)"
+	local svc_user="$1" g added=0
+	# BUG-051 — the group that owns bitcoind's cookie depends on HOW bitcoind
+	# was installed, and there can be more than one bitcoind on a host:
+	#   _bitcoin  the managed 'bitcoin daemon' service account (macOS)
+	#   bitcoin   Linux managed, AND the upstream / MacPorts package (macOS)
+	# The old code only ever tried _bitcoin on macOS, so a lightning node
+	# backed by an external MacPorts bitcoind (group 'bitcoin') could never
+	# read its cookie. Add the lightning account to EVERY candidate group
+	# that exists — being in an extra group is harmless, and it covers
+	# whichever bitcoind is actually backing the node. Soft op: must never
+	# fail enable.
+	for g in _bitcoin bitcoin; do
+		daemon:_bitcoin_group_exists "$g" || continue
+		if is_macos; then
+			sudo dseditgroup -o edit -a "$svc_user" -t user "$g" 2>/dev/null
 		else
-			info "_bitcoin group not found — enable 'bitcoin daemon' so $svc_user can read its cookie"
+			sudo usermod -aG "$g" "$svc_user" 2>/dev/null
 		fi
-	else
-		if getent group bitcoin >/dev/null 2>&1; then
-			sudo usermod -aG bitcoin "$svc_user" 2>/dev/null \
-				&& info "added $svc_user to the bitcoin group (cookie access)" \
-				|| info "could not add $svc_user to bitcoin (continuing)"
-		else
-			info "bitcoin group not found — enable 'bitcoin daemon' so $svc_user can read its cookie"
-		fi
-	fi
+		info "added $svc_user to the $g group (bitcoind cookie access)"
+		added=1
+	done
+	[ "$added" = 1 ] || \
+		info "no bitcoind service group (_bitcoin/bitcoin) found — enable 'bitcoin daemon', or check the backing node's group, so $svc_user can read its cookie"
 }
 
 # Resolve --user or --system from the argument list for the operate
