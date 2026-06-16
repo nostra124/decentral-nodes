@@ -18,7 +18,10 @@ resolve the host arch to a release asset
 .RB ( monero-linux-x64 ,
 .BR monero-linux-armv8 ,
 .BR monero-mac-x64 / -armv8 )
-and the pinned version;
+and resolve the current release version from the verified hashes
+(no stale pin \(em
+.B \-\-version
+pins a specific one);
 .IP 2. 4
 fetch the maintainer (binaryFate) signing key on first use and reject it
 unless its fingerprint matches the pinned one (cached thereafter);
@@ -44,7 +47,7 @@ Install source. Only
 is supported today (the default).
 .TP
 .BI \-\-version " vX.Y.Z.W"
-Install a specific release instead of the pinned default.
+Pin a specific release instead of the current published one.
 .TP
 .BI \-\-prefix " DIR"
 Install into

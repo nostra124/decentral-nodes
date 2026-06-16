@@ -6,7 +6,7 @@
 # Monero isn't cleanly packaged on most distros, so — like bitcoin/fulcrum —
 # we pull the official release tarball from getmonero.org and verify it
 # before staging:
-#   1. resolve host arch -> release asset name + pinned version
+#   1. resolve host arch -> release asset; track the current published version
 #   2. TOFU-fetch the maintainer (binaryFate) signing key and CHECK its
 #      fingerprint against the pinned one (cached after first use)
 #   3. gpg --verify the clearsigned hashes file with that key
@@ -41,7 +41,10 @@ error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
 # the source; the key material is fetched TOFU and rejected unless it hashes
 # to this fingerprint, so a swapped key file can never slip through.
 MONERO_SIGNING_FPR="${MONERO_SIGNING_FPR:-81AC591FE9C4B65C5806AFC3F0AF4D462A0BDF92}"
-MONERO_VERSION="${MONERO_VERSION:-v0.18.3.4}"
+# BUG-055 — NO hardcoded version pin: the install tracks whatever the
+# verified hashes file currently publishes. Set MONERO_VERSION explicitly to
+# pin a specific release (e.g. for reproducible/offline installs).
+MONERO_VERSION="${MONERO_VERSION:-}"
 MONERO_RELEASE_BASEURL="${MONERO_RELEASE_BASEURL:-https://downloads.getmonero.org/cli}"
 MONERO_HASHES_URL="${MONERO_HASHES_URL:-https://www.getmonero.org/downloads/hashes.txt}"
 MONERO_KEY_URL="${MONERO_KEY_URL:-https://raw.githubusercontent.com/monero-project/monero/master/utils/gpg_keys/binaryfate.asc}"
@@ -58,22 +61,37 @@ monero:_os() {
 	esac
 }
 
-# Release asset basename for this host (no extension), or empty if unknown.
-# Mirrors the getmonero.org asset naming.
-monero:_asset() {
+# Release asset PREFIX for this host (no version), or empty if unknown.
+# Mirrors getmonero.org naming: monero-<linux|mac>-<x64|armv8>.
+monero:_asset_prefix() {
 	local os arch
 	os="$(monero:_os)"
 	case "$(uname -m)" in
-		x86_64|amd64)      arch=x64 ;;
-		aarch64|arm64)     arch=armv8 ;;
-		*)                 arch="" ;;
+		x86_64|amd64)  arch=x64 ;;
+		aarch64|arm64) arch=armv8 ;;
+		*)             printf '\n'; return ;;
 	esac
-	[ -n "$arch" ] || { printf '\n'; return; }
 	case "$os" in
-		linux) printf 'monero-linux-%s-%s\n' "$arch" "$MONERO_VERSION" ;;
-		macos) printf 'monero-mac-%s-%s\n' "$arch" "$MONERO_VERSION" ;;
+		linux) printf 'monero-linux-%s\n' "$arch" ;;
+		macos) printf 'monero-mac-%s\n' "$arch" ;;
 		*)     printf '\n' ;;
 	esac
+}
+
+# BUG-055 — resolve THIS host's release tarball from the VERIFIED hashes file
+# rather than a (stale) pinned version. Finds the CLI tarball line
+# "<sha>  <prefix>-v<X.Y.Z.W>.tar.bz2" (never the -gui- assets). When
+# $MONERO_VERSION is set it pins that exact version; otherwise it tracks
+# whatever the current hashes publish. Echoes "<tarball>\t<sha>"; empty on
+# no match.
+monero:_resolve_asset() {
+	local prefix="$1" hashes="$2"
+	awk -v p="$prefix" -v pin="${MONERO_VERSION:-}" '
+		$2 ~ ("^" p "-v[0-9]") && $2 ~ /\.tar\.bz2$/ && $2 !~ /-gui-/ {
+			ver=$2; sub("^" p "-", "", ver); sub("\\.tar\\.bz2$", "", ver)
+			if (pin == "" || ver == pin) { print $2 "\t" $1; exit }
+		}
+	' "$hashes"
 }
 
 # SHA256 of a file, hex only. sha256sum (Linux) / shasum -a 256 (macOS).
@@ -162,7 +180,7 @@ help:install() {
 	  Any failure aborts with nothing installed (fail-closed).
 
 	  --from release   install source (only 'release' today; the default)
-	  --version        pin a specific release (default: $MONERO_VERSION)
+	  --version        pin a specific release (default: the current published release)
 	  --prefix <dir>   install into <dir> instead of the autodetected bindir
 	  --force          re-install even if the target version is present
 	ENDHELP
@@ -196,20 +214,12 @@ command:install() {
 	case "$os" in linux|macos) ;; *)
 		error "install: unsupported platform '$(uname -s)'"; return 1 ;;
 	esac
-	local asset; asset="$(monero:_asset)"
-	if [ -z "$asset" ]; then
+	local aprefix; aprefix="$(monero:_asset_prefix)"
+	if [ -z "$aprefix" ]; then
 		error "install: unsupported architecture '$(uname -m)' (need x86_64 or aarch64)"
 		return 1
 	fi
-	info "release: $MONERO_VERSION  asset: $asset"
-
 	local bindir; bindir="$(monero:_bindir "$prefix")"
-	# Idempotency: a matching monerod already in place is a no-op unless --force.
-	if [ -z "$force" ] && [ -x "$bindir/monerod" ] \
-		&& "$bindir/monerod" --version 2>/dev/null | grep -q "$MONERO_VERSION"; then
-		info "monerod $MONERO_VERSION already installed at $bindir (use --force to reinstall)"
-		return 0
-	fi
 
 	# 1. signing key (TOFU + fingerprint pin).
 	local key; key="$(monero:_ensure_key)" || return 1
@@ -228,19 +238,32 @@ command:install() {
 	fi
 	info "hashes signature verified (binaryFate)"
 
-	# 3. tarball + SHA256 check against the verified hashes.
-	local tarball="$asset.tar.bz2"
+	# 3. resolve THIS host's tarball + version FROM the verified hashes
+	# (BUG-055: track the current release, don't fail on a stale pin).
+	local resolved tarball want ver
+	resolved="$(monero:_resolve_asset "$aprefix" "$work/hashes.txt")"
+	if [ -z "$resolved" ]; then
+		error "install: no '$aprefix' release in the verified hashes${MONERO_VERSION:+ for $MONERO_VERSION} — aborting"
+		return 1
+	fi
+	tarball="${resolved%%	*}"; want="${resolved##*	}"
+	ver="${tarball#"$aprefix"-}"; ver="${ver%.tar.bz2}"
+	info "release: $ver  asset: $tarball"
+
+	# Idempotency: a matching monerod already in place is a no-op unless --force.
+	if [ -z "$force" ] && [ -x "$bindir/monerod" ] \
+		&& "$bindir/monerod" --version 2>/dev/null | grep -q "$ver"; then
+		info "monerod $ver already installed at $bindir (use --force to reinstall)"
+		return 0
+	fi
+
+	# 4. tarball + SHA256 check against the verified hashes.
+	local got
 	info "downloading $tarball"
 	if ! curl -fsSL -o "$work/$tarball" "$MONERO_RELEASE_BASEURL/$tarball"; then
 		error "install: failed to download $tarball from $MONERO_RELEASE_BASEURL"; return 1
 	fi
-	local want got
-	want="$(awk -v f="$tarball" '$2==f{print $1}' "$work/hashes.txt" | head -n1)"
 	got="$(monero:_sha256 "$work/$tarball")"
-	if [ -z "$want" ]; then
-		error "install: $tarball is not listed in the verified hashes file — aborting"
-		return 1
-	fi
 	if [ "$want" != "$got" ]; then
 		error "install: SHA256 mismatch for $tarball (tampered download?) — aborting"
 		error "  expected $want"
@@ -249,10 +272,11 @@ command:install() {
 	fi
 	info "sha256 verified: $got"
 
-	# 4. extract + stage the binaries.
+	# 5. extract + stage the binaries.
 	if ! tar -xjf "$work/$tarball" -C "$work" 2>/dev/null; then
 		error "install: failed to extract $tarball"; return 1
 	fi
+	local asset="${tarball%.tar.bz2}"
 	local srcdir="$work/$asset"
 	[ -d "$srcdir" ] || srcdir="$(find "$work" -maxdepth 1 -type d -name 'monero-*' | head -n1)"
 	if [ -z "$srcdir" ] || [ ! -d "$srcdir" ]; then
