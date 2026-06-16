@@ -655,6 +655,44 @@ command:space() {
 	$SUDO du -sh "$datadir" | cut -f1
 }
 
+# Probe the Fulcrum admin RPC getinfo for `status`. §5: a small self-contained
+# reimplementation of admin:_call's reachability (the daemon file does not
+# source the admin plugin). $FULCRUM_ADMIN_FIXTURE short-circuits the socket
+# in tests; $FULCRUM_ADMIN_ADDR overrides the address.
+daemon:_admin_getinfo() {
+	if [ -n "${FULCRUM_ADMIN_FIXTURE:-}" ]; then
+		local f="$FULCRUM_ADMIN_FIXTURE"
+		[ -d "$f" ] && f="$f/getinfo.json"
+		[ -f "$f" ] && { cat "$f"; return 0; }
+		return 1
+	fi
+	local addr host port reply
+	addr="${FULCRUM_ADMIN_ADDR:-127.0.0.1:8000}"; host="${addr%:*}"; port="${addr##*:}"
+	{ exec 3<>"/dev/tcp/$host/$port"; } 2>/dev/null || return 1
+	printf '{"id":1,"method":"getinfo"}\n' >&3
+	IFS= read -r reply <&3
+	exec 3>&- 2>/dev/null
+	printf '%s\n' "$reply"
+}
+
+help:status() { echo "usage: $SELF status [--user] — reachable? synced height? (admin RPC, no sudo)" >&2; }
+
+# Report whether the Fulcrum server is reachable (admin RPC) and its synced
+# height. Mirrors bitcoin/lightning/monero daemon status — no sudo.
+command:status() {
+	for a in "$@"; do case "$a" in -h|--help|help) help:status; return 0 ;; esac; done
+	local mode; mode="$(daemon:_mode "$@")"
+	local j; j="$(daemon:_admin_getinfo)"
+	if [ -z "$j" ]; then
+		echo "down ($mode-mode)"
+		warn "fulcrum admin RPC unreachable — is the service running? ('fulcrum start')"
+		return 1
+	fi
+	local height
+	height="$(printf '%s' "$j" | sed -n 's/.*"height"[: ]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
+	echo "healthy ($mode-mode, height ${height:-?})"
+}
+
 # ---------------------------------------------------------------------------
 # Help / dispatch
 # ---------------------------------------------------------------------------
@@ -669,6 +707,7 @@ command:help() {
 	                         macOS: source — no prebuilt mac binary)
 	    enable / disable     install + (de)activate the service unit
 	    start / stop         start / stop the running service
+	    status               reachable? synced height? (admin RPC, no sudo)
 	    monitor              follow the service log
 	    space                show the index disk usage
 

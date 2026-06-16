@@ -170,6 +170,17 @@ on Linux,
 .B launchctl kill SIGTERM
 on macOS.
 .TP
+.BR status " [" --user " | " --system "] [" --network " " net ]
+Report whether bitcoind is reachable and its block height, via
+.B bitcoin-cli
++ the cookie in the (group-readable) datadir \(em no sudo. Prints
+.BR healthy ,
+.B syncing
+.RI ( blocks / headers ),
+or
+.B down
+(exiting non-zero).
+.TP
 .BR monitor " [" --user " | " --system ]
 Follow the daemon's log:
 .B journalctl

@@ -1309,6 +1309,60 @@ feat034_env() {
 	[ -f "$XDG_CONFIG_HOME/systemd/user/bitcoind.service" ]
 }
 
+# --- uniform `daemon status` (parity with lightning/monero) ----------------
+
+@test "daemon status: healthy reports the block height via bitcoin-cli, no sudo" {
+	feat034_env linux
+	# Stub bitcoin-cli to answer getblockchaininfo with a synced node.
+	export BITCOIN_CLI="$HOME/bitcoin-cli-stub"
+	cat > "$BITCOIN_CLI" <<-'STUB'
+		#!/usr/bin/env bash
+		case "$*" in
+			*getblockchaininfo*) echo '{"chain":"main","blocks":850000,"headers":850000}' ;;
+			*) exit 0 ;;
+		esac
+	STUB
+	chmod +x "$BITCOIN_CLI"
+	run "$BITCOIN_BIN" daemon status --user
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"healthy"* ]]
+	[[ "$output" == *"850000"* ]]
+	! grep -q '^sudo ' "$FEAT034_CALLS"
+}
+
+@test "daemon status: syncing reports blocks/headers when behind" {
+	feat034_env linux
+	export BITCOIN_CLI="$HOME/bitcoin-cli-stub"
+	cat > "$BITCOIN_CLI" <<-'STUB'
+		#!/usr/bin/env bash
+		echo '{"chain":"main","blocks":700000,"headers":850000}'
+	STUB
+	chmod +x "$BITCOIN_CLI"
+	run "$BITCOIN_BIN" daemon status --user
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"syncing"* ]]
+	[[ "$output" == *"700000/850000"* ]]
+}
+
+@test "daemon status: down errors non-zero with a hint when bitcoind is unreachable" {
+	feat034_env linux
+	export BITCOIN_CLI="$HOME/bitcoin-cli-stub"
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$BITCOIN_CLI"   # cli fails => empty
+	chmod +x "$BITCOIN_CLI"
+	run "$BITCOIN_BIN" daemon status --user
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"down"* ]]
+	[[ "$output" == *"not reachable"* ]]
+}
+
+@test "daemon help + status help list the status verb" {
+	run "$BITCOIN_BIN" daemon help
+	[ "$status" -eq 0 ] || [ -n "$output" ]
+	[[ "$output" == *"status"* ]]
+	run "$BITCOIN_BIN" daemon help status
+	[[ "$output" == *"reachable"* ]]
+}
+
 @test "FEAT-034 — enable --user (macos) installs a LaunchAgent without UserName" {
 	feat034_env macos
 	run "$BITCOIN_BIN" daemon enable --user

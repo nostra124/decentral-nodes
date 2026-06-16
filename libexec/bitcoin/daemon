@@ -118,6 +118,7 @@ commands:
    disable [--user]         stop service and remove unit
    start [--user]           start bitcoind
    stop [--user]            stop bitcoind
+   status [--user]          reachable? block height? (group-read, no sudo)
    monitor [--user]         tail the bitcoind log
    password [--user]        show RPC credentials from config
    space [--user]           show data-dir disk usage
@@ -289,6 +290,46 @@ command:space() {
 		return 1
 	fi
 	$SUDO du -sh "$datadir" | cut -f1
+}
+
+# bitcoin-cli used by `status`. Prefer MacPorts / Homebrew over PATH (mirrors
+# the daemon's bitcoind preference). $BITCOIN_CLI overrides (tests).
+daemon:_bitcoin_cli() {
+	if [ -n "${BITCOIN_CLI:-}" ]; then printf '%s\n' "$BITCOIN_CLI"; return 0; fi
+	local c
+	for c in /opt/local/bin/bitcoin-cli /opt/homebrew/bin/bitcoin-cli "$(command -v bitcoin-cli 2>/dev/null)"; do
+		[ -n "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+	done
+	return 1
+}
+
+# Report whether bitcoind is reachable and its block height. Reads via the
+# cookie in the (group-readable) datadir — the three-user posture, NO sudo,
+# mirroring lightning/monero daemon status.
+command:status() {
+	for a in "$@"; do
+		case "$a" in -h|--help|help) help:status; return 0 ;; esac
+	done
+	local mode net datadir cli chainflag info blocks headers
+	mode="$(daemon:_mode "$@")"
+	net="$(daemon:_network "$@")" || { error "status: unknown network '${net#invalid:}'"; return 1; }
+	datadir="$(daemon:_datadir "$mode")"
+	cli="$(daemon:_bitcoin_cli)" || { error "status: bitcoin-cli not found (run 'bitcoin daemon install')"; return 1; }
+	chainflag="$(daemon:_chain "$net")"
+	# shellcheck disable=SC2086 # chainflag is a single optional token
+	info="$("$cli" -datadir="$datadir" $chainflag getblockchaininfo 2>/dev/null)"
+	if [ -z "$info" ]; then
+		echo "down ($net, $mode-mode)"
+		warn "bitcoind not reachable via '$cli -datadir=$datadir' — is it running, and is the .cookie readable by your group?"
+		return 1
+	fi
+	blocks="$(printf '%s' "$info"  | sed -n 's/.*"blocks"[: ]*\([0-9][0-9]*\).*/\1/p'  | head -n1)"
+	headers="$(printf '%s' "$info" | sed -n 's/.*"headers"[: ]*\([0-9][0-9]*\).*/\1/p' | head -n1)"
+	if [ -n "$headers" ] && [ -n "$blocks" ] && [ "$blocks" != "$headers" ]; then
+		echo "syncing ($net, $mode-mode, $blocks/$headers blocks)"
+		return 0
+	fi
+	echo "healthy ($net, $mode-mode, block ${blocks:-?})"
 }
 
 #------------------------------------------------------------------------------
@@ -570,6 +611,17 @@ help:stop() {
 	usage: $SELF stop [--user]
 
 	  Stop the bitcoind service gracefully.
+	ENDHELP
+}
+
+help:status() {
+	cat >&2 <<-ENDHELP
+	usage: $SELF status [--user] [--network <net>]
+
+	  Report whether bitcoind is reachable and its block height, via
+	  bitcoin-cli + the cookie in the (group-readable) datadir — no sudo.
+	  Prints 'healthy' / 'syncing (blocks/headers)' / 'down', and exits
+	  non-zero when the node is unreachable.
 	ENDHELP
 }
 

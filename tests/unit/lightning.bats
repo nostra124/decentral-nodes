@@ -106,6 +106,13 @@ setup() {
 	export LIGHTNING_LAUNCHD_DIR="$BATS_TMPDIR/launchd.$$"
 	rm -rf "$LIGHTNING_LAUNCHD_DIR"
 
+	# BUG-052 — pin the backing bitcoind datadir so enable's config-gen is
+	# hermetic on a host that is itself running bitcoind (the resolver would
+	# otherwise detect the live node's -datadir). The managed default keeps
+	# the existing BUG-033 `bitcoin-datadir=/var/lib/bitcoin` assertions true;
+	# the BUG-052 test unsets it to exercise auto-detection.
+	export LIGHTNING_BITCOIN_DATADIR=/var/lib/bitcoin
+
 	# BUG-037 — `id <username>` stub. The system installers probe whether the
 	# service account already exists; on a live host a real _lightning /
 	# clightning account makes that probe succeed, so the account-creation
@@ -173,10 +180,12 @@ EOF
 	[ -x "$LIGHTNING_BIN" ]
 }
 
-@test "lightning version returns 3.1.0" {
+@test "lightning version matches the root VERSION file" {
+	# Read VERSION at test time (mirrors bitcoin.bats / FEAT-020) so a
+	# release bump doesn't require editing this literal.
 	run "$LIGHTNING_BIN" version
 	[ "$status" -eq 0 ]
-	[ "$output" = "3.1.0" ]
+	[ "$output" = "$(cat "$BATS_TEST_DIRNAME/../../VERSION")" ]
 }
 
 @test "lightning version comes from the root VERSION file" {
@@ -2183,7 +2192,7 @@ EOF
 @test "1.2.0: -q flag parses + version still prints" {
 	run "$LIGHTNING_BIN" -q version
 	[ "$status" -eq 0 ]
-	[ "$output" = "3.1.0" ]
+	[ "$output" = "$(cat "$BATS_TEST_DIRNAME/../../VERSION")" ]
 }
 
 @test "1.2.0: -q -d flags compose (getopts handles both)" {
@@ -2193,7 +2202,7 @@ EOF
 	# second flag was lost or the verb was treated as a flag.
 	run "$LIGHTNING_BIN" -q -d version
 	[ "$status" -eq 0 ]
-	[[ "$output" == *"3.1.0"* ]]
+	[[ "$output" == *"$(cat "$BATS_TEST_DIRNAME/../../VERSION")"* ]]
 }
 
 @test "1.2.0: unknown flag exits non-zero" {
@@ -9910,4 +9919,22 @@ EOF
 	[ -f "$BIN_SHIM/dseditgroup.calls" ]
 	grep -q "dseditgroup -o edit -a _lightning -t user bitcoin" "$BIN_SHIM/dseditgroup.calls"
 	! grep -q "user _bitcoin" "$BIN_SHIM/dseditgroup.calls"
+}
+
+@test "BUG-052: enable auto-detects the backing bitcoind datadir (external node, zero manual edits)" {
+	_bug033_system_setup
+	[ "$(uname -s)" = "Darwin" ] && _bug033_stub_dscl
+	unset LIGHTNING_BITCOIN_DATADIR          # exercise auto-detection
+	# A running bitcoind whose -datadir is an external (MacPorts) path.
+	cat > "$BIN_SHIM/ps" <<'EOF'
+#!/bin/sh
+echo "bitcoin 821 /opt/local/bin/bitcoind -datadir=/opt/local/var/lib/bitcoind -conf=/opt/local/etc/bitcoin/bitcoin.conf"
+EOF
+	chmod +x "$BIN_SHIM/ps"
+	run "$LIGHTNING_BIN" daemon enable --system
+	[ "$status" -eq 0 ]
+	local cfg="$LIGHTNING_CONFIG_DIR/config"
+	[ -f "$cfg" ]
+	grep -q "^bitcoin-datadir=/opt/local/var/lib/bitcoind$" "$cfg"
+	! grep -q "^bitcoin-datadir=/var/lib/bitcoin$" "$cfg"
 }
