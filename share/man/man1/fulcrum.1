@@ -36,6 +36,11 @@ Stop the service and remove its unit; the index is preserved.
 .BR start ", " stop ", " monitor " [--system|--user]"
 Start, stop, or follow the running service.
 .TP
+.B status " [--system|--user]"
+Report whether the Fulcrum server is reachable (admin RPC) and its synced
+height \(em no sudo. Also available as
+.BR "fulcrum status" .
+.TP
 .B space " [--system|--user]"
 Show the Fulcrum index disk usage.
 .SS Configuration (FEAT-057)

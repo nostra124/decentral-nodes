@@ -91,6 +91,30 @@ daemon:_resolve_bitcoin_cli() {
 	readlink -f "$c" 2>/dev/null || echo "$c"
 }
 
+# BUG-052 — resolve the datadir of the bitcoind that actually backs this
+# node, so an EXTERNAL bitcoind (e.g. a MacPorts node at
+# /opt/local/var/lib/bitcoind) is wired into the config with zero manual
+# edits. When $LIGHTNING_BITCOIN_DATADIR is set it is AUTHORITATIVE (and the
+# probe is skipped — this keeps the unit suite hermetic on a host that is
+# itself running bitcoind; the suite pins it to /var/lib/bitcoin). Otherwise:
+# a running bitcoind's -datadir, else the first known datadir holding a
+# .cookie, else the managed default /var/lib/bitcoin.
+daemon:_resolve_bitcoin_datadir() {
+	if [ -n "${LIGHTNING_BITCOIN_DATADIR:-}" ]; then
+		printf '%s\n' "$LIGHTNING_BITCOIN_DATADIR"; return 0
+	fi
+	local d
+	d="$(ps -axo args 2>/dev/null | grep '[b]itcoind' \
+		| grep -oE -- '-datadir[= ][^ ]+' | head -n1 | sed -E 's/^-datadir[= ]//')"
+	[ -n "$d" ] && { printf '%s\n' "$d"; return 0; }
+	local c
+	for c in /var/lib/bitcoin /opt/local/var/lib/bitcoind /opt/homebrew/var/lib/bitcoind \
+	         "$HOME/.bitcoin" "$HOME/Library/Application Support/Bitcoin"; do
+		[ -e "$c/.cookie" ] && { printf '%s\n' "$c"; return 0; }
+	done
+	printf '/var/lib/bitcoin\n'
+}
+
 # BUG-033 — best-effort: add the lightning service account to the
 # bitcoind service group so it can read bitcoind's (now group-readable,
 # FEAT-274) cookie at $bitcoin-datadir/.cookie. The group is `_bitcoin`
@@ -1983,12 +2007,13 @@ install_macos_system() {
 	cfg="$conf_dir/config${cfg_suffix}"
 	log_file="$state_dir/log${cfg_suffix}"
 	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
+	bitcoin_datadir="$(daemon:_resolve_bitcoin_datadir)"
 	sudo tee "$cfg" >/dev/null <<EOF
 network=$LIGHTNING_NETWORK
 log-file=$log_file
 rpc-file-mode=0660
 ${bitcoin_cli:+bitcoin-cli=$bitcoin_cli}
-bitcoin-datadir=/var/lib/bitcoin
+bitcoin-datadir=$bitcoin_datadir
 disable-plugin=cln-grpc
 EOF
 	sudo chown $svc_user:$svc_user "$cfg"
@@ -2128,12 +2153,13 @@ install_system() {
 	cfg="$conf_dir/config${cfg_suffix}"
 	log_file="$state_dir/log${cfg_suffix}"
 	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
+	bitcoin_datadir="$(daemon:_resolve_bitcoin_datadir)"
 	sudo tee "$cfg" >/dev/null <<EOF
 network=$LIGHTNING_NETWORK
 log-file=$log_file
 rpc-file-mode=0660
 ${bitcoin_cli:+bitcoin-cli=$bitcoin_cli}
-bitcoin-datadir=/var/lib/bitcoin
+bitcoin-datadir=$bitcoin_datadir
 disable-plugin=cln-grpc
 EOF
 	sudo chown lightning:lightning "$cfg"
@@ -2242,12 +2268,13 @@ install_openrc_system() {
 	# supervise-daemon runs with a minimal env too), and disable cln-grpc.
 	local cfg="$state_dir/config" bitcoin_cli
 	bitcoin_cli="$(daemon:_resolve_bitcoin_cli || true)"
+	bitcoin_datadir="$(daemon:_resolve_bitcoin_datadir)"
 	$prefix tee "$cfg" >/dev/null <<EOF
 network=$LIGHTNING_NETWORK
 log-file=$state_dir/log
 rpc-file-mode=0660
 ${bitcoin_cli:+bitcoin-cli=$bitcoin_cli}
-bitcoin-datadir=/var/lib/bitcoin
+bitcoin-datadir=$bitcoin_datadir
 disable-plugin=cln-grpc
 EOF
 	$prefix chown lightning:lightning "$cfg"

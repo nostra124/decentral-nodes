@@ -278,6 +278,43 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	[[ "$output" == *"unknown source"* ]]
 }
 
+# --- uniform `daemon status` (parity with bitcoin/lightning/monero) --------
+
+@test "daemon status: healthy reports the synced height from the admin RPC" {
+	export FULCRUM_OS=linux
+	export FULCRUM_ADMIN_FIXTURE="$(fixdir getinfo '{"version":"Fulcrum 1.9.1","height":799123,"clients":3}')"
+	run "$FULCRUM" daemon status --user
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"healthy"* ]]
+	[[ "$output" == *"799123"* ]]
+}
+
+@test "daemon status: down errors non-zero with a hint when the admin RPC is unreachable" {
+	export FULCRUM_OS=linux
+	export FULCRUM_ADMIN_FIXTURE="$BATS_TEST_TMPDIR/empty-fx"   # no getinfo.json -> unreachable
+	mkdir -p "$FULCRUM_ADMIN_FIXTURE"
+	run "$FULCRUM" daemon status --user
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"down"* ]]
+	[[ "$output" == *"unreachable"* ]]
+}
+
+@test "daemon status: top-level 'fulcrum status' works via the per-verb symlink" {
+	export FULCRUM_OS=linux
+	export FULCRUM_ADMIN_FIXTURE="$(fixdir getinfo '{"height":800000}')"
+	run "$FULCRUM" status --user
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"healthy"* ]]
+	[[ "$output" == *"800000"* ]]
+}
+
+@test "daemon status: help + listing mention status" {
+	run "$FULCRUM" daemon help
+	[[ "$output" == *"status"* ]]
+	run "$FULCRUM" daemon status --help
+	[[ "$output" == *"reachable"* ]]
+}
+
 @test "FEAT-270: install --from release downloads, SHA256-verifies, and installs the prebuilt binary" {
 	local td="$BATS_TEST_TMPDIR/rel"; mkdir -p "$td/stub" "$td/pfx/bin" "$td/pkg/Fulcrum-9.9.9-x86_64-linux"
 	printf '#!/bin/sh\necho fake-fulcrum\n' > "$td/pkg/Fulcrum-9.9.9-x86_64-linux/Fulcrum"
