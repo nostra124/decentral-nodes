@@ -15,12 +15,19 @@ moderates a Fulcrum Electrum server that indexes the local bitcoind.
 Fulcrum is an independent daemon, not a wallet feature \(em hence a
 separate top-level command sharing one package and one version.
 .SH COMMANDS
-.SS Server lifecycle (FEAT-056)
+.SS Server lifecycle (FEAT-056, FEAT-307)
+Daemon lifecycle verbs are invoked as
+.BI "fulcrum daemon " verb
+(harmonized across the stack \(em bitcoin / lightning / fulcrum / monero all
+use
+.BI "<cmd> daemon " verb ).
+.B install
+stays a top-level verb.
 .TP
 .B install " [--from brew|apt|source|docker]"
 Install the Fulcrum server binary.
 .TP
-.B enable " [--system|--user]"
+.B daemon enable " [--system|--user]"
 Render and install a systemd/launchd unit and start the server.
 .B --system
 (default) runs Fulcrum as a dedicated
@@ -30,18 +37,17 @@ account (needs root);
 is the explicit opt-in for a rootless per-user service. Fails
 if the local bitcoind RPC is unreachable.
 .TP
-.B disable " [--system|--user]"
+.B daemon disable " [--system|--user]"
 Stop the service and remove its unit; the index is preserved.
 .TP
-.BR start ", " stop ", " monitor " [--system|--user]"
+.BR "daemon start" ", " "daemon stop" ", " "daemon monitor" " [--system|--user]"
 Start, stop, or follow the running service.
 .TP
-.B status " [--system|--user]"
+.B daemon status " [--system|--user]"
 Report whether the Fulcrum server is reachable (admin RPC) and its synced
-height \(em no sudo. Also available as
-.BR "fulcrum status" .
+height \(em no sudo.
 .TP
-.B space " [--system|--user]"
+.B daemon space " [--system|--user]"
 Show the Fulcrum index disk usage.
 .SS Configuration (FEAT-057)
 .TP

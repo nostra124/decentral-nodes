@@ -170,21 +170,21 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 
 @test "FEAT-056 AC1/AC3: enable --user (linux) writes a unit with no User= line" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
-	run "$FULCRUM" enable --user
+	run "$FULCRUM" daemon enable --user
 	[ "$status" -eq 0 ]
 	local unit="$XDG_CONFIG_HOME/systemd/user/fulcrumd.service"
 	[ -f "$unit" ]
 	grep -q "ExecStart=$FULCRUM_FULCRUMD" "$unit"
 	grep -q "$FULCRUM_DATADIR" "$unit"
 	! grep -q "^User=" "$unit"
-	run "$FULCRUM" disable --user
+	run "$FULCRUM" daemon disable --user
 	[ "$status" -eq 0 ]
 	[ ! -f "$unit" ]
 }
 
 @test "FEAT-056 AC3: enable --system (linux) renders a User=fulcrum line" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	local unit="$FULCRUM_ROOT/etc/systemd/system/fulcrumd.service"
 	[ -f "$unit" ]
@@ -195,7 +195,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 
 @test "FEAT-262: enable defaults to --system when no mode is given (linux)" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
-	run "$FULCRUM" enable
+	run "$FULCRUM" daemon enable
 	[ "$status" -eq 0 ]
 	# FEAT-262 flipped the default to --system: a bare enable installs the
 	# privileged system unit (dedicated 'fulcrum' account), not the per-user bus.
@@ -208,24 +208,24 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 
 @test "FEAT-262: disable defaults to --system (linux)" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
-	"$FULCRUM" enable >/dev/null 2>&1     # default (system) install
+	"$FULCRUM" daemon enable >/dev/null 2>&1     # default (system) install
 	local sys="$FULCRUM_ROOT/etc/systemd/system/fulcrumd.service"
 	[ -f "$sys" ]
-	run "$FULCRUM" disable
+	run "$FULCRUM" daemon disable
 	[ "$status" -eq 0 ]
 	[ ! -f "$sys" ]
 	! grep -q "systemctl --user disable" "$CALLLOG"
 }
 
 @test "FEAT-262: enable help names --system as the default" {
-	run "$FULCRUM" enable --help
+	run "$FULCRUM" daemon enable --help
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q -- '--system (default)'
 }
 
 @test "FEAT-056 AC1: enable --user (macos) writes a LaunchAgent plist" {
 	export FULCRUM_OS=macos FULCRUM_NODE_OK=yes
-	run "$FULCRUM" enable --user
+	run "$FULCRUM" daemon enable --user
 	[ "$status" -eq 0 ]
 	local unit="$HOME/Library/LaunchAgents/org.fulcrum.fulcrumd.plist"
 	[ -f "$unit" ]
@@ -234,41 +234,41 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 
 @test "FEAT-056 AC2: enable errors + non-zero when bitcoind RPC unreachable" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=no
-	run "$FULCRUM" enable --user
+	run "$FULCRUM" daemon enable --user
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"bitcoind RPC unreachable"* ]]
 }
 
 @test "FEAT-056 AC4: start/stop dispatch systemctl --user (linux)" {
 	export FULCRUM_OS=linux
-	run "$FULCRUM" start --user
+	run "$FULCRUM" daemon start --user
 	[ "$status" -eq 0 ]
 	grep -q "systemctl --user start fulcrumd" "$CALLLOG"
-	run "$FULCRUM" stop --user
+	run "$FULCRUM" daemon stop --user
 	grep -q "systemctl --user stop fulcrumd" "$CALLLOG"
 }
 
 @test "FEAT-056 AC4: start --system drives the system systemctl (linux)" {
 	export FULCRUM_OS=linux
-	run "$FULCRUM" start --system
+	run "$FULCRUM" daemon start --system
 	[ "$status" -eq 0 ]
 	grep -q "systemctl start fulcrumd" "$CALLLOG"
 }
 
 @test "FEAT-056 AC4: start (macos) drives launchctl kickstart" {
 	export FULCRUM_OS=macos
-	run "$FULCRUM" start --user
+	run "$FULCRUM" daemon start --user
 	grep -q "launchctl kickstart gui/.*/org.fulcrum.fulcrumd" "$CALLLOG"
 }
 
 @test "FEAT-056 AC5: space reports index usage, errors when dir absent" {
 	export FULCRUM_OS=linux
 	rm -rf "$FULCRUM_DATADIR"
-	run "$FULCRUM" space --user
+	run "$FULCRUM" daemon space --user
 	[ "$status" -ne 0 ]
 	[[ "$output" == *"does not exist"* ]]
 	mkdir -p "$FULCRUM_DATADIR"
-	run "$FULCRUM" space --user
+	run "$FULCRUM" daemon space --user
 	[ "$status" -eq 0 ]
 }
 
@@ -299,13 +299,18 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	[[ "$output" == *"unreachable"* ]]
 }
 
-@test "daemon status: top-level 'fulcrum status' works via the per-verb symlink" {
-	export FULCRUM_OS=linux
-	export FULCRUM_ADMIN_FIXTURE="$(fixdir getinfo '{"height":800000}')"
-	run "$FULCRUM" status --user
-	[ "$status" -eq 0 ]
-	[[ "$output" == *"healthy"* ]]
-	[[ "$output" == *"800000"* ]]
+@test "FEAT-307: fulcrum's top-level daemon verbs are removed (canonical: fulcrum daemon <verb>)" {
+	# Harmonized: daemon lifecycle is `fulcrum daemon <verb>` only — the old
+	# top-level shims (fulcrum enable/start/status/…) are gone. install +
+	# admin verbs stay top-level.
+	for v in enable disable start stop status monitor space; do
+		[ ! -e "$REPO/libexec/fulcrum/$v" ] || { echo "lingering top-level shim: $v"; return 1; }
+		run "$FULCRUM" "$v" --help
+		[ "$status" -ne 0 ]
+		[[ "$output" == *"not a fulcrum command"* ]]
+	done
+	# install stays top-level.
+	[ -e "$REPO/libexec/fulcrum/install" ]
 }
 
 @test "daemon status: help + listing mention status" {
@@ -382,7 +387,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 @test "BUG-031: enable (system, linux) provisions a dedicated group and joins the operator" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
 	unset FULCRUM_DATADIR
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	# A --user-group account so the dedicated 'fulcrum' group exists, and
 	# the invoking operator is added to it (group access, no sudo).
@@ -393,7 +398,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 @test "BUG-031: enable (system, linux) owns the datadir <svc>:<svc> at 0750" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
 	unset FULCRUM_DATADIR
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	grep -q 'chown fulcrum:fulcrum .*var/lib/fulcrum' "$CALLLOG"
 	grep -Eq 'chmod 0750 .*var/lib/fulcrum' "$CALLLOG"
@@ -407,7 +412,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	# unreadable linked dylib has the same observable shape).
 	printf '#!/usr/bin/env bash\nexit 1\n' > "$FULCRUM_FULCRUMD"
 	chmod +x "$FULCRUM_FULCRUMD"
-	run --separate-stderr "$FULCRUM" enable --system
+	run --separate-stderr "$FULCRUM" daemon enable --system
 	[ "$status" -ne 0 ]
 	echo "$stderr" | grep -q "cannot run"
 	# Must bail BEFORE installing the unit (no silent crash-loop left behind).
@@ -447,7 +452,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 @test "BUG-031: enable (system, macos) creates a hidden UID-296 _fulcrum dscl account" {
 	export FULCRUM_OS=macos FULCRUM_NODE_OK=yes
 	unset FULCRUM_DATADIR
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	grep -q 'dscl . -create /Users/_fulcrum UniqueID 296' "$CALLLOG"
 	grep -q 'dscl . -create /Users/_fulcrum IsHidden 1' "$CALLLOG"
@@ -460,7 +465,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	# monitor fails fast with a hint when there's no log yet (BUG-034), so
 	# seed one (the system datadir is $FULCRUM_DATADIR via the harness).
 	mkdir -p "$FULCRUM_DATADIR"; : > "$FULCRUM_DATADIR/fulcrum.log"
-	run "$FULCRUM" monitor --system
+	run "$FULCRUM" daemon monitor --system
 	[ "$status" -eq 0 ]
 	! grep -q 'sudo' "$CALLLOG"
 }
@@ -468,21 +473,21 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 @test "BUG-034: monitor errors with a hint when no log exists yet" {
 	export FULCRUM_OS=macos
 	mkdir -p "$FULCRUM_DATADIR"; rm -f "$FULCRUM_DATADIR/fulcrum.log"
-	run "$FULCRUM" monitor --system
+	run "$FULCRUM" daemon monitor --system
 	[ "$status" -ne 0 ]
 	echo "$output" | grep -q 'no log yet'
 }
 
 @test "BUG-031: monitor (system, linux) uses journalctl with no sudo" {
 	export FULCRUM_OS=linux
-	run "$FULCRUM" monitor --system
+	run "$FULCRUM" daemon monitor --system
 	[ "$status" -eq 0 ]
 	grep -q 'journalctl -u fulcrumd' "$CALLLOG"
 	! grep -q 'sudo journalctl' "$CALLLOG"
 }
 
 @test "BUG-031: enable usage hint shows [--user] only, prose keeps --system default" {
-	run "$FULCRUM" enable --help
+	run "$FULCRUM" daemon enable --help
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q 'usage:.*\[--user\]'
 	! echo "$output" | grep -Eq 'usage:.*--system \| --user'
@@ -549,7 +554,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 @test "BUG-034: enable (system, linux) makes the config dir traversable by the svc account" {
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
 	unset FULCRUM_DATADIR FULCRUM_CONFIG_DIR
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	# Config dir owned by the service account and chmod'd traversable (0755),
 	# so the daemon can open fulcrum.conf (was 0750 root:wheel → EACCES).
@@ -601,7 +606,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	export FULCRUM_OS=linux FULCRUM_NODE_OK=yes
 	unset FULCRUM_DATADIR
 	# The default usermod stub succeeds → the join is recorded.
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	grep -q 'usermod -aG bitcoin fulcrum' "$CALLLOG"
 }
@@ -609,7 +614,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 @test "BUG-034: enable (system, macos) best-effort-adds the svc to the _bitcoin group" {
 	export FULCRUM_OS=macos FULCRUM_NODE_OK=yes
 	unset FULCRUM_DATADIR
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	grep -q 'dseditgroup -o edit -a _fulcrum -t user _bitcoin' "$CALLLOG"
 }
@@ -620,7 +625,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	# Make usermod fail (group absent) — enable must still succeed.
 	printf '#!/usr/bin/env bash\necho "usermod $*" >> "%s"\nexit 1\n' "$CALLLOG" > "$MOCKBIN/usermod"
 	chmod +x "$MOCKBIN/usermod"
-	run "$FULCRUM" enable --system
+	run "$FULCRUM" daemon enable --system
 	[ "$status" -eq 0 ]
 	# A hint is emitted, but enable does not abort.
 	[[ "$output" == *"could not add"* ]]

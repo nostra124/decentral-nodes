@@ -1276,6 +1276,10 @@ feat034_env() {
 	# real node binds 8332). The sentinel matches no real port → "all free".
 	# The BUG-048 cases below override it with the specific busy port.
 	export BITCOIN_PORT_BUSY=none
+	# BUG-053 / FEAT-306 — pin the process source so status' running-node
+	# detection + share-cookie are hermetic (the real `ps` would otherwise
+	# find the host's live bitcoind). "" = nothing running; cases override it.
+	export BITCOIN_PS=""
 }
 
 @test "FEAT-034 — enable --user (linux) installs a rootless systemd unit" {
@@ -1361,6 +1365,51 @@ feat034_env() {
 	[[ "$output" == *"status"* ]]
 	run "$BITCOIN_BIN" daemon help status
 	[[ "$output" == *"reachable"* ]]
+}
+
+@test "FEAT-307: top-level 'bitcoin install' routes to the daemon installer (canonical) " {
+	# Harmonized: install is a top-level verb on every command. The old
+	# 'bitcoin daemon install' keeps working as an alias.
+	run "$BITCOIN_BIN" install --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"install"* ]]
+	run "$BITCOIN_BIN" daemon install --help
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"install"* ]]
+}
+
+@test "BUG-053: status detects the running node's datadir (external node)" {
+	feat034_env linux
+	# A running bitcoind at an external (MacPorts) datadir; cli reads it.
+	export BITCOIN_PS="bitcoind -datadir=/opt/local/var/lib/bitcoind -conf=/opt/local/etc/bitcoin/bitcoin.conf"
+	export BITCOIN_CLI="$HOME/bitcoin-cli-stub"
+	cat > "$BITCOIN_CLI" <<-'STUB'
+		#!/usr/bin/env bash
+		# Echo the JSON only when pointed at the detected external datadir.
+		case "$*" in
+			*-datadir=/opt/local/var/lib/bitcoind*getblockchaininfo*)
+				echo '{"chain":"main","blocks":850000,"headers":850000}' ;;
+			*) exit 1 ;;
+		esac
+	STUB
+	chmod +x "$BITCOIN_CLI"
+	run "$BITCOIN_BIN" daemon status --system
+	[ "$status" -eq 0 ]
+	[[ "$output" == *"healthy"* ]]
+	[[ "$output" == *"850000"* ]]
+}
+
+@test "BUG-053: status reports 'up but unauthorized' when the node listens but the cookie is unreadable" {
+	feat034_env linux
+	export BITCOIN_PS="bitcoind -datadir=/opt/local/var/lib/bitcoind"
+	export BITCOIN_PORT_BUSY=8332          # a node IS listening on mainnet RPC
+	export BITCOIN_CLI="$HOME/bitcoin-cli-stub"
+	printf '#!/usr/bin/env bash\nexit 1\n' > "$BITCOIN_CLI"   # cookie unreadable
+	chmod +x "$BITCOIN_CLI"
+	run "$BITCOIN_BIN" daemon status --system
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"up but unauthorized"* ]]
+	[[ "$output" == *"share-cookie"* ]]
 }
 
 # --- FEAT-306: share-cookie (let siblings read the running node's cookie) ---

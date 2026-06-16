@@ -1,0 +1,51 @@
+.TH LIGHTNING-INSTALL 1 "2026" "bitcoin stack" "User Commands"
+.SH NAME
+lightning-install \- install the Core Lightning daemon (top-level alias)
+.SH SYNOPSIS
+.B lightning install
+.RI [ options ]
+.SH DESCRIPTION
+Install the underlying
+.B lightningd
+(Core Lightning) binary. Harmonized across the stack (FEAT-307),
+.B install
+is a top-level verb on every command \(em
+.BR bitcoin (1),
+.BR lightning (1),
+.BR fulcrum (1),
+and
+.BR monero (1)
+all expose
+.BI "<cmd> install" .
+.PP
+This is a thin alias that delegates to
+.B lightning daemon install
+(which keeps working too); see
+.BR lightning-daemon (1)
+for the full set of install sources and flags.
+.SH OPTIONS
+See
+.BR lightning-daemon (1)
+\(em the options are identical
+.RB ( --from ,
+.BR --tag ,
+.BR --system ,
+.BR --yes ,
+.BR --force ,
+.BR --dry-run ).
+.SH SEE ALSO
+.BR lightning-daemon (1),
+.BR lightning (1)
+.SH HISTORY
+Top-level install added in the FEAT-307 harmonization.
+.SH STANDARDS
+Core Lightning packaging conventions.
+.SH FILES
+None of its own; see
+.BR lightning-daemon (1).
+.SH ENVIRONMENT
+See
+.BR lightning-daemon (1).
+.SH EXIT STATUS
+.B 0
+on success; non-zero on a failed install.
