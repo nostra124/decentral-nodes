@@ -133,12 +133,14 @@ daemon:_units_dir() {
 	(cd "$(dirname "$0")/../../share/monero/units" 2>/dev/null && pwd)
 }
 
-# Data directory for the mode. monerod's own default is ~/.bitmonero;
-# system mode uses /var/lib/monero (matching the bitcoin/fulcrum daemons).
+# Data directory for the mode. Harmonized layout (FEAT-308): system
+# /var/lib/monero; user ~/.monero on every platform (monerod's native default
+# is ~/.bitmonero, but we pass --data-dir explicitly, so the stack uses the
+# consistent ~/.<cmd> scheme across bitcoin/lightning/fulcrum/monero).
 daemon:_datadir() {
 	local mode=$1
 	if [ "$mode" = system ]; then printf '%s/var/lib/monero\n' "$(daemon:_root)"
-	else printf '%s/.bitmonero\n' "$HOME"; fi
+	else printf '%s/.monero\n' "$HOME"; fi
 }
 
 # Directory holding monerod.conf. FHS: system config under /etc/monero;

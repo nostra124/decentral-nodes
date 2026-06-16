@@ -37,7 +37,8 @@ has()   { type -t "$1:$2" | grep -q function; }
 config:_confdir() {
 	if [ -n "${MONERO_CONFIG_DIR:-}" ]; then printf '%s\n' "$MONERO_CONFIG_DIR"; return 0; fi
 	if [ -f /etc/monero/monerod.conf ]; then printf '/etc/monero\n'; return 0; fi
-	printf '%s/.bitmonero\n' "$HOME"
+	# Harmonized user datadir (FEAT-308): ~/.monero (not monerod's ~/.bitmonero).
+	printf '%s/.monero\n' "$HOME"
 }
 config:_conf() { printf '%s/monerod.conf\n' "$(config:_confdir)"; }
 

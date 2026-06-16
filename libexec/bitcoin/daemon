@@ -552,13 +552,14 @@ daemon:_units_dir() {
 	(cd "$(dirname "$0")/../../share/bitcoin/units" 2>/dev/null && pwd)
 }
 
-# Data directory for the given mode.
+# Data directory for the given mode. Harmonized layout (FEAT-308): system
+# /var/lib/<cmd>; user ~/.<cmd> on EVERY platform (no macOS
+# ~/Library/Application Support special-casing) so the path is identical on
+# Linux and macOS and consistent across bitcoin/lightning/fulcrum/monero.
 daemon:_datadir() {
 	local mode=$1
 	if [ "$mode" = system ]; then
 		printf '%s/var/lib/bitcoin\n' "$(daemon:_root)"
-	elif [ "$(daemon:_os)" = macos ]; then
-		printf '%s/Library/Application Support/Bitcoin\n' "$HOME"
 	else
 		printf '%s/.bitcoin\n' "$HOME"
 	fi
