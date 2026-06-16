@@ -81,9 +81,9 @@ config:_os() {
 config:_dir() {
 	local mode="${1:-user}"
 	if [ -n "${FULCRUM_CONFIG_DIR:-}" ]; then printf '%s\n' "$FULCRUM_CONFIG_DIR"; return 0; fi
+	# Harmonized (FEAT-308): system /etc/fulcrum; user ~/.fulcrum everywhere.
 	if [ "$mode" = system ]; then printf '%s/etc/fulcrum\n' "${FULCRUM_ROOT:-}"
-	elif [ "$(config:_os)" = macos ]; then printf '%s/Library/Application Support/Fulcrum\n' "$HOME"
-	else printf '%s/fulcrum\n' "${XDG_CONFIG_HOME:-$HOME/.config}"; fi
+	else printf '%s/.fulcrum\n' "$HOME"; fi
 }
 
 config:_file() { printf '%s/fulcrum.conf\n' "$(config:_dir "${1:-user}")"; }

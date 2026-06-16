@@ -356,7 +356,7 @@ monero_daemon_env() {
 	monero_daemon_env linux
 	run "$MONERO" daemon enable --user --prune
 	[ "$status" -eq 0 ]
-	local conf="$HOME/.bitmonero/monerod.conf"
+	local conf="$HOME/.monero/monerod.conf"
 	[ -f "$conf" ]
 	grep -q '^rpc-bind-ip=127.0.0.1' "$conf"
 	grep -q '^rpc-bind-port=18081' "$conf"
@@ -368,7 +368,7 @@ monero_daemon_env() {
 	monero_daemon_env linux
 	run "$MONERO" daemon enable --user --testnet
 	[ "$status" -eq 0 ]
-	grep -q '^rpc-bind-port=28081' "$HOME/.bitmonero/monerod-testnet.conf"
+	grep -q '^rpc-bind-port=28081' "$HOME/.monero/monerod-testnet.conf"
 }
 
 @test "FEAT-301 AC4: status (down) errors with a hint and uses no sudo" {
@@ -395,7 +395,7 @@ monero_daemon_env() {
 	run "$MONERO" daemon monitor --user
 	[ "$status" -eq 2 ]
 	[[ "$output" == *"no log"* ]]
-	[[ "$output" == *".bitmonero"* ]]
+	[[ "$output" == *".monero"* ]]
 	! grep -q '^sudo ' "$MCALLS"
 }
 

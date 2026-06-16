@@ -85,10 +85,10 @@ daemon:_units_dir() {
 daemon:_datadir() {
 	local mode=$1
 	if [ -n "${FULCRUM_DATADIR:-}" ]; then printf '%s\n' "$FULCRUM_DATADIR"; return 0; fi
+	# Harmonized (FEAT-308): system /var/lib/fulcrum; user ~/.fulcrum on every
+	# platform (no macOS Library special-casing).
 	if [ "$mode" = system ]; then
 		printf '%s/var/lib/fulcrum\n' "$(daemon:_root)"
-	elif [ "$(daemon:_os)" = macos ]; then
-		printf '%s/Library/Application Support/Fulcrum\n' "$HOME"
 	else
 		printf '%s/.fulcrum\n' "$HOME"
 	fi
@@ -98,12 +98,12 @@ daemon:_datadir() {
 daemon:_config_dir() {
 	local mode=$1
 	if [ -n "${FULCRUM_CONFIG_DIR:-}" ]; then printf '%s\n' "$FULCRUM_CONFIG_DIR"; return 0; fi
+	# Harmonized (FEAT-308): system /etc/fulcrum; user mode keeps config in the
+	# datadir (~/.fulcrum), identical on every platform.
 	if [ "$mode" = system ]; then
 		printf '%s/etc/fulcrum\n' "$(daemon:_root)"
-	elif [ "$(daemon:_os)" = macos ]; then
-		printf '%s/Library/Application Support/Fulcrum\n' "$HOME"
 	else
-		printf '%s/fulcrum\n' "${XDG_CONFIG_HOME:-$HOME/.config}"
+		printf '%s/.fulcrum\n' "$HOME"
 	fi
 }
 

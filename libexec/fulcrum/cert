@@ -27,8 +27,8 @@ cert:_os() {
 
 cert:_dir() {
 	if [ -n "${FULCRUM_CONFIG_DIR:-}" ]; then printf '%s\n' "$FULCRUM_CONFIG_DIR"; return 0; fi
-	if [ "$(cert:_os)" = macos ]; then printf '%s/Library/Application Support/Fulcrum\n' "$HOME"
-	else printf '%s/fulcrum\n' "${XDG_CONFIG_HOME:-$HOME/.config}"; fi
+	# Harmonized (FEAT-308): ~/.fulcrum on every platform.
+	printf '%s/.fulcrum\n' "$HOME"
 }
 
 help:cert() {
