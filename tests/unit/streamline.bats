@@ -1363,6 +1363,63 @@ feat034_env() {
 	[[ "$output" == *"reachable"* ]]
 }
 
+# --- FEAT-306: share-cookie (let siblings read the running node's cookie) ---
+
+@test "FEAT-306: share-cookie sets rpccookieperms=group in the running node's conf + restarts" {
+	feat034_env linux
+	local conf="$HOME/ext-bitcoin.conf"
+	printf 'server=1\nrest=1\n' > "$conf"
+	export BITCOIN_PS="bitcoin 821 /opt/local/bin/bitcoind -datadir=/opt/local/var/lib/bitcoind -conf=$conf"
+	run "$BITCOIN_BIN" daemon share-cookie
+	[ "$status" -eq 0 ]
+	grep -q '^rpccookieperms=group' "$conf"
+	[ "$(grep -c '^rpccookieperms' "$conf")" -eq 1 ]   # no duplicate
+	grep -q 'systemctl .*restart' "$FEAT034_CALLS"
+}
+
+@test "FEAT-306: share-cookie is idempotent when rpccookieperms=group is already set" {
+	feat034_env linux
+	local conf="$HOME/ext-bitcoin.conf"
+	printf 'server=1\nrpccookieperms=group\n' > "$conf"
+	export BITCOIN_PS="bitcoind -datadir=/opt/local/var/lib/bitcoind -conf=$conf"
+	run "$BITCOIN_BIN" daemon share-cookie
+	[ "$status" -eq 0 ]
+	# Idempotent: the single existing line is untouched (the "already set"
+	# info is suppressed by SELF_QUIET=1 in setup).
+	[ "$(grep -c '^rpccookieperms' "$conf")" -eq 1 ]
+	grep -q '^rpccookieperms=group' "$conf"
+}
+
+@test "FEAT-306: share-cookie --no-restart sets the option but does not restart" {
+	feat034_env linux
+	local conf="$HOME/ext-bitcoin.conf"
+	printf 'server=1\n' > "$conf"
+	export BITCOIN_PS="bitcoind -conf=$conf"
+	run "$BITCOIN_BIN" daemon share-cookie --no-restart
+	[ "$status" -eq 0 ]
+	grep -q '^rpccookieperms=group' "$conf"
+	[[ "$output" == *"restart bitcoind"* ]]
+	[ ! -f "$FEAT034_CALLS" ] || ! grep -q 'restart' "$FEAT034_CALLS"
+}
+
+@test "FEAT-306: share-cookie errors when no bitcoind is running" {
+	feat034_env linux
+	export BITCOIN_PS=""   # nothing running
+	run "$BITCOIN_BIN" daemon share-cookie
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"no running bitcoind"* ]]
+}
+
+@test "FEAT-306: share-cookie listed in help; enable's port-busy refusal hints at it" {
+	run "$BITCOIN_BIN" daemon help
+	[[ "$output" == *"share-cookie"* ]]
+	feat034_env linux
+	export BITCOIN_PORT_BUSY=8332
+	run "$BITCOIN_BIN" daemon enable --user
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"share-cookie"* ]]
+}
+
 @test "FEAT-034 — enable --user (macos) installs a LaunchAgent without UserName" {
 	feat034_env macos
 	run "$BITCOIN_BIN" daemon enable --user

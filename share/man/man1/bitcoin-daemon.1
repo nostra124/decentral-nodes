@@ -181,6 +181,18 @@ or
 .B down
 (exiting non-zero).
 .TP
+.BR share-cookie " [" --no-restart ]
+Make the
+.B running
+bitcoind's RPC cookie group-readable
+.RB ( rpccookieperms=group )
+so sibling daemons (lightning, fulcrum) in the node's group authenticate
+without their own credentials. Detects the running node's config + datadir
+(including an external MacPorts/Homebrew node), sets the option idempotently,
+and restarts the node to regenerate the cookie.
+.B --no-restart
+sets the option but leaves the restart to you.
+.TP
 .BR monitor " [" --user " | " --system ]
 Follow the daemon's log:
 .B journalctl
