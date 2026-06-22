@@ -1,0 +1,85 @@
+#!/bin/bash
+# liquid config — manage elements.conf settings.
+#
+# FEAT-305 Phase 1: basic config management (show/set network).
+
+set -e
+
+ELEMENTS_DIR="${ELEMENTS_DIR:-$HOME/.elements}"
+ELEMENTS_CONF="$ELEMENTS_DIR/elements.conf"
+
+usage() {
+	cat >&2 <<EOF
+usage: liquid config <command> [args]
+
+   Manage elements.conf settings.
+
+   Commands:
+     show                Print current config (or default if no config)
+     set <key> <value>   Set a config value
+     get <key>           Get a config value
+
+   Common keys:
+     network             liquid | liquidtest | regtest
+     rpcuser             RPC username
+     rpcpassword         RPC password (generated if not set)
+     daemon              1 to run as daemon
+     txindex             1 to enable transaction index
+
+   Examples:
+     liquid config show
+     liquid config set network liquidtest
+     liquid config get network
+EOF
+}
+
+cmd_show() {
+	if [ -f "$ELEMENTS_CONF" ]; then
+		cat "$ELEMENTS_CONF"
+	else
+		echo "# No config file at $ELEMENTS_CONF"
+		echo "# Default configuration:"
+		echo "network=liquid"
+		echo "daemon=1"
+	fi
+}
+
+cmd_get() {
+	local key="$1"
+	if [ -z "$key" ]; then
+		error "config get: key required"
+		return 1
+	fi
+	if [ ! -f "$ELEMENTS_CONF" ]; then
+		return 1
+	fi
+	grep "^${key}=" "$ELEMENTS_CONF" | cut -d= -f2-
+}
+
+cmd_set() {
+	local key="$1" value="$2"
+	if [ -z "$key" ] || [ -z "$value" ]; then
+		error "config set: key and value required"
+		return 1
+	fi
+	mkdir -p "$(dirname "$ELEMENTS_CONF")"
+	# Remove existing key, then append
+	if [ -f "$ELEMENTS_CONF" ]; then
+		local tmp; tmp=$(mktemp)
+		grep -v "^${key}=" "$ELEMENTS_CONF" > "$tmp" 2>/dev/null || true
+		echo "${key}=${value}" >> "$tmp"
+		mv "$tmp" "$ELEMENTS_CONF"
+	else
+		echo "${key}=${value}" > "$ELEMENTS_CONF"
+	fi
+	info "set $key=$value in $ELEMENTS_CONF"
+}
+
+# Dispatch
+case "${1:-help}" in
+	show) shift; cmd_show "$@" ;;
+	get)  shift; cmd_get "$@" ;;
+	set)  shift; cmd_set "$@" ;;
+	help) usage ;;
+	*)    usage; exit 1 ;;
+esac

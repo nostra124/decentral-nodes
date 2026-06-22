@@ -591,13 +591,45 @@ install_lsps_plugin() {
 	info "    lightning daemon restart"
 }
 
+# BUG-054 — resolve the correct LIGHTNING_DIR for system-mode.
+# When running `lightning daemon status` from a user shell, the
+# default LIGHTNING_DIR=$HOME/.lightning is wrong for a system-mode
+# install (plist uses --lightning-dir=/var/lib/lightning). This helper
+# mirrors the log-path resolution in cmd_monitor.
+daemon:_resolve_dir() {
+	if system_installed; then
+		if is_macos; then
+			echo "${LIGHTNING_SYSTEM_STATE:-/var/lib/lightning}"
+		else
+			# Linux system-mode: /var/lib/lightning or the distro's packaged dir
+			echo "/var/lib/lightning"
+		fi
+	else
+		echo "$LIGHTNING_DIR"
+	fi
+}
+
 # Surface the most recent BROKEN/FATAL line and the daemon log path
 # so the user has a starting point when status is "down".
+# BUG-053 — also check system-mode log path on macOS.
 report_last_error() {
+	local sys_dir
+	sys_dir="$(daemon:_resolve_dir)"
 	local logfile
-	for candidate in "$LIGHTNING_DIR/log" "$NETWORK_DIR/log"; do
-		[ -f "$candidate" ] && logfile="$candidate" && break
-	done
+	# Check system-mode log first (if installed), then user-mode logs
+	if [ "$sys_dir" != "$LIGHTNING_DIR" ]; then
+		local sys_suffix=""
+		[ "$LIGHTNING_NETWORK" != bitcoin ] && sys_suffix="-$LIGHTNING_NETWORK"
+		for candidate in "$sys_dir/log${sys_suffix}" "$sys_dir/$LIGHTNING_NETWORK/log"; do
+			[ -f "$candidate" ] && logfile="$candidate" && break
+		done
+	fi
+	# Fall back to user-mode logs
+	if [ -z "$logfile" ]; then
+		for candidate in "$LIGHTNING_DIR/log" "$NETWORK_DIR/log"; do
+			[ -f "$candidate" ] && logfile="$candidate" && break
+		done
+	fi
 	[ -n "$logfile" ] || return 0
 	local last; last=$(grep -E 'BROKEN|FATAL|backend died|died' "$logfile" 2>/dev/null | tail -1)
 	if [ -n "$last" ]; then
@@ -803,6 +835,16 @@ cmd_status() {
 	local backend="bitcoind/bcli"
 	if backend_enabled; then
 		backend="$(backend_name)"
+	fi
+	# BUG-054 — for system-mode, resolve the correct LIGHTNING_DIR
+	# before calling cli() / daemon_running(). The RPC socket is
+	# under /var/lib/lightning, not $HOME/.lightning.
+	local resolved_dir
+	resolved_dir="$(daemon:_resolve_dir)"
+	if [ "$resolved_dir" != "$LIGHTNING_DIR" ]; then
+		LIGHTNING_DIR="$resolved_dir"
+		NETWORK_DIR="$LIGHTNING_DIR/$LIGHTNING_NETWORK"
+		RPC_FILE="$NETWORK_DIR/lightning-rpc"
 	fi
 	if daemon_running; then
 		local info; info=$(cli getinfo)

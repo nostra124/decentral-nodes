@@ -1,0 +1,303 @@
+#!/bin/bash
+# liquid peg — two-way peg operations (BTC ↔ L-BTC).
+#
+# FEAT-305 Phase 3: peg operations between Bitcoin and Liquid.
+# The Liquid Network is a federated sidechain with a two-way peg.
+#
+# Peg-in:  BTC → L-BTC (send BTC to federation address, claim L-BTC)
+# Peg-out: L-BTC → BTC (burn L-BTC, receive BTC at specified address)
+#
+# Liquid uses a federation of functionaries (15 members) to manage pegs.
+# Peg-ins require ~102 confirmations on Bitcoin before L-BTC is credited.
+# Peg-outs require ~2 hours on Liquid before BTC is released.
+
+set -e
+
+ELEMENTS_DIR="${ELEMENTS_DIR:-$HOME/.elements}"
+ELEMENTS_NETWORK="${ELEMENTS_NETWORK:-liquid}"
+NETWORK_DIR="$ELEMENTS_DIR/$ELEMENTS_NETWORK"
+RPC_FILE="$NETWORK_DIR/elements-rpc"
+
+cli() { elements-cli --elements-dir="$ELEMENTS_DIR" --network="$ELEMENTS_NETWORK" "$@"; }
+
+usage() {
+	cat >&2 <<EOF
+usage: liquid peg <command> [args]
+
+   Two-way peg operations between Bitcoin and Liquid.
+
+   Peg-in (BTC → L-BTC):
+     in <btc-address>           Get a peg-in address from the federation
+     claim <btc-txid>           Claim L-BTC after peg-in BTC confirmations
+
+   Peg-out (L-BTC → BTC):
+     out <btc-address> <amount> Initiate peg-out (burn L-BTC, receive BTC)
+     status <pegout-id>         Check peg-out status
+
+   Status:
+     pending                    List pending peg-ins and peg-outs
+
+   Notes:
+     - Peg-ins require ~102 BTC confirmations (~17 hours)
+     - Peg-outs require ~2 hours on Liquid
+     - Federation functionaries process pegs in batches
+     - Minimum peg-in: 0.001 BTC (dust limit)
+     - Minimum peg-out: 0.01 BTC (network fee)
+
+   Examples:
+     # Get peg-in address
+     liquid peg in
+
+     # Send BTC to that address, then wait for 102 confirmations
+     # Claim your L-BTC
+     liquid peg claim <btc-txid>
+
+     # Convert L-BTC back to BTC
+     liquid peg out bc1q... 1000000
+
+EOF
+}
+
+# Get a peg-in address from the federation
+# The user sends BTC to this address, then claims after confirmations
+cmd_in() {
+	# Check if elementsd is running
+	if ! cli getblockchaininfo >/dev/null 2>&1; then
+		error "peg in: elementsd is not running"
+		error "run 'liquid daemon start' first"
+		return 1
+	fi
+
+	# Get the federation peg-in address
+	# Elements uses `getsidechaininfo` to show peg details
+	local sidechain_info
+	sidechain_info=$(cli getsidechaininfo 2>/dev/null) || {
+		error "peg in: cannot get federation info"
+		return 1
+	}
+
+	# Extract the federation peg-in address
+	# This is a P2SH or P2WSH address controlled by the federation
+	local peg_address
+	peg_address=$(echo "$sidechain_info" | jq -r '.pegged_btc_address // .fedpegscript // empty' 2>/dev/null)
+
+	# If no address in getsidechaininfo, derive from federation info
+	if [ -z "$peg_address" ] || [ "$peg_address" = "null" ]; then
+		# Use getpeginaddress to get a new peg-in address
+		peg_address=$(cli getpeginaddress 2>/dev/null | jq -r '.mainchain_address // .address // empty') || {
+			error "peg in: cannot derive peg-in address"
+			info "The federation may not be configured for peg operations"
+			info "On regtest/testnet, you may need to run a local federation"
+			return 1
+		}
+	fi
+
+	echo "Peg-in address: $peg_address"
+	echo ""
+	echo "To peg-in L-BTC:"
+	echo "  1. Send BTC to this address"
+	echo "  2. Wait for ~102 confirmations (~17 hours)"
+	echo "  3. Run 'liquid peg claim <btc-txid>'"
+	echo ""
+	echo "The federation will process your peg-in after confirmations."
+}
+
+# Claim L-BTC after peg-in BTC has confirmations
+cmd_claim() {
+	local btc_txid="${1:-}"
+	
+	if [ -z "$btc_txid" ]; then
+		error "peg claim: BTC transaction ID required"
+		return 1
+	fi
+
+	# Check if elementsd is running
+	if ! cli getblockchaininfo >/dev/null 2>&1; then
+		error "peg claim: elementsd is not running"
+		return 1
+	fi
+
+	info "checking peg-in status for BTC tx: $btc_txid"
+
+	# Verify the BTC transaction exists and has confirmations
+	# This requires bitcoind running or a blockchain backend
+	local btc_tx_info
+	btc_tx_info=$(bitcoin-cli gettxoutproof "[$btc_txid]" 2>/dev/null) || {
+		warn "peg claim: cannot verify BTC transaction (bitcoind not available?)"
+		info "proceeding anyway - elementsd will verify on its own"
+	}
+
+	# Attempt to claim the peg-in
+	# Elements uses claimpegin which takes the BTC txid and outpoint
+	local claim_result
+	claim_result=$(cli claimpegin "$btc_txid" 0 2>&1) || {
+		# Check if it's because confirmations are insufficient
+		if echo "$claim_result" | grep -qi "confirmation\|mature"; then
+			error "peg claim: insufficient confirmations"
+			info "Peg-ins require ~102 BTC confirmations"
+			info "Check your BTC tx: bitcoin-cli getrawtransaction $btc_tx_id true"
+		else
+			error "peg claim: failed to claim L-BTC"
+			error "$claim_result"
+		fi
+		return 1
+	}
+
+	# Extract L-BTC amount from result
+	local lbtc_amount
+	lbtc_amount=$(echo "$claim_result" | jq -r '.amount // .value // empty' 2>/dev/null)
+
+	echo "Peg-in claimed successfully!"
+	[ -n "$lbtc_amount" ] && echo "L-BTC received: $lbtc_amount"
+	echo ""
+	echo "Your L-BTC is now available in the default wallet."
+}
+
+# Initiate peg-out (L-BTC → BTC)
+cmd_out() {
+	local btc_address="${1:-}"
+	local amount="${2:-}"
+
+	if [ -z "$btc_address" ]; then
+		error "peg out: BTC address required"
+		return 1
+	fi
+
+	if [ -z "$amount" ]; then
+		error "peg out: amount required (in satoshis)"
+		return 1
+	fi
+
+	# Validate amount is a number
+	if ! [[ "$amount" =~ ^[0-]+$ ]]; then
+		error "peg out: amount must be a positive integer (satoshis)"
+		return 1
+	fi
+
+	# Check if elementsd is running
+	if ! cli getblockchaininfo >/dev/null 2>&1; then
+		error "peg out: elementsd is not running"
+		return 1
+	fi
+
+	# Validate BTC address
+	if ! bitcoin-cli validateaddress "$btc_address" >/dev/null 2>&1 2>&1; then
+		warn "peg out: cannot validate BTC address (bitcoind not available?)"
+	fi
+
+	# Convert amount from satoshis to BTC (Elements uses BTC units)
+	local amount_btc
+	amount_btc=$(awk -v s="$amount" 'BEGIN { printf "%.8f", s / 100000000 }')
+
+	info "initiating peg-out of $amount satoshis ($amount_btc BTC) to $btc_address"
+
+	# Send to the federation's peg-out address
+	# Elements uses sendtomainchain for peg-outs
+	local result
+	result=$(cli sendtomainchain "$btc_address" "$amount_btc" 2>&1) || {
+		error "peg out: failed to initiate peg-out"
+		error "$result"
+		return 1
+	}
+
+	# Extract peg-out ID
+	local pegout_id
+	pegout_id=$(echo "$result" | jq -r '.txid // .pegoutid // .tx_id // empty' 2>/dev/null)
+
+	echo "Peg-out initiated successfully!"
+	[ -n "$pegout_id" ] && echo "Peg-out ID: $pegout_id"
+	echo ""
+	echo "The federation will process your peg-out in ~2 hours."
+	echo "Check status: liquid peg status $pegout_id"
+}
+
+# Check peg-out status
+cmd_status() {
+	local pegout_id="${1:-}"
+
+	if [ -z "$pegout_id" ]; then
+		error "peg status: peg-out ID required"
+		return 1
+	fi
+
+	# Check if elementsd is running
+	if ! cli getblockchaininfo >/dev/null 2>&1; then
+		error "peg status: elementsd is not running"
+		return 1
+	fi
+
+	# Get transaction info
+	local tx_info
+	tx_info=$(cli gettransaction "$pegout_id" 2>/dev/null) || {
+		error "peg status: peg-out ID not found"
+		return 1
+	}
+
+	local confirmations
+	confirmations=$(echo "$tx_info" | jq -r '.confirmations // 0')
+
+	echo "Peg-out status:"
+	echo "  ID:           $pegout_id"
+	echo "  Confirmations: $confirmations"
+	
+	if [ "$confirmations" -ge 102 ]; then
+		echo "  Status:       COMPLETE"
+		echo ""
+		echo "Your BTC should arrive at the destination address."
+	elif [ "$confirmations" -gt 0 ]; then
+		echo "  Status:       PENDING"
+		echo ""
+		echo "Waiting for confirmations ($confirmations/102)"
+	else
+		echo "  Status:       UNCONFIRMED"
+		echo ""
+		echo "Transaction not yet in a block"
+	fi
+}
+
+# List pending peg-ins and peg-outs
+cmd_pending() {
+	# Check if elementsd is running
+	if ! cli getblockchaininfo >/dev/null 2>&1; then
+		error "peg pending: elementsd is not running"
+		return 1
+	fi
+
+	info "pending peg operations:"
+	echo ""
+
+	# List pending peg-ins
+	local pending_ins
+	pending_ins=$(cli listpegin 2>/dev/null | jq -r '.[] | select(.confirmations < 102) | "Peg-in: \(.txid) (\(.confirmations)/102 confirmations)"' 2>/dev/null) || true
+
+	if [ -n "$pending_ins" ]; then
+		echo "Peg-ins (BTC → L-BTC):"
+		echo "$pending_ins"
+		echo ""
+	else
+		echo "No pending peg-ins"
+		echo ""
+	fi
+
+	# List pending peg-outs
+	local pending_outs
+	pending_outs=$(cli listpegin 2>/dev/null | jq -r '.[] | select(.status == "pending") | "Peg-out: \(.txid)"' 2>/dev/null) || true
+
+	if [ -n "$pending_outs" ]; then
+		echo "Peg-outs (L-BTC → BTC):"
+		echo "$pending_outs"
+	else
+		echo "No pending peg-outs"
+	fi
+}
+
+# Dispatch
+case "${1:-help}" in
+	in)      shift; cmd_in "$@" ;;
+	claim)   shift; cmd_claim "$@" ;;
+	out)     shift; cmd_out "$@" ;;
+	status)  shift; cmd_status "$@" ;;
+	pending) shift; cmd_pending "$@" ;;
+	help)    usage ;;
+	*)       usage; exit 1 ;;
+esac

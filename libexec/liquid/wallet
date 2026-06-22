@@ -1,0 +1,262 @@
+#!/bin/bash
+# liquid wallet — L-BTC wallet operations.
+#
+# FEAT-305 Phase 2: wallet surface for the Liquid Network.
+# Elements uses the same HD wallet structure as Bitcoin (BIP-39/32/44/84).
+
+set -e
+
+ELEMENTS_DIR="${ELEMENTS_DIR:-$HOME/.elements}"
+ELEMENTS_NETWORK="${ELEMENTS_NETWORK:-liquid}"
+NETWORK_DIR="$ELEMENTS_DIR/$ELEMENTS_NETWORK"
+RPC_FILE="$NETWORK_DIR/elements-rpc"
+
+cli() { elements-cli --elements-dir="$ELEMENTS_DIR" --network="$ELEMENTS_NETWORK" "$@"; }
+
+usage() {
+	cat >&2 <<EOF
+usage: liquid wallet <command> [args]
+
+   L-BTC wallet operations for the Liquid Network.
+
+   Wallet management:
+     new <name>              Create a new wallet
+     list                    List all wallets
+     load <name>             Load an existing wallet
+     unload <name>           Unload a wallet
+
+   Balance & addresses:
+     balance [<name>]        Show wallet balance (confidential by default)
+     address [<name>]        Generate a new confidential address
+     addresses [<name>]      List wallet addresses
+
+   Advanced:
+     dump <name>             Dump wallet private keys (WARNING: sensitive)
+     info <name>             Show wallet information
+
+   Examples:
+     liquid wallet new mywallet
+     liquid wallet balance mywallet
+     liquid wallet address mywallet
+     liquid wallet list
+
+   The wallet uses Elements' built-in HD wallet (BIP-39/32/44).
+   Liquid confidential addresses (CT) hide amounts and asset types.
+
+EOF
+}
+
+# Create a new wallet with BIP-39 mnemonic
+cmd_new() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet new: name required"
+		return 1
+	fi
+	
+	# Check if wallet already exists
+	if cli listwallets 2>/dev/null | jq -e ".[] | select(. == \"$name\")" >/dev/null 2>&1; then
+		error "wallet new: wallet '$name' already exists"
+		return 1
+	fi
+
+	info "creating wallet '$name'..."
+	
+	# Create wallet with descriptors (Elements 22+ style)
+	if ! cli createwallet "$name" false false "" false false 2>/dev/null; then
+		# Fall back to legacy wallet creation
+		if ! cli createwallet "$name" 2>/dev/null; then
+			error "wallet new: failed to create wallet '$name'"
+			return 1
+		fi
+	fi
+
+	# Get master fingerprint for backup
+	local info
+	info=$(cli getwalletinfo 2>/dev/null) || true
+	
+	echo ""
+	info "wallet '$name' created successfully"
+	echo ""
+	warn "IMPORTANT: Back up your wallet!"
+	echo "  The wallet mnemonic was displayed during creation."
+	echo "  Run 'liquid wallet dump $name' to export private keys."
+	echo ""
+}
+
+# List all wallets
+cmd_list() {
+	cli listwallets 2>/dev/null | jq -r '.[]' 2>/dev/null || {
+		cli listwallets 2>/dev/null || {
+			error "wallet list: no wallets loaded"
+			return 1
+		}
+	}
+}
+
+# Load an existing wallet
+cmd_load() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet load: name required"
+		return 1
+	fi
+	
+	if cli loadwallet "$name" 2>/dev/null; then
+		info "wallet '$name' loaded"
+	else
+		error "wallet load: failed to load wallet '$name'"
+		return 1
+	fi
+}
+
+# Unload a wallet
+cmd_unload() {
+	local name="${1:-}"
+	if [ -z "$name" ]; then
+		error "wallet unload: name required"
+		return 1
+	fi
+	
+	if cli unloadwallet "$name" 2>/dev/null; then
+		info "wallet '$name' unloaded"
+	else
+		error "wallet unload: failed to unload wallet '$name'"
+		return 1
+	fi
+}
+
+# Show wallet balance (confidential by default)
+cmd_balance() {
+	local name="${1:-}"
+	
+	# If no name, try to use the default wallet
+	if [ -z "$name" ]; then
+		name=$(cli getwalletinfo 2>/dev/null | jq -r '.walletname // empty')
+		if [ -z "$name" ]; then
+			error "wallet balance: no wallet loaded"
+			info "run 'liquid wallet load <name>' or 'liquid wallet new <name>'"
+			return 1
+		fi
+	fi
+	
+	local balance
+	balance=$(cli -rpcwallet="$name" getbalance 2>/dev/null) || {
+		error "wallet balance: cannot get balance for wallet '$name'"
+		return 1
+	}
+	
+	# Elements returns balances in JSON with different asset types
+	if echo "$balance" | jq -e '.bitcoin' >/dev/null 2>&1; then
+		local btc_amt lbtc_amt
+		btc_amt=$(echo "$balance" | jq -r '.bitcoin // 0')
+		lbtc_amt=$(echo "$balance" | jq -r '."liquid-bitcoin" // .bitcoin // 0')
+		echo "L-BTC: $lbtc_amt"
+		[ "$btc_amt" != "0" ] && [ "$btc_amt" != "null" ] && echo "BTC:   $btc_amt"
+	else
+		echo "Balance: $balance"
+	fi
+	
+	# Show asset balances if any
+	local assets
+	assets=$(cli -rpcwallet="$name" getbalance 2>/dev/null | jq -r 'to_entries | .[] | select(.key != "bitcoin" and .key != "liquid-bitcoin") | "\(.key): \(.value)"' 2>/dev/null)
+	if [ -n "$assets" ]; then
+		echo ""
+		echo "Assets:"
+		echo "$assets"
+	fi
+}
+
+# Generate a new confidential address
+cmd_address() {
+	local name="${1:-}"
+	
+	if [ -z "$name" ]; then
+		name=$(cli getwalletinfo 2>/dev/null | jq -r '.walletname // empty')
+		if [ -z "$name" ]; then
+			error "wallet address: no wallet loaded"
+			return 1
+		fi
+	fi
+	
+	local addr
+	addr=$(cli -rpcwallet="$name" getnewaddress 2>/dev/null) || {
+		error "wallet address: failed to generate address"
+		return 1
+	}
+	
+	echo "$addr"
+}
+
+# List wallet addresses
+cmd_addresses() {
+	local name="${1:-}"
+	
+	if [ -z "$name" ]; then
+		name=$(cli getwalletinfo 2>/dev/null | jq -r '.walletname // empty')
+		if [ -z "$name" ]; then
+			error "wallet addresses: no wallet loaded"
+			return 1
+		fi
+	fi
+	
+	cli -rpcwallet="$name" listreceivedbyaddress 0 true true 2>/dev/null | \
+		jq -r '.[] | "\(.address)\t\(.amount)\t\(.confirmations) conf"' || {
+		error "wallet addresses: failed to list addresses"
+		return 1
+	}
+}
+
+# Dump wallet private keys (sensitive!)
+cmd_dump() {
+	local name="${1:-}"
+	
+	if [ -z "$name" ]; then
+		error "wallet dump: wallet name required"
+		return 1
+	fi
+	
+	warn "This will display private keys. Press Ctrl+C to cancel."
+	warn "Never share private keys with anyone!"
+	echo ""
+	read -p "Continue? [y/N] " -r
+	if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+		info "cancelled"
+		return 0
+	fi
+	
+	cli -rpcwallet="$name" dumpwallet "/dev/stdout" 2>/dev/null | grep -E '^[A-Za-z0-9]+' | head -20
+}
+
+# Show wallet information
+cmd_info() {
+	local name="${1:-}"
+	
+	if [ -z "$name" ]; then
+		name=$(cli getwalletinfo 2>/dev/null | jq -r '.walletname // empty')
+		if [ -z "$name" ]; then
+			error "wallet info: no wallet loaded"
+			return 1
+		fi
+	fi
+	
+	cli -rpcwallet="$name" getwalletinfo 2>/dev/null | jq . || {
+		error "wallet info: failed to get wallet info"
+		return 1
+	}
+}
+
+# Dispatch
+case "${1:-help}" in
+	new)       shift; cmd_new "$@" ;;
+	list)      shift; cmd_list "$@" ;;
+	load)      shift; cmd_load "$@" ;;
+	unload)    shift; cmd_unload "$@" ;;
+	balance)   shift; cmd_balance "$@" ;;
+	address)   shift; cmd_address "$@" ;;
+	addresses) shift; cmd_addresses "$@" ;;
+	dump)      shift; cmd_dump "$@" ;;
+	info)      shift; cmd_info "$@" ;;
+	help)      usage ;;
+	*)         usage; exit 1 ;;
+esac

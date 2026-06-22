@@ -1,0 +1,807 @@
+#!/bin/bash
+# liquid daemon — elementsd lifecycle management.
+#
+# Implements FEAT-305 Phase 1. Subcommands:
+#   start    — bring up elementsd (background; --daemon or via supervisor)
+#   run      — bring up elementsd in foreground (for launchd/systemd Type=simple)
+#   stop     — graceful shutdown via `elements-cli stop`
+#   restart  — stop + start
+#   status   — health check (process / RPC / sync)
+#   monitor  — tail the live log
+#   install  — install Elements itself
+#   enable   — generate a service unit
+#              Linux: systemd (~/.config/systemd/user/liquid.service)
+#                     or system-mode (/etc/systemd/system/elementsd.service)
+#              macOS: launchd (~/Library/LaunchAgents/<label>.plist)
+#   disable  — stop service and remove unit
+
+set -e
+
+ELEMENTS_DIR="${ELEMENTS_DIR:-$HOME/.elements}"
+ELEMENTS_NETWORK="${ELEMENTS_NETWORK:-liquid}"
+NETWORK_DIR="$ELEMENTS_DIR/$ELEMENTS_NETWORK"
+RPC_FILE="$NETWORK_DIR/elements-rpc"
+LAUNCHD_LABEL="network.liquid.elementsd"
+
+# BUG-037 — launchd plist directories are overridable seams so the unit
+# tests (and any sandbox) never read or write the real system paths.
+ELEMENTS_LAUNCHAGENTS_DIR="${ELEMENTS_LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+ELEMENTS_LAUNCHD_DIR="${ELEMENTS_LAUNCHD_DIR:-/Library/LaunchDaemons}"
+
+# FEAT-269 — systemd unit / launchd-label base name for the main
+# elementsd service. mainnet ('liquid') keeps the bare names for
+# backward compatibility; testnet gets a -testnet suffix.
+ELEMENTS_SVC="elementsd"
+
+ELEMENTS_CONF="$ELEMENTS_DIR/elements.conf"
+
+cli() { elements-cli --elements-dir="$ELEMENTS_DIR" --network="$ELEMENTS_NETWORK" "$@"; }
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# BUG-033 — resolve a binary on PATH to its REAL path (chasing symlinks).
+daemon:_resolve_bin() {
+	local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+	readlink -f "$p" 2>/dev/null || echo "$p"
+}
+
+# BUG-052 — resolve the datadir of the bitcoind that backs Liquid.
+# Liquid is a federated sidechain; it needs bitcoind for peg operations.
+# When $ELEMENTS_BITCOIN_DATADIR is set it is AUTHORITATIVE.
+daemon:_resolve_bitcoin_datadir() {
+	if [ -n "${ELEMENTS_BITCOIN_DATADIR:-}" ]; then
+		printf '%s\n' "$ELEMENTS_BITCOIN_DATADIR"; return 0
+	fi
+	# Try to find a running bitcoind first
+	local d
+	d="$(ps -axo args 2>/dev/null | grep '[b]itcoind' \
+		| grep -oE -- '-datadir[= ][^ ]+' | head -n1 | sed -E 's/^-datadir[= ]//')"
+	[ -n "$d" ] && { printf '%s\n' "$d"; return 0; }
+	# Fall back to common locations
+	for d in /var/lib/bitcoin /opt/local/var/lib/bitcoind /opt/homebrew/var/lib/bitcoind \
+	         "$HOME/.bitcoin" "$HOME/Library/Application Support/Bitcoin"; do
+		[ -e "$d/.cookie" ] && { printf '%s\n' "$d"; return 0; }
+	done
+	printf '/var/lib/bitcoin\n'
+}
+
+# BUG-054 — resolve the correct ELEMENTS_DIR for system-mode.
+# When running `liquid daemon status` from a user shell, the
+# default ELEMENTS_DIR=$HOME/.elements is wrong for a system-mode
+# install (plist uses --elements-dir=/var/lib/liquid).
+daemon:_resolve_dir() {
+	if system_installed; then
+		if is_macos; then
+			echo "${ELEMENTS_SYSTEM_STATE:-/var/lib/liquid}"
+		else
+			echo "/var/lib/liquid"
+		fi
+	else
+		echo "$ELEMENTS_DIR"
+	fi
+}
+
+# BUG-051 — join the bitcoind group so elementsd can read its cookie.
+daemon:_join_bitcoin_group() {
+	local svc_user="$1" g added=0
+	for g in _bitcoin bitcoin; do
+		if is_macos; then dscl . -read "/Groups/$g" >/dev/null 2>&1
+		else getent group "$g" >/dev/null 2>&1; fi || continue
+		if is_macos; then
+			sudo dseditgroup -o edit -a "$svc_user" -t user "$g" 2>/dev/null
+		else
+			sudo usermod -aG "$g" "$svc_user" 2>/dev/null
+		fi
+		info "added $svc_user to the $g group (bitcoind cookie access)"
+		added=1
+	done
+	[ "$added" = 1 ] || \
+		info "no bitcoind service group (_bitcoin/bitcoin) found — Elements needs bitcoind for peg operations"
+}
+
+# Resolve --user or --system from the argument list for the operate
+# verbs (start/stop/status/monitor/restart). Returns "user" or "system".
+daemon:_mode() {
+	local mode=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--user)   mode=user; shift ;;
+			--system) mode=system; shift ;;
+			*) shift ;;
+		esac
+	done
+	if [ -n "$mode" ]; then
+		echo "$mode"
+	elif system_installed; then
+		echo system
+	else
+		echo user
+	fi
+}
+
+# BUG-050 — is a *system*-mode supervisor unit installed for this product,
+# on ANY platform?
+system_installed() {
+	if is_macos; then
+		[ -f "$ELEMENTS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist" ]
+	elif [ "$(init_system)" = openrc ]; then
+		[ -f "${ELEMENTS_INIT_D:-/etc/init.d}/elementsd" ]
+	else
+		system_mode
+	fi
+}
+
+# FEAT-269 — make the main elementsd service network-aware.
+elements:_apply_network() {
+	local net="$ELEMENTS_NETWORK" want=0 a
+	for a in "$@"; do
+		if [ "$want" = 1 ]; then net="$a"; want=0; continue; fi
+		case "$a" in
+			--network)   want=1 ;;
+			--network=*) net="${a#--network=}" ;;
+		esac
+	done
+	case "$net" in
+		main|mainnet|liquid) net=liquid ;;
+		test|testnet|liquidtest) net=liquidtest ;;
+		regtest) net=regtest ;;
+		*) error "unknown network '$net' (liquid|liquidtest|regtest)"; return 1 ;;
+	esac
+	ELEMENTS_NETWORK="$net"
+	NETWORK_DIR="$ELEMENTS_DIR/$net"
+	RPC_FILE="$NETWORK_DIR/elements-rpc"
+	if [ "$net" = liquid ]; then
+		LAUNCHD_LABEL="network.liquid.elementsd"
+		ELEMENTS_SVC="elementsd"
+	else
+		LAUNCHD_LABEL="network.liquid.elementsd-$net"
+		ELEMENTS_SVC="elementsd-$net"
+	fi
+}
+
+launchd_plist() {
+	local user_plist="$ELEMENTS_LAUNCHAGENTS_DIR/${LAUNCHD_LABEL}.plist"
+	local sys_plist="$ELEMENTS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist"
+	if [ -f "$user_plist" ]; then
+		echo "$user_plist"
+	elif [ -f "$sys_plist" ]; then
+		echo "$sys_plist"
+	elif [ "$EUID" -eq 0 ]; then
+		echo "$sys_plist"
+	else
+		echo "$user_plist"
+	fi
+}
+
+launchd_installed() {
+	is_macos && [ -f "$(launchd_plist)" ]
+}
+
+launchd_loaded() {
+	is_macos && command -v launchctl >/dev/null 2>&1 && \
+		launchctl list "$LAUNCHD_LABEL" >/dev/null 2>&1
+}
+
+systemd_user_installed() {
+	[ -f "$HOME/.config/systemd/user/liquid.service" ]
+}
+
+system_mode() {
+	command -v systemctl >/dev/null 2>&1 && \
+		systemctl --quiet is-enabled "${ELEMENTS_SVC}.service" 2>/dev/null
+}
+
+init_system() {
+	if [ -f /bin/openrc ]; then echo openrc
+	elif command -v systemctl >/dev/null 2>&1; then echo systemd
+	else echo unknown; fi
+}
+
+usage() {
+	cat >&2 <<EOF
+usage: liquid daemon <subcommand> [args]
+
+   Lifecycle of the underlying elementsd process.
+   enable defaults to --system (--user is the rootless opt-in);
+   operate verbs auto-detect the installed mode.
+
+   lifecycle:
+     start [--user|--system]    bring up elementsd (background)
+     run                         foreground (for launchd / systemd)
+     stop [--user|--system]     graceful shutdown
+     restart [--user|--system]  stop + start
+     status [--user|--system]   health check
+     monitor [--user|--system]  tail the daemon log
+
+   setup:
+     install [--from <src>]     install elementsd (brew|apt|source)
+     enable [--system|--user]   install + start unit (default: system)
+     disable [--system|--user]  stop service and remove unit
+
+   see 'liquid daemon help <subcommand>' for detailed usage.
+EOF
+}
+
+daemon_running() {
+	command -v elements-cli >/dev/null 2>&1 && cli getblockchaininfo >/dev/null 2>&1
+}
+
+# Surface the most recent BROKEN/FATAL line and the daemon log path.
+# BUG-053 — also check system-mode log path on macOS.
+report_last_error() {
+	local sys_dir
+	sys_dir="$(daemon:_resolve_dir)"
+	local logfile
+	# Check system-mode log first (if installed), then user-mode logs
+	if [ "$sys_dir" != "$ELEMENTS_DIR" ]; then
+		local sys_suffix=""
+		[ "$ELEMENTS_NETWORK" != liquid ] && sys_suffix="-$ELEMENTS_NETWORK"
+		for candidate in "$sys_dir/log${sys_suffix}" "$sys_dir/$ELEMENTS_NETWORK/log"; do
+			[ -f "$candidate" ] && logfile="$candidate" && break
+		done
+	fi
+	# Fall back to user-mode logs
+	if [ -z "$logfile" ]; then
+		for candidate in "$ELEMENTS_DIR/log" "$NETWORK_DIR/log"; do
+			[ -f "$candidate" ] && logfile="$candidate" && break
+		done
+	fi
+	[ -n "$logfile" ] || return 0
+	local last; last=$(grep -E 'BROKEN|FATAL|Error|error' "$logfile" 2>/dev/null | tail -1)
+	if [ -n "$last" ]; then
+		echo "  last error: $last"
+	fi
+	echo "  log: $logfile  (tail with: liquid daemon monitor -f)"
+}
+
+# Non-blocking sanity check on the Bitcoin backend. Elements needs
+# bitcoind for peg operations; without it the daemon prints errors.
+check_bitcoind() {
+	if ! command -v bitcoin-cli >/dev/null 2>&1; then
+		warn "bitcoin-cli not found — elementsd needs bitcoind for peg operations"
+		return 1
+	fi
+	local datadir
+	datadir="$(daemon:_resolve_bitcoin_datadir)"
+	if ! bitcoin-cli ${datadir:+-datadir="$datadir"} getblockcount >/dev/null 2>&1; then
+		warn "bitcoind isn't reachable — peg operations will fail"
+		return 1
+	fi
+	return 0
+}
+
+cmd_start() {
+	elements:_apply_network "$@" || return 1
+	local mode; mode=$(daemon:_mode "$@")
+	if daemon_running; then
+		info "daemon already running"
+		return 0
+	fi
+	# Best-effort pre-flight. Warn-only.
+	check_bitcoind || true
+	# Detection order: installed supervisor first.
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local plist=$ELEMENTS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
+			info "sudo launchctl load -w $plist"
+			sudo launchctl load -w "$plist"
+		else
+			info "sudo systemctl start ${ELEMENTS_SVC}.service"
+			sudo systemctl start "${ELEMENTS_SVC}.service"
+		fi
+	elif launchd_installed; then
+		local plist; plist=$(launchd_plist)
+		if launchd_loaded; then
+			info "launchctl kickstart $LAUNCHD_LABEL"
+			launchctl kickstart "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || \
+				launchctl start "$LAUNCHD_LABEL"
+		else
+			info "launchctl load -w $plist"
+			launchctl load -w "$plist"
+		fi
+	elif system_mode; then
+		info "sudo systemctl start ${ELEMENTS_SVC}.service"
+		sudo systemctl start "${ELEMENTS_SVC}.service"
+	elif systemd_user_installed; then
+		info "systemctl --user start liquid"
+		systemctl --user start liquid
+	else
+		command -v elementsd >/dev/null || {
+			error "elementsd not found — install Elements"
+			exit 127
+		}
+		mkdir -p "$ELEMENTS_DIR"
+		local logfile="$ELEMENTS_DIR/log"
+		info "starting elementsd directly (no service unit installed)"
+		info "   tip: run \`liquid daemon enable\` to set up launchd / systemd"
+		info "   log: $logfile"
+		elementsd \
+			--elements-dir="$ELEMENTS_DIR" \
+			--network="$ELEMENTS_NETWORK" \
+			--log-file="$logfile" \
+			--daemon \
+			>>"$logfile" 2>&1
+	fi
+
+	# Post-start probe
+	local up=0
+	for _ in 1 2 3 4 5; do
+		if daemon_running; then up=1; break; fi
+		sleep 1
+	done
+	if [ "$up" -ne 1 ]; then
+		error "daemon did not come up — exited during startup"
+		report_last_error
+		exit 2
+	fi
+}
+
+cmd_run() {
+	if daemon_running; then
+		error "daemon already running; stop it before \`daemon run\`"
+		exit 1
+	fi
+	command -v elementsd >/dev/null || {
+		error "elementsd not found — install Elements"
+		exit 127
+	}
+	check_bitcoind || true
+	mkdir -p "$ELEMENTS_DIR"
+	info "running elementsd in foreground"
+	exec elementsd \
+		--elements-dir="$ELEMENTS_DIR" \
+		--network="$ELEMENTS_NETWORK"
+}
+
+cmd_stop() {
+	elements:_apply_network "$@" || return 1
+	local mode; mode=$(daemon:_mode "$@")
+	if ! daemon_running; then
+		info "daemon not running"
+		return 0
+	fi
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local plist=$ELEMENTS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
+			info "sudo launchctl unload $plist"
+			sudo launchctl unload "$plist"
+		else
+			info "sudo systemctl stop ${ELEMENTS_SVC}.service"
+			sudo systemctl stop "${ELEMENTS_SVC}.service"
+		fi
+	elif launchd_loaded; then
+		local plist; plist=$(launchd_plist)
+		info "launchctl unload $plist"
+		launchctl unload "$plist"
+	elif system_mode; then
+		info "sudo systemctl stop ${ELEMENTS_SVC}.service"
+		sudo systemctl stop "${ELEMENTS_SVC}.service"
+	elif systemd_user_installed; then
+		info "systemctl --user stop liquid"
+		systemctl --user stop liquid
+	else
+		cli stop >/dev/null
+	fi
+	info "daemon stopped"
+}
+
+cmd_restart() {
+	local mode; mode=$(daemon:_mode "$@")
+	cmd_stop "$@" || true
+	for _ in 1 2 3 4 5; do
+		[ ! -S "$RPC_FILE" ] && break
+		sleep 1
+	done
+	cmd_start "$@"
+}
+
+cmd_status() {
+	elements:_apply_network "$@" || return 1
+	local mode; mode=$(daemon:_mode "$@")
+	local rc=0
+	# BUG-054 — for system-mode, resolve the correct ELEMENTS_DIR
+	local resolved_dir
+	resolved_dir="$(daemon:_resolve_dir)"
+	if [ "$resolved_dir" != "$ELEMENTS_DIR" ]; then
+		ELEMENTS_DIR="$resolved_dir"
+		NETWORK_DIR="$ELEMENTS_DIR/$ELEMENTS_NETWORK"
+		RPC_FILE="$NETWORK_DIR/elements-rpc"
+	fi
+	if daemon_running; then
+		local info; info=$(cli getblockchaininfo)
+		local block; block=$(jq -r .blocks <<<"$info")
+		local sync; sync=$(jq -r '.initialblockdownload // false' <<<"$info")
+		if [ "$sync" = "true" ]; then
+			echo "syncing ($mode-mode, block $block)"
+			rc=1
+		else
+			echo "healthy ($mode-mode, block $block)"
+		fi
+	else
+		echo "down"
+		report_last_error
+		rc=2
+	fi
+	exit $rc
+}
+
+cmd_monitor() {
+	elements:_apply_network "$@" || return 1
+	local mode; mode=$(daemon:_mode "$@")
+	local passthrough=() skip=0
+	for arg in "$@"; do
+		if [ "$skip" = 1 ]; then skip=0; continue; fi
+		case "$arg" in
+			--user|--system) ;;
+			--network) skip=1 ;;
+			--network=*) ;;
+			*) passthrough+=("$arg") ;;
+		esac
+	done
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local sys_suffix=""
+			[ "$ELEMENTS_NETWORK" != liquid ] && sys_suffix="-$ELEMENTS_NETWORK"
+			local state_dir="${ELEMENTS_SYSTEM_STATE:-/var/lib/liquid}"
+			local logfile="$state_dir/log${sys_suffix}"
+			[ -f "$logfile" ] || { error "system log not found at $logfile"; exit 2; }
+			exec tail "${passthrough[@]}" "$logfile"
+		else
+			exec journalctl -u "${ELEMENTS_SVC}.service" "${passthrough[@]}"
+		fi
+	fi
+	if systemd_user_installed; then
+		exec journalctl --user -u liquid.service "${passthrough[@]}"
+	fi
+	# launchd's StandardOutPath and our direct `cmd_start` both write
+	# to $ELEMENTS_DIR/log; elementsd's own default is
+	# $ELEMENTS_DIR/<network>/log.
+	local logfile
+	for candidate in "$ELEMENTS_DIR/log" "$NETWORK_DIR/log"; do
+		if [ -f "$candidate" ]; then
+			logfile="$candidate"
+			break
+		fi
+	done
+	[ -n "$logfile" ] || {
+		error "no log file yet at $ELEMENTS_DIR/log or $NETWORK_DIR/log"
+		if launchd_loaded; then
+			warn "the LaunchAgent is loaded but hasn't produced a log entry yet"
+		elif daemon_running; then
+			warn "the daemon is running but logging to an unexpected path"
+		else
+			warn "run \`liquid daemon start\` (or load the LaunchAgent / systemd unit)"
+		fi
+		exit 2
+	}
+	exec tail "${passthrough[@]}" "$logfile"
+}
+
+cmd_enable() {
+	elements:_apply_network "$@" || return 1
+	local system=1 user_explicit=0 migrate=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--system)      system=1; shift ;;
+			--user)        system=0; user_explicit=1; shift ;;
+			--network)     shift 2 ;;
+			--network=*)   shift ;;
+			--migrate)     migrate=1; shift ;;
+			*) error "daemon enable: unknown flag $1"; exit 1 ;;
+		esac
+	done
+
+	if is_macos; then
+		if [ $system -eq 1 ]; then
+			install_macos_system "$migrate"
+		else
+			install_macos_user
+		fi
+	elif [ "$(init_system)" = "openrc" ]; then
+		if [ "$user_explicit" -eq 1 ]; then
+			info "OpenRC has no per-user mode — installing system-wide"
+		fi
+		install_openrc_system "$migrate"
+	elif [ $system -eq 1 ]; then
+		install_system "$migrate"
+	else
+		install_user
+	fi
+}
+
+cmd_disable() {
+	elements:_apply_network "$@" || return 1
+	local mode; mode=$(daemon:_mode "$@")
+	info "stopping daemon"
+	cmd_stop --"$mode" 2>/dev/null || true
+
+	if [ "$mode" = "system" ]; then
+		if is_macos; then
+			local plist=$ELEMENTS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist
+			if [ -f "$plist" ]; then
+				sudo launchctl unload "$plist" 2>/dev/null || true
+				sudo rm "$plist"
+				info "removed $plist"
+			fi
+		elif [ "$(init_system)" = "openrc" ]; then
+			local init_d="${ELEMENTS_INIT_D:-/etc/init.d}"
+			if [ -f "$init_d/elementsd" ]; then
+				sudo rc-update del elementsd default 2>/dev/null || true
+				sudo rm "$init_d/elementsd"
+				info "removed $init_d/elementsd"
+			fi
+		else
+			if [ -f "/etc/systemd/system/${ELEMENTS_SVC}.service" ]; then
+				sudo systemctl stop "${ELEMENTS_SVC}.service" 2>/dev/null || true
+				sudo systemctl disable "${ELEMENTS_SVC}.service" 2>/dev/null || true
+				sudo rm "/etc/systemd/system/${ELEMENTS_SVC}.service"
+				sudo systemctl daemon-reload
+				info "removed /etc/systemd/system/${ELEMENTS_SVC}.service"
+			fi
+		fi
+	else
+		if is_macos; then
+			local plist="$ELEMENTS_LAUNCHAGENTS_DIR/${LAUNCHD_LABEL}.plist"
+			if [ -f "$plist" ]; then
+				launchctl unload "$plist" 2>/dev/null || true
+				rm "$plist"
+				info "removed $plist"
+			fi
+		else
+			local unit="$HOME/.config/systemd/user/liquid.service"
+			if [ -f "$unit" ]; then
+				systemctl --user stop liquid 2>/dev/null || true
+				systemctl --user disable liquid 2>/dev/null || true
+				rm "$unit"
+				systemctl --user daemon-reload 2>/dev/null || true
+				info "removed $unit"
+			fi
+		fi
+	fi
+	info "daemon disabled"
+	info "data directory preserved: ${ELEMENTS_DIR}"
+}
+
+install_macos_user() {
+	local plist; plist=$(launchd_plist)
+	local self_bin="$SELF_LIBEXEC/../bin/liquid"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+	mkdir -p "$(dirname "$plist")"
+	cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${self_bin}</string>
+        <string>daemon</string>
+        <string>run</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ELEMENTS_DIR</key>
+        <string>${ELEMENTS_DIR}</string>
+        <key>ELEMENTS_NETWORK</key>
+        <string>${ELEMENTS_NETWORK}</string>
+        <key>PATH</key>
+        <string>${PATH}</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>${ELEMENTS_DIR}/log</string>
+    <key>StandardErrorPath</key>
+    <string>${ELEMENTS_DIR}/log</string>
+</dict>
+</plist>
+EOF
+	info "wrote $plist"
+	info "next:"
+	info "    liquid daemon start         # routes through launchctl"
+	info "    liquid daemon status"
+	info "    liquid daemon monitor -f"
+	info "stop:  liquid daemon stop"
+}
+
+install_macos_system() {
+	local migrate="$1"
+	local plist="$ELEMENTS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist"
+	local self_bin="$SELF_LIBEXEC/../bin/liquid"
+	self_bin=$(cd "$(dirname "$self_bin")" && pwd)/$(basename "$self_bin")
+	local elements_bin; elements_bin=$(daemon:_resolve_bin elementsd)
+
+	if [ -z "$elements_bin" ]; then
+		error "elementsd not found — run \`liquid daemon install\` first"
+		return 1
+	fi
+
+	# Ensure _liquid user exists
+	if ! dscl . -read /Users/_liquid >/dev/null 2>&1; then
+		info "creating _liquid service account"
+		local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+		local uid=$((max_uid + 1))
+		sudo dscl . -create /Users/_liquid
+		sudo dscl . -create /Users/_liquid UserShell /usr/bin/false
+		sudo dscl . -create /Users/_liquid UniqueID "$uid"
+		sudo dscl . -create /Users/_liquid PrimaryGroupID 310
+		sudo dscl . -create /Users/_liquid NFSHomeDirectory /var/lib/liquid
+		sudo dscl . -create /Users/_liquid RealName "Liquid Network"
+	fi
+
+	# Ensure data directory exists with correct ownership
+	sudo mkdir -p /var/lib/liquid
+	sudo chown _liquid:_liquid /var/lib/liquid
+	sudo chmod 750 /var/lib/liquid
+
+	# Ensure config directory exists
+	sudo mkdir -p /etc/liquid
+
+	# Join _bitcoin group for cookie access (BUG-051)
+	daemon:_join_bitcoin_group _liquid
+
+	# Write plist
+	sudo mkdir -p "$(dirname "$plist")"
+	sudo tee "$plist" > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>UserName</key>
+    <string>_liquid</string>
+    <key>GroupName</key>
+    <string>_liquid</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${elements_bin}</string>
+        <string>--elements-dir=/var/lib/liquid</string>
+        <string>--network=${ELEMENTS_NETWORK}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>/var/lib/liquid/log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/lib/liquid/log</string>
+</dict>
+</plist>
+EOF
+	sudo chmod 644 "$plist"
+	info "wrote $plist"
+	info ""
+	info "next:"
+	info "    sudo launchctl load -w $plist"
+	info "    liquid daemon status"
+	info "    liquid daemon monitor -f"
+}
+
+install_system() {
+	local migrate="$1"
+	local elements_bin; elements_bin=$(daemon:_resolve_bin elementsd)
+
+	if [ -z "$elements_bin" ]; then
+		error "elementsd not found — run \`liquid daemon install\` first"
+		return 1
+	fi
+
+	# Ensure liquid user exists
+	if ! getent passwd liquid >/dev/null 2>&1; then
+		info "creating liquid service account"
+		sudo useradd --system --shell /usr/sbin/nologin --home-dir /var/lib/liquid liquid
+	fi
+
+	# Ensure data directory exists with correct ownership
+	sudo mkdir -p /var/lib/liquid
+	sudo chown liquid:liquid /var/lib/liquid
+	sudo chmod 750 /var/lib/liquid
+
+	# Join bitcoin group for cookie access (BUG-051)
+	daemon:_join_bitcoin_group liquid
+
+	# Write systemd unit
+	sudo tee "/etc/systemd/system/${ELEMENTS_SVC}.service" > /dev/null <<EOF
+[Unit]
+Description=Liquid Network Node (Elements)
+After=network.target bitcoind.service
+Wants=bitcoind.service
+
+[Service]
+Type=simple
+User=liquid
+Group=liquid
+ExecStart=${elements_bin} --elements-dir=/var/lib/liquid --network=${ELEMENTS_NETWORK}
+Restart=on-failure
+RestartSec=30
+StandardOutput=file:/var/lib/liquid/log
+StandardError=file:/var/lib/liquid/log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	sudo systemctl daemon-reload
+	sudo systemctl enable "${ELEMENTS_SVC}.service"
+	info "wrote /etc/systemd/system/${ELEMENTS_SVC}.service"
+	info ""
+	info "next:"
+	info "    sudo systemctl start ${ELEMENTS_SVC}.service"
+	info "    liquid daemon status"
+}
+
+install_openrc_system() {
+	local migrate="$1"
+	local elements_bin; elements_bin=$(daemon:_resolve_bin elementsd)
+
+	if [ -z "$elements_bin" ]; then
+		error "elementsd not found — run \`liquid daemon install\` first"
+		return 1
+	fi
+
+	# Ensure liquid user exists
+	if ! getent passwd liquid >/dev/null 2>&1; then
+		info "creating liquid service account"
+		sudo adduser --system --shell /usr/sbin/nologin --home /var/lib/liquid liquid
+	fi
+
+	# Ensure data directory exists
+	sudo mkdir -p /var/lib/liquid
+	sudo chown liquid:liquid /var/lib/liquid
+	sudo chmod 750 /var/lib/liquid
+
+	# Join bitcoin group for cookie access
+	daemon:_join_bitcoin_group liquid
+
+	# Write OpenRC init script
+	sudo tee "/etc/init.d/elementsd" > /dev/null <<'EOF'
+#!/sbin/openrc-run
+name="elementsd"
+description="Liquid Network Node (Elements)"
+command="/usr/bin/elementsd"
+command_args="--elements-dir=/var/lib/liquid --network=liquid"
+command_user="liquid:liquid"
+command_background="yes"
+pidfile="/run/elementsd.pid"
+EOF
+	sudo chmod +x /etc/init.d/elementsd
+	sudo rc-update add elementsd default
+	info "wrote /etc/init.d/elementsd"
+	info ""
+	info "next:"
+	info "    sudo rc-service elementsd start"
+	info "    liquid daemon status"
+}
+
+cmd_install() {
+	error "liquid daemon install not yet implemented"
+	info "Install Elements manually:"
+	info "    macOS:   brew install elements"
+	info "    Linux:   apt install elements  # or compile from source"
+	info "    Source:  https://github.com/elementsproject/elements"
+	return 1
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    cmd_start "$@" ;;
+	run)      cmd_run "$@" ;;
+	stop)     cmd_stop "$@" ;;
+	restart)  cmd_restart "$@" ;;
+	status)   cmd_status "$@" ;;
+	monitor)  cmd_monitor "$@" ;;
+	enable)   cmd_enable "$@" ;;
+	disable)  cmd_disable "$@" ;;
+	install)  cmd_install "$@" ;;
+	help)     usage ;;
+	*)       usage; exit 1 ;;
+esac

@@ -1,0 +1,110 @@
+#!/bin/bash
+# liquid install — install Elements (the Liquid Network node).
+#
+# FEAT-305 Phase 1: placeholder for install logic.
+# Elements installation is documented but not automated yet.
+
+set -e
+
+usage() {
+	cat >&2 <<EOF
+usage: liquid install [--from <source>]
+
+   Install Elements (elementsd / elements-cli).
+
+   Sources:
+     macports   macOS MacPorts (sudo port install elements)
+     homebrew   macOS Homebrew (brew install elements)
+     apt        Debian/Ubuntu apt (from elementsproject.org repo)
+     source     Build from source (https://github.com/elementsproject/elements)
+
+   macOS (recommended):
+     sudo port install elements
+     or
+     brew install elements
+
+   Linux (Debian/Ubuntu):
+     # Add Elements Project repository
+     sudo apt-add-repository ppa:elementsproject/elements
+     sudo apt update
+     sudo apt install elements
+
+   Source:
+     git clone https://github.com/elementsproject/elements
+     cd elements
+     ./autogen.sh
+     ./configure
+     make
+     sudo make install
+
+   After installation:
+     liquid daemon enable --system   # set up launchd/systemd
+     liquid daemon start              # start the node
+EOF
+}
+
+cmd_install() {
+	local from="homebrew"
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--from) from="$2"; shift 2 ;;
+			--help) usage; exit 0 ;;
+			*) shift ;;
+		esac
+	done
+
+	case "$from" in
+		macports)
+			if command -v port >/dev/null 2>&1; then
+				info "installing elements via MacPorts..."
+				sudo port install elements
+			else
+				fatal "MacPorts not found — install from https://www.macports.org/"
+			fi
+			;;
+		homebrew)
+			if command -v brew >/dev/null 2>&1; then
+				info "installing elements via Homebrew..."
+				brew install elements
+			else
+				fatal "Homebrew not found — install from https://brew.sh/"
+			fi
+			;;
+		apt)
+			info "adding Elements Project APT repository..."
+			info "run these commands manually:"
+			info "    sudo apt-add-repository ppa:elementsproject/elements"
+			info "    sudo apt update"
+			info "    sudo apt install elements"
+			;;
+		source)
+			info "building elements from source..."
+			info "run these commands manually:"
+			info "    git clone https://github.com/elementsproject/elements"
+			info "    cd elements"
+			info "    ./autogen.sh"
+			info "    ./configure"
+			info "    make"
+			info "    sudo make install"
+			;;
+		*)
+			fatal "unknown source: $from (macports|homebrew|apt|source)"
+			;;
+	esac
+
+	info ""
+	info "verifying installation..."
+	if command -v elementsd >/dev/null 2>&1; then
+		local ver; ver=$(elementsd --version | head -1)
+		info "installed: $ver"
+		info ""
+		info "next:"
+		info "    liquid daemon enable --system"
+		info "    liquid daemon start"
+	else
+		warn "elementsd not found in PATH after installation"
+		warn "you may need to restart your shell or add the binary to PATH"
+	fi
+}
+
+cmd_install "$@"
