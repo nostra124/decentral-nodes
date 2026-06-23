@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+
+############################################################################
+# stacks — manage a Stacks node as a peer command to bitcoin.
+#
+# FEAT-310: this is the sixth top-level command shipped by the one
+# `bitcoin` rpk package (after bitcoin / lightning / fulcrum / monero / liquid).
+# The header below is the sanctioned per-script copy of the FEAT-001
+# dispatcher (CLAUDE.md §4/§5, no shared library): the libexec resolver
+# is SELF-keyed, so it auto-resolves libexec/stacks/<verb> with no
+# further wiring.
+############################################################################
+
+# This should always be the first line of code to facilitate debugging
+[ -n "$SELF_DEBUG" ] && set -vx
+
+# Per FEAT-194: VERSION read at runtime from VERSION at the repo root
+# (dev tree) or $PREFIX/share/stacks/version (installed). One package,
+# one version: this prints the same string as `bitcoin version`.
+__d="$(cd "$(dirname "$0")" && pwd)"; __s="$(basename "$0")"
+VERSION=$(cat "$__d/../VERSION" 2>/dev/null || cat "$__d/../share/$__s/version" 2>/dev/null || echo '1.0.0')
+unset __d __s
+SELF=$(basename "$0")
+
+# Resolve $SELF_LIBEXEC (FEAT-001 libexec convention) — checks
+# in order: env override, in-checkout sibling, user install,
+# system install. Per-script copy (no shared lib per §4).
+if [ -z "$SELF_LIBEXEC" ]; then
+	for _d in \
+		"$(cd "$(dirname "$0")/../libexec" 2>/dev/null && pwd)" \
+		"$HOME/.local/libexec" \
+		"/usr/local/libexec" \
+		"/usr/libexec"; do
+		[ -d "$_d/$SELF" ] && SELF_LIBEXEC="$_d" && break
+	done
+	unset _d
+fi
+
+die() {
+	echo "$1" >&2
+	exit "${2:-1}"
+}
+
+fatal() {
+	echo "$SELF: fatal - $1" >&2
+	exit "${2:-1}"
+}
+
+debug() {
+	[ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $@" >&2
+}
+
+info() {
+	if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$@\033[0m" >&2; fi
+}
+
+warn() {
+	echo -e "$SELF: warn - \033[31;1;m$@\033[0m" >&2
+}
+
+error() {
+	echo -e "$SELF: error - \033[31;1;m$@\033[0m" >&2
+}
+
+# Checks if a certain function exists.
+has() {
+	local KIND=$1
+	local NAME=$2
+
+	type -t $KIND:$NAME | grep -q function
+}
+
+# Export the helpers so libexec verbs inherit them across exec.
+export -f fatal error debug info warn die has
+
+############################################################################
+# Commands
+############################################################################
+
+# shellcheck disable=SC2120
+command:help() {
+	if [[ $# -gt 0 ]]; then
+		local verb=$1
+		if has command "$verb"; then
+			if has help "$verb"; then
+				help:$verb
+			else
+				echo "No help found for '$verb' — try '$SELF $verb --help'." >&2
+				return 3
+			fi
+		elif [ -x "$SELF_LIBEXEC/$SELF/$verb" ]; then
+			exec "$SELF_LIBEXEC/$SELF/$verb" --help
+		else
+			echo "'$verb' is not a $SELF command. Run '$SELF help'." >&2
+			return 2
+		fi
+		return 0
+	fi
+
+	cat >&2 <<ENDHELP
+$SELF version $VERSION
+
+A Stacks blockchain command-line interface for running a Stacks node.
+
+Usage:
+  $SELF [options] <command> [args]
+  $SELF help <command>
+
+Options:
+  -d                Debug mode (bash xtrace + verbose)
+  -v                Verbose mode
+  -q                Quiet mode (warnings suppressed)
+
+Commands:
+  Node & daemon:
+    daemon          Start/stop/install stacks-node
+    config          Manage Stacks node configuration
+
+  Other:
+    help            Show this help
+    version         Print version
+
+Run '$SELF help <command>' or '$SELF <command> --help' for details.
+ENDHELP
+}
+
+help:help() {
+	cat >&2 <<ENDHELP
+usage: $SELF help [<command>]
+
+Print the top-level help, or, when <command> is given, print the
+detailed help for that command.
+ENDHELP
+}
+
+command:version() {
+	echo "$VERSION"
+}
+
+help:version() {
+	cat >&2 <<ENDHELP
+usage: $SELF version
+
+Print the $SELF version string. Source of truth: the root VERSION file
+in the dev tree, or share/$SELF/version in an installed bundle.
+ENDHELP
+}
+
+############################################################################
+# Command-line processing
+############################################################################
+
+# FEAT-170: source-mode guard. When sourced (via `. stacks.sh`),
+# define functions but do not execute the dispatcher.
+[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
+
+while getopts "dqfv" _flag; do
+	case "$_flag" in
+		d) SELF_DEBUG=1; SELF_VERBOSE=1 ;;
+		q) SELF_QUIET=1 ;;
+		v) SELF_VERBOSE=1 ;;
+		f) SELF_FORCE=1 ;;
+		*) command:help; exit 1 ;;
+	esac
+done
+export SELF_DEBUG SELF_VERBOSE SELF_QUIET SELF_FORCE
+shift $((OPTIND - 1))
+unset _flag
+
+if [[ $# == 0 ]]; then
+	command:help
+	exit 0
+fi
+
+if has command "$1"; then
+	debug "executing command:$1 ${*:2}"
+	command:"$1" "${@:2}"
+	exit $?
+elif test -x "$SELF_LIBEXEC/$SELF/$1"; then
+	verb=$1; shift
+	debug "executing libexec/$SELF/$verb $*"
+	exec "$SELF_LIBEXEC/$SELF/$verb" "$@"
+fi
+
+fatal "unknown command $1 ${*:2}" 1

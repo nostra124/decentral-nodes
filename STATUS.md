@@ -50,19 +50,17 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 - Repository renamed: `bitcoin` → `decentral-nodes` on GitHub
 - rpk identity updated: `.rpk/identity` → `decentral-nodes`
 - Package scripts updated: `configure`, `install`, `.rpk/package`
-- Stacks script with pruning detection and fail-safe
+- Stacks script updated: pruning detection, chainstate archive download (.tar.zst format)
 - Architecture decisions documented: JoinMarket, Storj, HNS, Yggdrasil in Tier 3
 - Privacy architecture: selective Tor routing (not forced)
 
 ### In Progress
-- Stacks blocked: archive.hiro.so URLs returning 404
-- Awaiting chainstate archive or alternative approach
+- Ready to test Stacks enable with chainstate archive
 
-### Blocked
-- Stacks cannot sync from genesis with pruned Bitcoin node
-- Bitcoin prune height: 954729 (blocks below unavailable)
-- Stacks needs block 666050 (below prune height)
-- Archive URLs failing with 404
+### Resolved
+- Stacks chainstate archive now available at archive.hiro.so (205GB .tar.zst format)
+- Archive URL: https://archive.hiro.so/mainnet/stacks-blockchain/mainnet-stacks-blockchain-latest.tar.zst
+- Script updated to use .tar.zst format with zstd decompression
 
 ## Key Files
 - `/Users/rene/Projekte/bitcoin/.rpk/identity`: Package identity (now `decentral-nodes`)

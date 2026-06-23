@@ -1,0 +1,670 @@
+#!/bin/bash
+# stacks daemon — stacks-node lifecycle management.
+#
+# Implements FEAT-310 Phase 1. Subcommands:
+#   start    — bring up stacks-node (via native binary)
+#   stop     — graceful shutdown
+#   restart  — stop + start
+#   status   — health check (process / API)
+#   monitor  — tail the live log
+#   install  — download and install stacks-node binary
+#   enable   — generate a service unit (system-mode only)
+#   disable  — stop service and remove unit
+
+set -e
+
+STACKS_NETWORK="${STACKS_NETWORK:-mainnet}"
+LAUNCHD_LABEL="network.stacks.stacks-node"
+STACKS_SVC="stacks-node"
+STACKS_VERSION="3.4.0.0.3"
+
+# BUG-037 — launchd plist directories are overridable seams so the unit
+# tests (and any sandbox) never read or write the real system paths.
+STACKS_LAUNCHD_DIR="${STACKS_LAUNCHD_DIR:-/Library/LaunchDaemons}"
+
+# Data directory (system-mode only, like bitcoin/lightning)
+STACKS_DIR="/var/lib/stacks"
+
+# Resolve --user or --system from the argument list for the operate
+# verbs (start/stop/status/monitor/restart). Always returns "system"
+# since we only support system-mode (like bitcoin/lightning).
+daemon:_mode() {
+	printf '%s\n' system
+}
+
+daemon:_root() { printf '%s' "${STACKS_DAEMON_ROOT:-}"; }
+
+# Data directory (system-mode only)
+daemon:_datadir() {
+	printf '%s/var/lib/stacks\n' "$(daemon:_root)"
+}
+
+# Directory holding Stacks.toml config
+daemon:_confdir() {
+	printf '%s/etc/stacks\n' "$(daemon:_root)"
+}
+
+# Check if stacks-node is running
+stacks_running() {
+	command -v stacks-node >/dev/null 2>&1 && pgrep -x "stacks-node" >/dev/null 2>&1
+}
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# BUG-033 — resolve a binary on PATH to its REAL path (chasing symlinks).
+daemon:_resolve_bin() {
+	local p; p="$(command -v "$1" 2>/dev/null)" || return 1
+	readlink -f "$p" 2>/dev/null || echo "$p"
+}
+
+# BUG-050 — is a *system*-mode supervisor unit installed for this product?
+system_installed() {
+	if is_macos; then
+		[ -f "$STACKS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist" ]
+	elif [ "$(init_system)" = openrc ]; then
+		[ -f "${STACKS_INIT_D:-/etc/init.d}/stacks-node" ]
+	else
+		system_mode
+	fi
+}
+
+system_mode() {
+	command -v systemctl >/dev/null 2>&1 && \
+		systemctl --quiet is-enabled "${STACKS_SVC}.service" 2>/dev/null
+}
+
+init_system() {
+	if [ -f /bin/openrc ]; then echo openrc
+	elif command -v systemctl >/dev/null 2>&1; then echo systemd
+	else echo unknown
+	fi
+}
+
+usage() {
+	cat >&2 <<EOF
+usage: stacks daemon <subcommand> [args]
+
+   Lifecycle of the underlying stacks-node process.
+   System-mode only (like bitcoin/lightning).
+
+   lifecycle:
+     start                       bring up stacks-node (native binary)
+     stop                        graceful shutdown
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the daemon log
+
+   setup:
+     install                     download and install stacks-node binary
+     enable                      install + start unit (system-mode)
+     disable                     stop service and remove unit
+
+   see 'stacks daemon help <subcommand>' for detailed usage.
+EOF
+}
+
+daemon_running() {
+	stacks_running
+}
+
+# Surface the most recent ERROR/FATAL line and the daemon log path.
+report_last_error() {
+	local logfile="/var/lib/stacks/log"
+	[ -f "$logfile" ] || return 0
+	local last; last=$(grep -E 'ERROR|FATAL|Error|error' "$logfile" 2>/dev/null | tail -1)
+	if [ -n "$last" ]; then
+		echo "  last error: $last"
+	fi
+	echo "  log: $logfile  (tail with: stacks daemon monitor -f)"
+}
+
+cmd_start() {
+	if stacks_running; then
+		info "stacks-node already running"
+		return 0
+	fi
+	
+	local stacks_bin; stacks_bin=$(daemon:_resolve_bin stacks-node)
+	if [ -z "$stacks_bin" ]; then
+		error "stacks-node not found — run 'stacks daemon install' first"
+		return 1
+	fi
+	
+	local datadir; datadir="$(daemon:_datadir)"
+	mkdir -p "$datadir"
+	
+	info "starting stacks-node"
+	
+	# Start in background
+	nohup "$stacks_bin" mainnet >> "$datadir/log" 2>&1 &
+	
+	sleep 2
+	if stacks_running; then
+		info "stacks-node started"
+	else
+		error "failed to start stacks-node"
+		report_last_error
+		return 1
+	fi
+}
+
+cmd_stop() {
+	if ! stacks_running; then
+		info "stacks-node not running"
+		return 0
+	fi
+	
+	info "stopping stacks-node"
+	pkill -x stacks-node 2>/dev/null || true
+	
+	sleep 2
+	info "stacks-node stopped"
+}
+
+cmd_restart() {
+	cmd_stop "$@" || true
+	sleep 2
+	cmd_start "$@"
+}
+
+cmd_status() {
+	local rc=0
+	if stacks_running; then
+		# Check if the node is responding
+		if curl -s http://localhost:3999/v2/info >/dev/null 2>&1; then
+			echo "healthy"
+		else
+			echo "starting"
+			rc=1
+		fi
+	else
+		echo "down"
+		report_last_error
+		rc=2
+	fi
+	exit $rc
+}
+
+cmd_monitor() {
+	local logfile="/var/lib/stacks/log"
+	if [ -f "$logfile" ]; then
+		exec tail -f "$logfile"
+	else
+		echo "No log file found at $logfile"
+		echo "stacks-node may not be running"
+		return 1
+	fi
+}
+
+cmd_enable() {
+	local stacks_bin; stacks_bin=$(daemon:_resolve_bin stacks-node)
+	
+	if [ -z "$stacks_bin" ]; then
+		error "stacks-node not found — run 'stacks daemon install' first"
+		return 1
+	fi
+	
+	if is_macos; then
+		install_macos_system
+	elif [ "$(init_system)" = "openrc" ]; then
+		install_openrc_system
+	else
+		install_system
+	fi
+}
+
+install_macos_system() {
+	local plist="$STACKS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist"
+	
+	# Ensure _stacks user exists
+	if ! dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}' | grep -q '^313$'; then
+		info "creating _stacks group (GID 313)"
+		sudo dscl . -create /Groups/_stacks
+		sudo dscl . -create /Groups/_stacks PrimaryGroupID 313
+	fi
+	if ! id _stacks >/dev/null 2>&1; then
+		info "creating _stacks service account"
+		local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+		local uid=$((max_uid + 1))
+		sudo dscl . -create /Users/_stacks
+		sudo dscl . -create /Users/_stacks UserShell /usr/bin/false
+		sudo dscl . -create /Users/_stacks UniqueID "$uid"
+		sudo dscl . -create /Users/_stacks PrimaryGroupID 313
+		sudo dscl . -create /Users/_stacks NFSHomeDirectory /var/lib/stacks
+		sudo dscl . -create /Users/_stacks RealName "Stacks Node"
+	fi
+	
+	# Ensure data directory exists with correct ownership
+	sudo mkdir -p /var/lib/stacks
+	local stacks_gid; stacks_gid=$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '/^_stacks /{print $2}')
+	sudo chown _stacks:"$stacks_gid" /var/lib/stacks
+	sudo chmod 750 /var/lib/stacks
+	
+		# Check if Bitcoin is pruned - Stacks cannot sync from genesis with a pruned node
+		# Must use chainstate archive instead
+		local bitcoin_conf="/opt/local/etc/bitcoin/bitcoin.conf"
+		if [ -f "$bitcoin_conf" ] && grep -q "^prune=" "$bitcoin_conf"; then
+			# Bitcoin is pruned - check if chainstate already exists
+			if [ ! -d "/var/lib/stacks/mainnet/chainstate" ]; then
+				info "Bitcoin node is pruned - downloading Stacks chainstate archive"
+				info "Stacks cannot sync from genesis with a pruned Bitcoin node"
+				
+				# Check for zstd (required for .tar.zst archives)
+				if ! command -v zstd >/dev/null 2>&1; then
+					error "zstd not found - required to extract .tar.zst archives"
+					error "Install with: brew install zstd (macOS) or apt install zstd (Linux)"
+					return 1
+				fi
+				
+				local archive_urls=(
+					"https://archive.hiro.so/mainnet/stacks-blockchain/mainnet-stacks-blockchain-latest.tar.zst"
+				)
+				local archive_file="/tmp/stacks-chainstate.tar.zst"
+				local downloaded=false
+				
+				for url in "${archive_urls[@]}"; do
+					info "trying: $url"
+					if curl -fsSL --max-time 300 "$url" -o "$archive_file" 2>/dev/null; then
+						if file "$archive_file" | grep -qE "(Zstandard|zstd)"; then
+							downloaded=true
+							break
+						else
+							rm -f "$archive_file"
+						fi
+					fi
+				done
+				
+				if [ "$downloaded" = true ]; then
+					info "extracting chainstate archive (this may take a while)"
+					sudo mkdir -p /var/lib/stacks
+					sudo tar -I zstd -xf "$archive_file" -C /var/lib/stacks
+					sudo chown -R _stacks:_stacks /var/lib/stacks
+					rm -f "$archive_file"
+					info "chainstate archive extracted successfully"
+				else
+					error "failed to download chainstate archive from all sources"
+					error ""
+					error "Cannot proceed with setup!"
+					error ""
+					error "Stacks cannot sync from genesis when Bitcoin is pruned."
+					error "You must either:"
+					error ""
+					error "  Option 1: Download chainstate archive manually"
+					error "  ----------------------------------------"
+					error "  Download from: https://archive.hiro.so/mainnet/stacks-blockchain/"
+					error "  Extract with: tar -I zstd -xf mainnet-stacks-blockchain-latest.tar.zst"
+					error "  Extract to: /var/lib/stacks/"
+					error "  Then run: stacks daemon enable"
+					error ""
+					error "  Option 2: Disable Bitcoin pruning"
+					error "  ----------------------------------------"
+					error "  Remove 'prune=550' from /opt/local/etc/bitcoin/bitcoin.conf"
+					error "  Restart Bitcoin (requires ~500GB for full blockchain)"
+					error "  Then run: stacks daemon enable"
+					error ""
+					return 1
+				fi
+		else
+			info "chainstate already exists, skipping archive download"
+		fi
+	fi
+	
+	# Generate config file with Bitcoin RPC cookie authentication
+	sudo mkdir -p /etc/stacks
+	local bitcoin_cookie="/opt/local/var/lib/bitcoind/.cookie"
+	local rpc_password=""
+	if [ -f "$bitcoin_cookie" ]; then
+		rpc_password=$(sudo cat "$bitcoin_cookie" | cut -d: -f2)
+	fi
+	
+	sudo tee /etc/stacks/stacks.toml > /dev/null <<EOF
+[node]
+working_dir = "/var/lib/stacks"
+rpc_bind = "0.0.0.0:3999"
+
+[burnchain]
+chain = "bitcoin"
+mode = "mainnet"
+peer_host = "127.0.0.1"
+peer_port = 8333
+rpc_port = 8332
+username = "__cookie__"
+password = "$rpc_password"
+
+[connection_options]
+disable_inbound_handshakes = true
+disable_inbound_walks = true
+EOF
+	sudo chown _stacks:_stacks /etc/stacks/stacks.toml
+	sudo chmod 644 /etc/stacks/stacks.toml
+	info "wrote /etc/stacks/stacks.toml"
+	
+	# Write plist
+	sudo mkdir -p "$(dirname "$plist")"
+	sudo tee "$plist" > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LAUNCHD_LABEL}</string>
+    <key>UserName</key>
+    <string>_stacks</string>
+    <key>GroupName</key>
+    <string>_stacks</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/stacks-node</string>
+        <string>start</string>
+        <string>--config</string>
+        <string>/etc/stacks/stacks.toml</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>/var/lib/stacks/log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/lib/stacks/log</string>
+</dict>
+</plist>
+EOF
+	sudo chmod 644 "$plist"
+	info "wrote $plist"
+	info ""
+	info "next:"
+	info "    sudo launchctl load -w $plist"
+	info "    stacks daemon status"
+	info "    stacks daemon monitor -f"
+}
+
+install_system() {
+	# Check if Bitcoin is pruned
+	local needs_archive=false
+	local bitcoin_conf="/var/lib/bitcoin/.bitcoin/bitcoin.conf"
+	if [ -f "$bitcoin_conf" ] && grep -q "^prune=" "$bitcoin_conf"; then
+		needs_archive=true
+		info "Bitcoin node is pruned - downloading Stacks chainstate archive"
+	fi
+	
+	# Download and extract chainstate archive if needed
+	if [ "$needs_archive" = true ]; then
+		if [ ! -d "/var/lib/stacks/mainnet" ] || [ ! -d "/var/lib/stacks/mainnet/chainstate" ]; then
+			info "downloading chainstate archive from Hiro archive"
+			# Check for zstd (required for .tar.zst archives)
+			if ! command -v zstd >/dev/null 2>&1; then
+				warn "zstd not found - install with: apt install zstd"
+				warn "Stacks will attempt to sync from genesis, but this will fail with a pruned Bitcoin node"
+			else
+				local archive_url="https://archive.hiro.so/mainnet/stacks-blockchain/mainnet-stacks-blockchain-latest.tar.zst"
+				local archive_file="/tmp/stacks-chainstate.tar.zst"
+				
+				if curl -fsSL "$archive_url" -o "$archive_file" 2>/dev/null; then
+					info "extracting chainstate archive (this may take a while)"
+					sudo mkdir -p /var/lib/stacks
+					sudo tar -I zstd -xf "$archive_file" -C /var/lib/stacks
+					sudo chown -R stacks:stacks /var/lib/stacks
+					rm -f "$archive_file"
+					info "chainstate archive extracted successfully"
+				else
+					warn "failed to download chainstate archive"
+					warn "Stacks will attempt to sync from genesis, but this will fail with a pruned Bitcoin node"
+				fi
+			fi
+		fi
+	fi
+	
+	# Generate config file with Bitcoin RPC cookie authentication
+	sudo mkdir -p /etc/stacks
+	local bitcoin_cookie="/var/lib/bitcoin/.cookie"
+	local rpc_password=""
+	if [ -f "$bitcoin_cookie" ]; then
+		rpc_password=$(sudo cat "$bitcoin_cookie" | cut -d: -f2)
+	fi
+	
+	sudo tee /etc/stacks/stacks.toml > /dev/null <<EOF
+[node]
+working_dir = "/var/lib/stacks"
+rpc_bind = "0.0.0.0:3999"
+
+[burnchain]
+chain = "bitcoin"
+mode = "mainnet"
+peer_host = "127.0.0.1"
+peer_port = 8333
+rpc_port = 8332
+username = "__cookie__"
+password = "$rpc_password"
+
+[connection_options]
+disable_inbound_handshakes = true
+disable_inbound_walks = true
+EOF
+	sudo chown stacks:stacks /etc/stacks/stacks.toml
+	sudo chmod 644 /etc/stacks/stacks.toml
+	info "wrote /etc/stacks/stacks.toml"
+	
+	sudo tee "/etc/systemd/system/${STACKS_SVC}.service" > /dev/null <<EOF
+[Unit]
+Description=Stacks Blockchain Node
+After=network.target
+
+[Service]
+Type=simple
+User=stacks
+Group=stacks
+ExecStart=/usr/local/bin/stacks-node start --config /etc/stacks/stacks.toml
+Restart=on-failure
+RestartSec=30
+StandardOutput=file:/var/lib/stacks/log
+StandardError=file:/var/lib/stacks/log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+	sudo systemctl daemon-reload
+	sudo systemctl enable "${STACKS_SVC}.service"
+	info "wrote /etc/systemd/system/${STACKS_SVC}.service"
+	info ""
+	info "next:"
+	info "    sudo systemctl start ${STACKS_SVC}.service"
+	info "    stacks daemon status"
+}
+
+install_openrc_system() {
+	# Check if Bitcoin is pruned
+	local needs_archive=false
+	local bitcoin_conf="/var/lib/bitcoin/.bitcoin/bitcoin.conf"
+	if [ -f "$bitcoin_conf" ] && grep -q "^prune=" "$bitcoin_conf"; then
+		needs_archive=true
+		info "Bitcoin node is pruned - downloading Stacks chainstate archive"
+	fi
+	
+	# Download and extract chainstate archive if needed
+	if [ "$needs_archive" = true ]; then
+		if [ ! -d "/var/lib/stacks/mainnet" ] || [ ! -d "/var/lib/stacks/mainnet/chainstate" ]; then
+			info "downloading chainstate archive from Hiro archive"
+			# Check for zstd (required for .tar.zst archives)
+			if ! command -v zstd >/dev/null 2>&1; then
+				warn "zstd not found - install with: apt install zstd"
+				warn "Stacks will attempt to sync from genesis, but this will fail with a pruned Bitcoin node"
+			else
+				local archive_url="https://archive.hiro.so/mainnet/stacks-blockchain/mainnet-stacks-blockchain-latest.tar.zst"
+				local archive_file="/tmp/stacks-chainstate.tar.zst"
+				
+				if curl -fsSL "$archive_url" -o "$archive_file" 2>/dev/null; then
+					info "extracting chainstate archive (this may take a while)"
+					sudo mkdir -p /var/lib/stacks
+					sudo tar -I zstd -xf "$archive_file" -C /var/lib/stacks
+					sudo chown -R stacks:stacks /var/lib/stacks
+					rm -f "$archive_file"
+					info "chainstate archive extracted successfully"
+				else
+					warn "failed to download chainstate archive"
+					warn "Stacks will attempt to sync from genesis, but this will fail with a pruned Bitcoin node"
+				fi
+			fi
+		fi
+	fi
+	
+	# Generate config file with Bitcoin RPC cookie authentication
+	sudo mkdir -p /etc/stacks
+	local bitcoin_cookie="/var/lib/bitcoin/.cookie"
+	local rpc_password=""
+	if [ -f "$bitcoin_cookie" ]; then
+		rpc_password=$(sudo cat "$bitcoin_cookie" | cut -d: -f2)
+	fi
+	
+	sudo tee /etc/stacks/stacks.toml > /dev/null <<EOF
+[node]
+working_dir = "/var/lib/stacks"
+rpc_bind = "0.0.0.0:3999"
+
+[burnchain]
+chain = "bitcoin"
+mode = "mainnet"
+peer_host = "127.0.0.1"
+peer_port = 8333
+rpc_port = 8332
+username = "__cookie__"
+password = "$rpc_password"
+
+[connection_options]
+disable_inbound_handshakes = true
+disable_inbound_walks = true
+EOF
+	sudo chown stacks:stacks /etc/stacks/stacks.toml
+	sudo chmod 644 /etc/stacks/stacks.toml
+	info "wrote /etc/stacks/stacks.toml"
+	
+	sudo tee "/etc/init.d/stacks-node" > /dev/null <<'EOF'
+#!/sbin/openrc-run
+name="stacks-node"
+description="Stacks Blockchain Node"
+command="/usr/local/bin/stacks-node"
+command_args="start --config /etc/stacks/stacks.toml"
+command_user="stacks:stacks"
+command_background="yes"
+pidfile="/run/stacks-node.pid"
+EOF
+	sudo chmod +x /etc/init.d/stacks-node
+	sudo rc-update add stacks-node default
+	info "wrote /etc/init.d/stacks-node"
+	info ""
+	info "next:"
+	info "    sudo rc-service stacks-node start"
+	info "    stacks daemon status"
+}
+
+cmd_disable() {
+	info "stopping daemon"
+	cmd_stop "$@" 2>/dev/null || true
+	
+	# System-mode only
+	if is_macos; then
+		local plist="$STACKS_LAUNCHD_DIR/${LAUNCHD_LABEL}.plist"
+		if [ -f "$plist" ]; then
+			sudo launchctl unload "$plist" 2>/dev/null || true
+			sudo rm "$plist"
+			info "removed $plist"
+		fi
+	elif [ "$(init_system)" = "openrc" ]; then
+		local init_d="${STACKS_INIT_D:-/etc/init.d}"
+		if [ -f "$init_d/stacks-node" ]; then
+			sudo rc-update del stacks-node default 2>/dev/null || true
+			sudo rm "$init_d/stacks-node"
+			info "removed $init_d/stacks-node"
+		fi
+	else
+		if [ -f "/etc/systemd/system/${STACKS_SVC}.service" ]; then
+			sudo systemctl stop "${STACKS_SVC}.service" 2>/dev/null || true
+			sudo systemctl disable "${STACKS_SVC}.service" 2>/dev/null || true
+			sudo rm "/etc/systemd/system/${STACKS_SVC}.service"
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/${STACKS_SVC}.service"
+		fi
+	fi
+	info "daemon disabled"
+	info "data directory preserved: /var/lib/stacks"
+}
+
+cmd_install() {
+	info "installing stacks-node $STACKS_VERSION"
+	
+	local arch os
+	if is_macos; then
+		if [ "$(uname -m)" = "arm64" ]; then
+			arch="arm64"
+		else
+			arch="x64"
+		fi
+		os="macos"
+	else
+		if [ "$(uname -m)" = "aarch64" ]; then
+			arch="arm64"
+		else
+			arch="x64"
+		fi
+		os="linux"
+	fi
+	
+	local download_url="https://github.com/stacks-network/stacks-core/releases/download/${STACKS_VERSION}/${os}-${arch}.zip"
+	local tmp_dir; tmp_dir=$(mktemp -d)
+	
+	info "downloading $download_url"
+	curl -sL "$download_url" -o "$tmp_dir/stacks.zip" || {
+		error "failed to download stacks-node"
+		rm -rf "$tmp_dir"
+		return 1
+	}
+	
+	info "extracting binary"
+	unzip -q "$tmp_dir/stacks.zip" -d "$tmp_dir" || {
+		error "failed to extract stacks-node"
+		rm -rf "$tmp_dir"
+		return 1
+	}
+	
+	# Find the binary in the extracted archive
+	local stacks_bin="$tmp_dir/stacks-node"
+	if [ ! -f "$stacks_bin" ]; then
+		# Try to find it in subdirectories
+		stacks_bin=$(find "$tmp_dir" -name "stacks-node" -type f | head -1)
+	fi
+	
+	if [ ! -f "$stacks_bin" ]; then
+		error "could not find stacks-node binary in archive"
+		rm -rf "$tmp_dir"
+		return 1
+	fi
+	
+	# Install to /usr/local/bin
+	info "installing to /usr/local/bin/stacks-node"
+	sudo mkdir -p /usr/local/bin
+	sudo install -m 755 "$stacks_bin" /usr/local/bin/stacks-node
+	
+	rm -rf "$tmp_dir"
+	
+	info "stacks-node $STACKS_VERSION installed successfully"
+	info ""
+	info "next:"
+	info "    stacks daemon enable"
+	info "    stacks daemon status"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	help)     usage ;;
+	*)       usage; exit 1 ;;
+esac
