@@ -13,7 +13,14 @@ own dispatcher and libexec tree.
 |---|---|
 | `bin/bitcoin` | BIP plugins (BIP 13/32/39/173/174/340/341/350/380, WIF), wallet surface, daemon abstraction |
 | `bin/lightning` | Core-Lightning (clightning) frontend: channels, invoices, payments, LNURL, the `.well-known/lightning/` HTTP API |
-| `bin/fulcrum` | *(planned)* Electrum/Fulcrum index server frontend |
+| `bin/fulcrum` | Electrum/Fulcrum index server frontend |
+| `bin/liquid` | Liquid Network (Elements) frontend: peg-ins, peg-outs, assets |
+| `bin/monero` | Monero node frontend: wallet, daemon, transactions |
+| `bin/stacks` | Stacks node frontend: Bitcoin-aware smart contracts |
+
+**Tier 2** (Network Privacy): `tor`, `i2pd`, `ipfs`, `bittorrent` — planned
+
+**Tier 3** (Advanced): `joinmarket`, `storj`, `hns` (Handshake), `yggdrasil` — planned
 
 ## Install
 
@@ -67,11 +74,10 @@ Or in two steps:
 This package follows the rpk per-package convention, generalised to ship
 multiple commands from one identity:
 
-- One rpk package (`bitcoin`), multiple dispatchers. Each command keeps
+- One rpk package (`decentral-nodes`), multiple dispatchers. Each command keeps
   its own namespaced `libexec/<cmd>/`, `share/<cmd>/`, `share/doc/<cmd>/`.
 - No shared library: helper boilerplate is duplicated per command, not
-  factored out (see `CLAUDE.md` §4–5). `bitcoin` and `lightning` do not
-  shell out to each other.
+  factored out (see `CLAUDE.md` §4–5). Commands do not shell out to each other.
 - Stow-based install via `make install`.
 - Versioning: semver, with `VERSION` (project root) as the source of
   truth and `.rpk/versions` as the per-release SHA ledger. See

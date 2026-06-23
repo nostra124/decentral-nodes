@@ -6,7 +6,7 @@
 
 set -e
 
-PACKAGE='bitcoin'    # render-time substitution at PR-create time
+PACKAGE='decentral-nodes'    # render-time substitution at PR-create time
                      # (NOT the @PACKAGE@ used in the sed below).
 PREFIX=""
 BINDIR=""

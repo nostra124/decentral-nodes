@@ -7,7 +7,7 @@
 
 set -e
 
-PACKAGE='bitcoin'
+PACKAGE='decentral-nodes'
 
 # rpk convention: $HOME/.local for non-root, /usr/local for root.
 if [ "$(id -u)" -eq 0 ]; then
