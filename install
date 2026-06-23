@@ -1,8 +1,8 @@
 #!/bin/sh
 # install — mimics rpk's package + stow dance, without requiring rpk.
 #
-#   git clone https://github.com/nostra124/bitcoin
-#   cd bitcoin
+#   git clone https://github.com/nostra124/decentral-nodes
+#   cd decentral-nodes
 #   ./install
 
 set -e

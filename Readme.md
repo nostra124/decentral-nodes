@@ -1,13 +1,13 @@
-# `bitcoin` — the combined Bitcoin stack
+# `decentral-nodes` — decentralized infrastructure toolkit
 
-> Educational Bitcoin + Lightning toolkit: sourceable BIP primitives,
-> multi-backend wallet, and a Core-Lightning frontend — shipped from one
-> rpk package with multiple command dispatchers.
+> Educational toolkit for decentralized infrastructure: Bitcoin, Lightning,
+> privacy tools (Tor/I2P/JoinMarket), storage (IPFS/Storj), and naming (Handshake)
+> — shipped from one rpk package with multiple command dispatchers.
 
-This repository merges the former `nostra124/lightning` repo into
-`nostra124/bitcoin` so the full stack lives in one tree. Today it ships
-two dispatchers; a third (`bin/fulcrum`, the Electrum/Fulcrum server
-frontend, FEAT-055..060) slots into the same layout when it lands.
+This repository provides a unified toolkit for decentralized infrastructure.
+It includes Bitcoin/Lightning tools, privacy tools (Tor, I2P, JoinMarket),
+storage (IPFS, Storj), and naming services (Handshake). Each tool has its
+own dispatcher and libexec tree.
 
 | Command | Purpose |
 |---|---|
@@ -17,8 +17,8 @@ frontend, FEAT-055..060) slots into the same layout when it lands.
 
 ## Install
 
-    git clone https://github.com/nostra124/bitcoin
-    cd bitcoin
+    git clone https://github.com/nostra124/decentral-nodes
+    cd decentral-nodes
     ./install --prefix=$HOME/.local
 
 Or in two steps:
