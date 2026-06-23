@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# i2pd help — usage information for i2pd(1).
+
+cat <<EOF
+i2pd(1) — manage an I2P daemon for anonymous networking
+
+USAGE
+    i2pd daemon <subcommand> [args]
+
+SUBCOMMANDS
+    lifecycle:
+        start       bring up i2pd daemon (via launchd/systemd)
+        stop        graceful shutdown
+        restart     stop + start
+        status      health check (running/down)
+        monitor     tail the daemon log (default: -f)
+
+    setup:
+        install     install i2pd binary (brew|apt)
+        enable      install + configure as system service
+        disable     stop service and remove unit
+
+DESCRIPTION
+    Tier 2 (Network Privacy) tool. Provides a local I2P router for
+    applications to connect to I2P network on-demand (opt-in).
+
+    Applications connect to:
+        - SOCKS5 proxy: 127.0.0.1:4447 (for .i2p addresses)
+        - HTTP proxy:   127.0.0.1:4444
+        - SAM bridge:   127.0.0.1:7656
+        - Web console:  http://127.0.0.1:7070
+
+    No forced routing — applications opt-in to I2P routing.
+
+EXAMPLES
+    # Install and enable I2Pd
+    i2pd daemon install
+    i2pd daemon enable
+
+    # Start the daemon
+    i2pd daemon start
+
+    # Check status
+    i2pd daemon status
+
+    # Access I2P web console
+    open http://127.0.0.1:7070
+
+    # Monitor the log
+    i2pd daemon monitor -f
+
+FILES
+    /etc/i2pd/i2pd.conf      I2Pd configuration
+    /var/lib/i2pd/           I2Pd data directory
+    /var/log/i2pd/i2pd.log   I2Pd log file (Linux)
+    /var/lib/i2pd/i2pd.log   I2Pd log file (macOS)
+
+SEE ALSO
+    bitcoin(1), lightning(1), tor(1), ipfs(1)
+
+FEAT-310 — Tier 2 privacy tools
+EOF

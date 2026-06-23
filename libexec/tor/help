@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# tor help — usage information for tor(1).
+
+cat <<EOF
+tor(1) — manage a Tor daemon for privacy and selective routing
+
+USAGE
+    tor daemon <subcommand> [args]
+
+SUBCOMMANDS
+    lifecycle:
+        start       bring up tor daemon (via launchd/systemd)
+        stop        graceful shutdown
+        restart     stop + start
+        status      health check (running/down)
+        monitor     tail the daemon log (default: -f)
+
+    setup:
+        install     install tor binary (brew|apt)
+        enable      install + configure as system service
+        disable     stop service and remove unit
+
+DESCRIPTION
+    Tier 2 (Network Privacy) tool. Provides a local Tor SOCKS5 proxy
+    for applications to route traffic through Tor on-demand (opt-in).
+
+    Applications connect to:
+        - SOCKS5 proxy: 127.0.0.1:9050
+        - Control port: 127.0.0.1:9051
+
+    No forced routing — applications opt-in to Tor routing.
+
+EXAMPLES
+    # Install and enable Tor
+    tor daemon install
+    tor daemon enable
+
+    # Start the daemon
+    tor daemon start
+
+    # Check status
+    tor daemon status
+
+    # Route curl through Tor
+    curl --socks5 127.0.0.1:9050 https://check.torproject.org/
+
+    # Monitor the log
+    tor daemon monitor -f
+
+FILES
+    /etc/tor/torrc          Tor configuration
+    /var/lib/tor/           Tor data directory
+    /var/log/tor/tor.log    Tor log file (Linux)
+    /var/lib/tor/log        Tor log file (macOS)
+
+SEE ALSO
+    bitcoin(1), lightning(1), i2pd(1), ipfs(1)
+
+FEAT-310 — Tier 2 privacy tools
+EOF

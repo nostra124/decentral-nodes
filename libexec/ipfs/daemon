@@ -1,0 +1,381 @@
+#!/usr/bin/env bash
+
+############################################################################
+# ipfs daemon — system-default ipfs service.
+#
+# Tier 2 (Network Privacy) tool. Provides a local IPFS node for
+# content-addressed storage and retrieval on-demand (opt-in).
+#
+# Modeled on libexec/tor/daemon: render a platform-appropriate unit
+# and (de)activate it through the init system — systemd on Linux,
+# launchd on macOS — in system-mode only.
+#
+# IPFS provides:
+#   - API: 127.0.0.1:5001 (for ipfs CLI)
+#   - Gateway: 127.0.0.1:8080 (for content retrieval)
+#   - Swarm: 0.0.0.0:4001 (P2P networking)
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+has() { type -t "$1:$2" | grep -q function; }
+
+# --- mode / os helpers -------------------------------------------------------
+
+daemon:_os() {
+	local os="${IPFS_DAEMON_OS:-}"
+	if [ -z "$os" ]; then
+		case "$(uname -s)" in
+			Linux)  os=linux ;;
+			Darwin) os=macos ;;
+			*)      os=unknown ;;
+		esac
+	fi
+	printf '%s\n' "$os"
+}
+
+daemon:_mode() { printf 'system\n'; }
+
+# --- paths ------------------------------------------------------------------
+
+daemon:_root() { printf '%s' "${IPFS_DAEMON_ROOT:-}"; }
+
+daemon:_datadir() { printf '%s/var/lib/ipfs\n' "$(daemon:_root)"; }
+daemon:_confdir() { printf '%s/etc/ipfs\n' "$(daemon:_root)"; }
+
+# --- is ipfs running? -------------------------------------------------------
+
+ipfs_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active ipfs.service 2>/dev/null
+	elif command -v launchctl >/dev/null 2>&1; then
+		launchctl list io.ipfs.ipfs >/dev/null 2>&1
+	else
+		pgrep -x ipfs >/dev/null 2>&1
+	fi
+}
+
+# --- init system -------------------------------------------------------------
+
+init_system() {
+	if [ -f /bin/openrc ]; then echo openrc
+	elif command -v systemctl >/dev/null 2>&1; then echo systemd
+	else echo unknown
+	fi
+}
+
+system_installed() {
+	if is_macos; then
+		[ -f "/Library/LaunchDaemons/io.ipfs.ipfs.plist" ]
+	elif [ "$(init_system)" = openrc ]; then
+		[ -f "/etc/init.d/ipfs" ]
+	else
+		systemctl --quiet is-enabled ipfs.service 2>/dev/null
+	fi
+}
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: ipfs daemon <subcommand> [args]
+
+   Lifecycle of the underlying ipfs process.
+   System-mode only (like bitcoin/lightning).
+
+   lifecycle:
+     start                       bring up ipfs (via launchd/systemd)
+     stop                        graceful shutdown
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the daemon log
+
+   setup:
+     install [--from <src>]      install ipfs binary (brew|apt|source)
+     enable                      install + start unit (system-mode)
+     disable                     stop service and remove unit
+
+   see 'ipfs daemon help <subcommand>' for detailed usage.
+EOF
+	exit 1
+}
+
+cmd_start() {
+	if ipfs_running; then
+		info "ipfs already running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl load -w /Library/LaunchDaemons/io.ipfs.ipfs.plist
+	else
+		sudo systemctl start ipfs.service
+	fi
+	info "ipfs started"
+}
+
+cmd_stop() {
+	if ! ipfs_running; then
+		info "ipfs not running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl unload /Library/LaunchDaemons/io.ipfs.ipfs.plist
+	else
+		sudo systemctl stop ipfs.service
+	fi
+	info "ipfs stopped"
+}
+
+cmd_restart() {
+	cmd_stop "$@" || true
+	sleep 2
+	cmd_start "$@"
+}
+
+cmd_status() {
+	if ipfs_running; then
+		echo "running"
+		# Show IPFS ID if available
+		if command -v ipfs >/dev/null 2>&1; then
+			ipfs id 2>/dev/null | head -5 || true
+		fi
+	else
+		echo "down"
+	fi
+}
+
+cmd_monitor() {
+	local logfile="/var/log/ipfs/ipfs.log"
+	[ -f "$logfile" ] || logfile="/var/lib/ipfs/log"
+	[ -f "$logfile" ] || { error "no log file found"; exit 2; }
+	exec tail "${@:--f}" "$logfile"
+}
+
+cmd_install() {
+	info "installing ipfs (go-ipfs/kubo)..."
+	
+	if is_macos; then
+		if command -v brew >/dev/null 2>&1; then
+			brew install ipfs
+		else
+			error "brew not found — install Homebrew first"
+			exit 1
+		fi
+	else
+		if command -v apt >/dev/null 2>&1; then
+			# Download latest kubo (go-ipfs)
+			local arch; arch=$(uname -m)
+			[ "$arch" = "x86_64" ] && arch=amd64
+			[ "$arch" = "aarch64" ] && arch=arm64
+			
+			local latest; latest=$(curl -sI https://dist.ipfs.tech/kubo/v0.30.0/kubo_v0.30.0_linux-${arch}.tar.gz 2>/dev/null | head -1)
+			info "downloading kubo for $arch..."
+			
+			cd /tmp
+			curl -sL "https://dist.ipfs.tech/kubo/v0.30.0/kubo_v0.30.0_linux-${arch}.tar.gz" -o kubo.tar.gz
+			tar -xzf kubo.tar.gz
+			sudo mv kubo/ipfs /usr/local/bin/
+			rm -rf kubo kubo.tar.gz
+			cd - >/dev/null
+		elif command -v apk >/dev/null 2>&1; then
+			sudo apk add ipfs
+		else
+			error "package manager not supported"
+			exit 1
+		fi
+	fi
+	
+	info "ipfs installed: $(ipfs version 2>&1 | head -1)"
+}
+
+cmd_enable() {
+	info "enabling ipfs system service..."
+	
+	# Ensure _ipfs user and group exist
+	if is_macos; then
+		if ! dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}' | grep -q '^317$'; then
+			info "creating _ipfs group (GID 317)"
+			sudo dscl . -create /Groups/_ipfs
+			sudo dscl . -create /Groups/_ipfs PrimaryGroupID 317
+		fi
+		if ! id _ipfs >/dev/null 2>&1; then
+			info "creating _ipfs service account"
+			local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+			local uid=$((max_uid + 1))
+			sudo dscl . -create /Users/_ipfs
+			sudo dscl . -create /Users/_ipfs UserShell /usr/bin/false
+			sudo dscl . -create /Users/_ipfs UniqueID "$uid"
+			sudo dscl . -create /Users/_ipfs PrimaryGroupID 317
+			sudo dscl . -create /Users/_ipfs NFSHomeDirectory /var/lib/ipfs
+			sudo dscl . -create /Users/_ipfs RealName "IPFS Daemon"
+		fi
+		
+		# Ensure directories
+		local ipfs_gid; ipfs_gid=$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '/^_ipfs /{print $2}')
+		sudo mkdir -p /var/lib/ipfs
+		sudo chown _ipfs:"$ipfs_gid" /var/lib/ipfs
+		sudo chmod 700 /var/lib/ipfs
+		
+		sudo mkdir -p /var/log/ipfs
+		sudo chown _ipfs:"$ipfs_gid" /var/log/ipfs
+		
+		# Initialize IPFS repo if needed
+		if [ ! -d /var/lib/ipfs/.ipfs ]; then
+			info "initializing ipfs repository..."
+			sudo -u _ipfs ipfs init 2>/dev/null || true
+		fi
+		
+		# Find ipfs binary
+		local ipfs_bin; ipfs_bin=$(command -v ipfs 2>/dev/null || echo "/usr/local/bin/ipfs")
+		
+		# Write launchd plist
+		sudo tee /Library/LaunchDaemons/io.ipfs.ipfs.plist > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.ipfs.ipfs</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${ipfs_bin}</string>
+        <string>daemon</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>IPFS_PATH</key>
+        <string>/var/lib/ipfs</string>
+    </dict>
+    <key>UserName</key>
+    <string>_ipfs</string>
+    <key>GroupName</key>
+    <string>_ipfs</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/ipfs/ipfs.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/ipfs/ipfs.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote /Library/LaunchDaemons/io.ipfs.ipfs.plist"
+		sudo launchctl load -w /Library/LaunchDaemons/io.ipfs.ipfs.plist
+		info "ipfs service enabled"
+		info ""
+		info "next:"
+		info "    ipfs daemon start"
+		info "    ipfs daemon status"
+		info "    ipfs daemon monitor -f"
+		info ""
+		info "API:     127.0.0.1:5001"
+		info "Gateway: http://127.0.0.1:8080"
+		info "Swarm:   0.0.0.0:4001"
+	else
+		# Linux
+		if ! id ipfs >/dev/null 2>&1; then
+			info "creating ipfs service account"
+			sudo useradd -r -s /usr/sbin/nologin -d /var/lib/ipfs ipfs
+		fi
+		
+		# Ensure directories
+		sudo mkdir -p /var/lib/ipfs
+		sudo chown ipfs:ipfs /var/lib/ipfs
+		sudo chmod 700 /var/lib/ipfs
+		
+		sudo mkdir -p /var/log/ipfs
+		sudo chown ipfs:ipfs /var/log/ipfs
+		
+		# Initialize IPFS repo if needed
+		if [ ! -d /var/lib/ipfs/.ipfs ]; then
+			info "initializing ipfs repository..."
+			sudo -u ipfs ipfs init 2>/dev/null || true
+		fi
+		
+		# Write systemd unit
+		sudo tee /etc/systemd/system/ipfs.service > /dev/null <<'EOF'
+[Unit]
+Description=IPFS Daemon
+Documentation=https://docs.ipfs.tech/
+After=network.target
+
+[Service]
+Type=simple
+User=ipfs
+Group=ipfs
+Environment=IPFS_PATH=/var/lib/ipfs
+ExecStart=/usr/local/bin/ipfs daemon
+Restart=on-failure
+RestartSec=5
+StandardOutput=file:/var/log/ipfs/ipfs.log
+StandardError=file:/var/log/ipfs/ipfs.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		sudo systemctl daemon-reload
+		sudo systemctl enable ipfs.service
+		info "wrote /etc/systemd/system/ipfs.service"
+		info ""
+		info "next:"
+		info "    sudo systemctl start ipfs.service"
+		info "    ipfs daemon status"
+		info "    ipfs daemon monitor -f"
+		info ""
+		info "API:     127.0.0.1:5001"
+		info "Gateway: http://127.0.0.1:8080"
+		info "Swarm:   0.0.0.0:4001"
+	fi
+}
+
+cmd_disable() {
+	info "disabling ipfs service..."
+	cmd_stop "$@" 2>/dev/null || true
+	
+	if is_macos; then
+		if [ -f "/Library/LaunchDaemons/io.ipfs.ipfs.plist" ]; then
+			sudo launchctl unload /Library/LaunchDaemons/io.ipfs.ipfs.plist 2>/dev/null || true
+			sudo rm /Library/LaunchDaemons/io.ipfs.ipfs.plist
+			info "removed /Library/LaunchDaemons/io.ipfs.ipfs.plist"
+		fi
+	else
+		if [ -f "/etc/systemd/system/ipfs.service" ]; then
+			sudo systemctl stop ipfs.service 2>/dev/null || true
+			sudo systemctl disable ipfs.service 2>/dev/null || true
+			sudo rm /etc/systemd/system/ipfs.service
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/ipfs.service"
+		fi
+	fi
+	info "ipfs service disabled"
+	info "data directory preserved: /var/lib/ipfs"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	help)     usage ;;
+	*)       usage; exit 1 ;;
+esac

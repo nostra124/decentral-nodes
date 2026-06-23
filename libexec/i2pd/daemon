@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+
+############################################################################
+# i2pd daemon — system-default i2pd service.
+#
+# Tier 2 (Network Privacy) tool. Provides a local I2P router for
+# applications to connect to I2P network on-demand (opt-in).
+#
+# Modeled on libexec/tor/daemon: render a platform-appropriate unit
+# and (de)activate it through the init system — systemd on Linux,
+# launchd on macOS — in system-mode only.
+#
+# I2Pd provides:
+#   - SOCKS5 proxy: 127.0.0.1:4447 (for .i2p addresses)
+#   - HTTP proxy: 127.0.0.1:4444
+#   - SAM bridge: 127.0.0.1:7656
+#   - I2CP: 127.0.0.1:7654
+#   - Web console: http://127.0.0.1:7070
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+has() { type -t "$1:$2" | grep -q function; }
+
+# --- mode / os helpers -------------------------------------------------------
+
+daemon:_os() {
+	local os="${I2PD_DAEMON_OS:-}"
+	if [ -z "$os" ]; then
+		case "$(uname -s)" in
+			Linux)  os=linux ;;
+			Darwin) os=macos ;;
+			*)      os=unknown ;;
+		esac
+	fi
+	printf '%s\n' "$os"
+}
+
+daemon:_mode() { printf 'system\n'; }
+
+# --- paths ------------------------------------------------------------------
+
+daemon:_root() { printf '%s' "${I2PD_DAEMON_ROOT:-}"; }
+
+daemon:_datadir() { printf '%s/var/lib/i2pd\n' "$(daemon:_root)"; }
+daemon:_confdir() { printf '%s/etc/i2pd\n' "$(daemon:_root)"; }
+
+# --- is i2pd running? --------------------------------------------------------
+
+i2pd_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active i2pd.service 2>/dev/null
+	elif command -v launchctl >/dev/null 2>&1; then
+		launchctl list net.i2p.i2pd >/dev/null 2>&1
+	else
+		pgrep -x i2pd >/dev/null 2>&1
+	fi
+}
+
+# --- init system -------------------------------------------------------------
+
+init_system() {
+	if [ -f /bin/openrc ]; then echo openrc
+	elif command -v systemctl >/dev/null 2>&1; then echo systemd
+	else echo unknown
+	fi
+}
+
+system_installed() {
+	if is_macos; then
+		[ -f "/Library/LaunchDaemons/net.i2p.i2pd.plist" ]
+	elif [ "$(init_system)" = openrc ]; then
+		[ -f "/etc/init.d/i2pd" ]
+	else
+		systemctl --quiet is-enabled i2pd.service 2>/dev/null
+	fi
+}
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: i2pd daemon <subcommand> [args]
+
+   Lifecycle of the underlying i2pd process.
+   System-mode only (like bitcoin/lightning).
+
+   lifecycle:
+     start                       bring up i2pd (via launchd/systemd)
+     stop                        graceful shutdown
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the daemon log
+
+   setup:
+     install [--from <src>]      install i2pd binary (brew|apt|source)
+     enable                      install + start unit (system-mode)
+     disable                     stop service and remove unit
+
+   see 'i2pd daemon help <subcommand>' for detailed usage.
+EOF
+	exit 1
+}
+
+cmd_start() {
+	if i2pd_running; then
+		info "i2pd already running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl load -w /Library/LaunchDaemons/net.i2p.i2pd.plist
+	else
+		sudo systemctl start i2pd.service
+	fi
+	info "i2pd started"
+}
+
+cmd_stop() {
+	if ! i2pd_running; then
+		info "i2pd not running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl unload /Library/LaunchDaemons/net.i2p.i2pd.plist
+	else
+		sudo systemctl stop i2pd.service
+	fi
+	info "i2pd stopped"
+}
+
+cmd_restart() {
+	cmd_stop "$@" || true
+	sleep 1
+	cmd_start "$@"
+}
+
+cmd_status() {
+	if i2pd_running; then
+		echo "running"
+	else
+		echo "down"
+	fi
+}
+
+cmd_monitor() {
+	local logfile="/var/log/i2pd/i2pd.log"
+	[ -f "$logfile" ] || logfile="/var/lib/i2pd/i2pd.log"
+	[ -f "$logfile" ] || { error "no log file found"; exit 2; }
+	exec tail "${@:--f}" "$logfile"
+}
+
+cmd_install() {
+	info "installing i2pd..."
+	
+	if is_macos; then
+		if command -v brew >/dev/null 2>&1; then
+			brew install i2pd
+		else
+			error "brew not found — install Homebrew first"
+			exit 1
+		fi
+	else
+		if command -v apt >/dev/null 2>&1; then
+			# Add i2pd repository
+			sudo apt update
+			sudo apt install -y dirmngr
+			sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3E0D8F4A
+			echo "deb https://repo.i2pd.net/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/i2pd.list
+			sudo apt update
+			sudo apt install -y i2pd
+		elif command -v apk >/dev/null 2>&1; then
+			sudo apk add i2pd
+		else
+			error "package manager not supported"
+			exit 1
+		fi
+	fi
+	
+	info "i2pd installed: $(i2pd --version 2>&1 | head -1)"
+}
+
+cmd_enable() {
+	info "enabling i2pd system service..."
+	
+	# Ensure _i2pd user and group exist
+	if is_macos; then
+		if ! dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}' | grep -q '^316$'; then
+			info "creating _i2pd group (GID 316)"
+			sudo dscl . -create /Groups/_i2pd
+			sudo dscl . -create /Groups/_i2pd PrimaryGroupID 316
+		fi
+		if ! id _i2pd >/dev/null 2>&1; then
+			info "creating _i2pd service account"
+			local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+			local uid=$((max_uid + 1))
+			sudo dscl . -create /Users/_i2pd
+			sudo dscl . -create /Users/_i2pd UserShell /usr/bin/false
+			sudo dscl . -create /Users/_i2pd UniqueID "$uid"
+			sudo dscl . -create /Users/_i2pd PrimaryGroupID 316
+			sudo dscl . -create /Users/_i2pd NFSHomeDirectory /var/lib/i2pd
+			sudo dscl . -create /Users/_i2pd RealName "I2P Daemon"
+		fi
+		
+		# Ensure directories
+		local i2pd_gid; i2pd_gid=$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '/^_i2pd /{print $2}')
+		sudo mkdir -p /var/lib/i2pd
+		sudo chown _i2pd:"$i2pd_gid" /var/lib/i2pd
+		sudo chmod 700 /var/lib/i2pd
+		
+		sudo mkdir -p /etc/i2pd
+		sudo chown _i2pd:"$i2pd_gid" /etc/i2pd
+		sudo chmod 755 /etc/i2pd
+		
+		# Write config
+		sudo tee /etc/i2pd/i2pd.conf > /dev/null <<'EOF'
+# I2Pd configuration
+# Generated by decentral-nodes/i2pd
+
+# Daemon mode (managed by launchd/systemd)
+daemon = false
+
+# Data directory
+datadir = /var/lib/i2pd
+
+# Log configuration
+log = file
+logfile = /var/lib/i2pd/i2pd.log
+loglevel = info
+
+# SOCKS5 proxy (for .i2p addresses)
+[socksproxy]
+enabled = true
+address = 127.0.0.1
+port = 4447
+keys = socks-proxy.dat
+
+# HTTP proxy
+[httpproxy]
+enabled = true
+address = 127.0.0.1
+port = 4444
+keys = http-proxy.dat
+
+# SAM bridge (for application tunnels)
+[sam]
+enabled = true
+address = 127.0.0.1
+port = 7656
+
+# I2CP (for local clients)
+[i2cp]
+enabled = true
+address = 127.0.0.1
+port = 7654
+
+# Web console
+[webconsole]
+enabled = true
+address = 127.0.0.1
+port = 7070
+
+# Reduce resource usage
+[limits]
+transit = 128
+openfiles = 8192
+EOF
+		sudo chown _i2pd:"$i2pd_gid" /etc/i2pd/i2pd.conf
+		sudo chmod 600 /etc/i2pd/i2pd.conf
+		
+		# Find i2pd binary
+		local i2pd_bin; i2pd_bin=$(command -v i2pd 2>/dev/null || echo "/usr/local/bin/i2pd")
+		
+		# Write launchd plist
+		sudo tee /Library/LaunchDaemons/net.i2p.i2pd.plist > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.i2p.i2pd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${i2pd_bin}</string>
+        <string>--conf=/etc/i2pd/i2pd.conf</string>
+    </array>
+    <key>UserName</key>
+    <string>_i2pd</string>
+    <key>GroupName</key>
+    <string>_i2pd</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/lib/i2pd/i2pd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/lib/i2pd/i2pd.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote /Library/LaunchDaemons/net.i2p.i2pd.plist"
+		sudo launchctl load -w /Library/LaunchDaemons/net.i2p.i2pd.plist
+		info "i2pd service enabled"
+		info ""
+		info "next:"
+		info "    i2pd daemon start"
+		info "    i2pd daemon status"
+		info "    i2pd daemon monitor -f"
+		info ""
+		info "SOCKS5 proxy: 127.0.0.1:4447"
+		info "HTTP proxy:   127.0.0.1:4444"
+		info "SAM bridge:   127.0.0.1:7656"
+		info "Web console:  http://127.0.0.1:7070"
+	else
+		# Linux
+		if ! id i2pd >/dev/null 2>&1; then
+			info "creating i2pd service account"
+			sudo useradd -r -s /usr/sbin/nologin -d /var/lib/i2pd i2pd
+		fi
+		
+		# Ensure directories
+		sudo mkdir -p /var/lib/i2pd
+		sudo chown i2pd:i2pd /var/lib/i2pd
+		sudo chmod 700 /var/lib/i2pd
+		
+		sudo mkdir -p /etc/i2pd
+		sudo mkdir -p /var/log/i2pd
+		sudo chown i2pd:i2pd /var/log/i2pd
+		
+		# Write config
+		sudo tee /etc/i2pd/i2pd.conf > /dev/null <<'EOF'
+# I2Pd configuration
+# Generated by decentral-nodes/i2pd
+
+daemon = false
+datadir = /var/lib/i2pd
+
+log = file
+logfile = /var/log/i2pd/i2pd.log
+loglevel = info
+
+[socksproxy]
+enabled = true
+address = 127.0.0.1
+port = 4447
+keys = socks-proxy.dat
+
+[httpproxy]
+enabled = true
+address = 127.0.0.1
+port = 4444
+keys = http-proxy.dat
+
+[sam]
+enabled = true
+address = 127.0.0.1
+port = 7656
+
+[i2cp]
+enabled = true
+address = 127.0.0.1
+port = 7654
+
+[webconsole]
+enabled = true
+address = 127.0.0.1
+port = 7070
+
+[limits]
+transit = 128
+openfiles = 8192
+EOF
+		sudo chown i2pd:i2pd /etc/i2pd/i2pd.conf
+		sudo chmod 600 /etc/i2pd/i2pd.conf
+		
+		# Write systemd unit
+		sudo tee /etc/systemd/system/i2pd.service > /dev/null <<'EOF'
+[Unit]
+Description=I2Pd Router
+Documentation=https://i2pd.website/
+After=network.target
+
+[Service]
+Type=simple
+User=i2pd
+Group=i2pd
+ExecStart=/usr/bin/i2pd --conf=/etc/i2pd/i2pd.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		sudo systemctl daemon-reload
+		sudo systemctl enable i2pd.service
+		info "wrote /etc/systemd/system/i2pd.service"
+		info ""
+		info "next:"
+		info "    sudo systemctl start i2pd.service"
+		info "    i2pd daemon status"
+		info "    i2pd daemon monitor -f"
+		info ""
+		info "SOCKS5 proxy: 127.0.0.1:4447"
+		info "HTTP proxy:   127.0.0.1:4444"
+		info "SAM bridge:   127.0.0.1:7656"
+		info "Web console:  http://127.0.0.1:7070"
+	fi
+}
+
+cmd_disable() {
+	info "disabling i2pd service..."
+	cmd_stop "$@" 2>/dev/null || true
+	
+	if is_macos; then
+		if [ -f "/Library/LaunchDaemons/net.i2p.i2pd.plist" ]; then
+			sudo launchctl unload /Library/LaunchDaemons/net.i2p.i2pd.plist 2>/dev/null || true
+			sudo rm /Library/LaunchDaemons/net.i2p.i2pd.plist
+			info "removed /Library/LaunchDaemons/net.i2p.i2pd.plist"
+		fi
+	else
+		if [ -f "/etc/systemd/system/i2pd.service" ]; then
+			sudo systemctl stop i2pd.service 2>/dev/null || true
+			sudo systemctl disable i2pd.service 2>/dev/null || true
+			sudo rm /etc/systemd/system/i2pd.service
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/i2pd.service"
+		fi
+	fi
+	info "i2pd service disabled"
+	info "data directory preserved: /var/lib/i2pd"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	help)     usage ;;
+	*)       usage; exit 1 ;;
+esac

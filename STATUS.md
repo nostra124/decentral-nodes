@@ -53,9 +53,15 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 - Stacks script updated: pruning detection, chainstate archive download (.tar.zst format)
 - Architecture decisions documented: JoinMarket, Storj, HNS, Yggdrasil in Tier 3
 - Privacy architecture: selective Tor routing (not forced)
+- **Tier 2 tools implemented**:
+  - Tor daemon: `bin/tor`, `libexec/tor/daemon`, `libexec/tor/help`
+  - I2Pd daemon: `bin/i2pd`, `libexec/i2pd/daemon`, `libexec/i2pd/help`
+  - IPFS daemon: `bin/ipfs`, `libexec/ipfs/daemon`, `libexec/ipfs/help`
 
 ### In Progress
-- Ready to test Stacks enable with chainstate archive
+- Test Tor daemon enable/start on macOS
+- Test I2Pd daemon enable/start on macOS
+- Test IPFS daemon enable/start on macOS
 
 ### Resolved
 - Stacks chainstate archive now available at archive.hiro.so (205GB .tar.zst format)
@@ -66,6 +72,12 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 - `/Users/rene/Projekte/bitcoin/.rpk/identity`: Package identity (now `decentral-nodes`)
 - `/Users/rene/Projekte/bitcoin/configure`: Build configuration
 - `/Users/rene/Projekte/bitcoin/install`: Standalone installer
+- `/Users/rene/Projekte/bitcoin/bin/tor`: Tor daemon dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/tor/daemon`: Tor daemon implementation
+- `/Users/rene/Projekte/bitcoin/bin/i2pd`: I2Pd daemon dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/i2pd/daemon`: I2Pd daemon implementation
+- `/Users/rene/Projekte/bitcoin/bin/ipfs`: IPFS daemon dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/ipfs/daemon`: IPFS daemon implementation
 - `/Users/rene/Projekte/bitcoin/libexec/stacks/daemon`: Stacks daemon script
 - `/Users/rene/Projekte/bitcoin/STACKS_PRUNING.md`: Pruning issue documentation
 

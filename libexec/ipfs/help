@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# ipfs help — usage information for ipfs(1).
+
+cat <<EOF
+ipfs(1) — manage an IPFS daemon for decentralized storage
+
+USAGE
+    ipfs daemon <subcommand> [args]
+
+SUBCOMMANDS
+    lifecycle:
+        start       bring up ipfs daemon (via launchd/systemd)
+        stop        graceful shutdown
+        restart     stop + start
+        status      health check (running/down)
+        monitor     tail the daemon log (default: -f)
+
+    setup:
+        install     install ipfs binary (brew|source)
+        enable      install + configure as system service
+        disable     stop service and remove unit
+
+DESCRIPTION
+    Tier 2 (Network Privacy) tool. Provides a local IPFS node for
+    content-addressed storage and retrieval on-demand (opt-in).
+
+    Applications connect to:
+        - API:     127.0.0.1:5001 (for ipfs CLI)
+        - Gateway: http://127.0.0.1:8080
+        - Swarm:   0.0.0.0:4001 (P2P networking)
+
+    No forced usage — applications opt-in to IPFS.
+
+EXAMPLES
+    # Install and enable IPFS
+    ipfs daemon install
+    ipfs daemon enable
+
+    # Start the daemon
+    ipfs daemon start
+
+    # Check status and get peer ID
+    ipfs daemon status
+
+    # Add a file to IPFS
+    ipfs add myfile.txt
+
+    # Get a file from IPFS
+    ipfs cat QmHash... > output.txt
+
+    # Access web UI
+    open http://127.0.0.1:5001/webui
+
+    # Monitor the log
+    ipfs daemon monitor -f
+
+FILES
+    /var/lib/ipfs/         IPFS repository and data
+    /var/log/ipfs/ipfs.log IPFS log file
+
+SEE ALSO
+    bitcoin(1), lightning(1), tor(1), i2pd(1)
+
+FEAT-310 — Tier 2 privacy tools
+EOF

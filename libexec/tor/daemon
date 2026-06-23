@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+
+############################################################################
+# tor daemon — system-default tor service.
+#
+# Tier 2 (Network Privacy) tool. Provides a local Tor SOCKS5 proxy
+# for applications to route traffic through Tor on-demand (opt-in).
+#
+# Modeled on libexec/bitcoin/daemon: render a platform-appropriate unit
+# from share/tor/units/, install it, and (de)activate it through the
+# init system — systemd on Linux, launchd on macOS — in system-mode only
+# (dedicated `_tor`/`tor` account).
+#
+# Every privileged step routes through $SUDO; every absolute system path
+# through $TOR_DAEMON_ROOT; the OS family through $TOR_DAEMON_OS — so
+# the bats matrix mocks the init system and redirects writes into a tmp dir.
+# §4: no shared library — these helpers are this file's own.
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+has() { type -t "$1:$2" | grep -q function; }
+
+# --- mode / os helpers -------------------------------------------------------
+
+# OS family: "linux" | "macos". $TOR_DAEMON_OS overrides uname.
+daemon:_os() {
+	local os="${TOR_DAEMON_OS:-}"
+	if [ -z "$os" ]; then
+		case "$(uname -s)" in
+			Linux)  os=linux ;;
+			Darwin) os=macos ;;
+			*)      os=unknown ;;
+		esac
+	fi
+	printf '%s\n' "$os"
+}
+
+# launchd domain for system mode.
+daemon:_domain() {
+	printf 'system\n'
+}
+
+# System-mode only.
+daemon:_mode() {
+	printf 'system\n'
+}
+
+# --- paths / accounts --------------------------------------------------------
+
+daemon:_root() { printf '%s' "${TOR_DAEMON_ROOT:-}"; }
+
+daemon:_units_dir() {
+	if [ -n "${SELF_UNITS:-}" ]; then printf '%s\n' "$SELF_UNITS"; return 0; fi
+	(cd "$(dirname "$0")/../../share/tor/units" 2>/dev/null && pwd)
+}
+
+# Data directory for system mode (FHS: /var/lib/tor)
+daemon:_datadir() {
+	printf '%s/var/lib/tor\n' "$(daemon:_root)"
+}
+
+# Directory holding torrc. FHS: system config under /etc/tor
+daemon:_confdir() {
+	printf '%s/etc/tor\n' "$(daemon:_root)"
+}
+
+# --- is tor running? ---------------------------------------------------------
+
+tor_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active tor.service 2>/dev/null
+	elif command -v launchctl >/dev/null 2>&1; then
+		launchctl list net.tor.tor >/dev/null 2>&1
+	else
+		pgrep -x tor >/dev/null 2>&1
+	fi
+}
+
+# --- init system -------------------------------------------------------------
+
+init_system() {
+	if [ -f /bin/openrc ]; then echo openrc
+	elif command -v systemctl >/dev/null 2>&1; then echo systemd
+	else echo unknown
+	fi
+}
+
+# --- is a system-mode supervisor unit installed? ----------------------------
+
+system_installed() {
+	if is_macos; then
+		[ -f "/Library/LaunchDaemons/net.tor.tor.plist" ]
+	elif [ "$(init_system)" = openrc ]; then
+		[ -f "/etc/init.d/tor" ]
+	else
+		systemctl --quiet is-enabled tor.service 2>/dev/null
+	fi
+}
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: tor daemon <subcommand> [args]
+
+   Lifecycle of the underlying tor process.
+   System-mode only (like bitcoin/lightning).
+
+   lifecycle:
+     start                       bring up tor (via launchd/systemd)
+     stop                        graceful shutdown
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the daemon log
+
+   setup:
+     install [--from <src>]      install tor binary (brew|apt|source)
+     enable                      install + start unit (system-mode)
+     disable                     stop service and remove unit
+
+   see 'tor daemon help <subcommand>' for detailed usage.
+EOF
+	exit 1
+}
+
+cmd_start() {
+	if tor_running; then
+		info "tor already running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl load -w /Library/LaunchDaemons/net.tor.tor.plist
+	else
+		sudo systemctl start tor.service
+	fi
+	info "tor started"
+}
+
+cmd_stop() {
+	if ! tor_running; then
+		info "tor not running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl unload /Library/LaunchDaemons/net.tor.tor.plist
+	else
+		sudo systemctl stop tor.service
+	fi
+	info "tor stopped"
+}
+
+cmd_restart() {
+	cmd_stop "$@" || true
+	sleep 1
+	cmd_start "$@"
+}
+
+cmd_status() {
+	if tor_running; then
+		echo "running"
+	else
+		echo "down"
+	fi
+}
+
+cmd_monitor() {
+	local logfile="/var/log/tor/tor.log"
+	[ -f "$logfile" ] || logfile="/var/lib/tor/log"
+	[ -f "$logfile" ] || { error "no log file found"; exit 2; }
+	exec tail "${@:--f}" "$logfile"
+}
+
+cmd_install() {
+	info "installing tor..."
+	
+	if is_macos; then
+		if command -v brew >/dev/null 2>&1; then
+			brew install tor
+		else
+			error "brew not found — install Homebrew first"
+			exit 1
+		fi
+	else
+		if command -v apt >/dev/null 2>&1; then
+			sudo apt update
+			sudo apt install -y tor
+		elif command -v apk >/dev/null 2>&1; then
+			sudo apk add tor
+		else
+			error "package manager not supported"
+			exit 1
+		fi
+	fi
+	
+	info "tor installed: $(tor --version | head -1)"
+}
+
+cmd_enable() {
+	info "enabling tor system service..."
+	
+	# Ensure _tor user and group exist
+	if is_macos; then
+		if ! dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}' | grep -q '^315$'; then
+			info "creating _tor group (GID 315)"
+			sudo dscl . -create /Groups/_tor
+			sudo dscl . -create /Groups/_tor PrimaryGroupID 315
+		fi
+		if ! id _tor >/dev/null 2>&1; then
+			info "creating _tor service account"
+			local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+			local uid=$((max_uid + 1))
+			sudo dscl . -create /Users/_tor
+			sudo dscl . -create /Users/_tor UserShell /usr/bin/false
+			sudo dscl . -create /Users/_tor UniqueID "$uid"
+			sudo dscl . -create /Users/_tor PrimaryGroupID 315
+			sudo dscl . -create /Users/_tor NFSHomeDirectory /var/lib/tor
+			sudo dscl . -create /Users/_tor RealName "Tor Daemon"
+		fi
+		
+		# Ensure data directory exists
+		local tor_gid; tor_gid=$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '/^_tor /{print $2}')
+		sudo mkdir -p /var/lib/tor
+		sudo chown _tor:"$tor_gid" /var/lib/tor
+		sudo chmod 700 /var/lib/tor
+		
+		# Ensure config directory exists
+		sudo mkdir -p /etc/tor
+		sudo chown _tor:"$tor_gid" /etc/tor
+		sudo chmod 755 /etc/tor
+		
+		# Write config
+		sudo tee /etc/tor/torrc > /dev/null <<'EOF'
+# Tor daemon configuration
+# Generated by decentral-nodes/tor
+
+# SOCKS5 proxy for applications (opt-in routing)
+SOCKSPort 9050
+SOCKSPort 127.0.0.1:9050
+
+# Control port for tor-ctl
+ControlPort 9051
+
+# Data directory
+DataDirectory /var/lib/tor
+
+# Log to file
+Log notice file /var/lib/tor/log
+
+# Run as daemon (managed by launchd/systemd)
+# RunAsDaemon is set by service manager
+
+# Security: restrict to localhost
+SocksListenAddress 127.0.0.1
+ControlListenAddress 127.0.0.1
+
+# Reduced circuit fingerprinting
+CircuitBuildTimeout 30
+
+# Client-only mode (no relay)
+ClientOnly 1
+EOF
+		sudo chown _tor:"$tor_gid" /etc/tor/torrc
+		sudo chmod 600 /etc/tor/torrc
+		
+		# Write launchd plist
+		sudo tee /Library/LaunchDaemons/net.tor.tor.plist > /dev/null <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.tor.tor</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/tor</string>
+        <string>-f</string>
+        <string>/etc/tor/torrc</string>
+    </array>
+    <key>UserName</key>
+    <string>_tor</string>
+    <key>GroupName</key>
+    <string>_tor</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/lib/tor/log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/lib/tor/log</string>
+</dict>
+</plist>
+EOF
+		info "wrote /Library/LaunchDaemons/net.tor.tor.plist"
+		sudo launchctl load -w /Library/LaunchDaemons/net.tor.tor.plist
+		info "tor service enabled"
+		info ""
+		info "next:"
+		info "    tor daemon start"
+		info "    tor daemon status"
+		info "    tor daemon monitor -f"
+		info ""
+		info "SOCKS5 proxy: 127.0.0.1:9050"
+		info "Control port: 127.0.0.1:9051"
+	else
+		# Linux
+		if ! id tor >/dev/null 2>&1; then
+			info "creating tor service account"
+			sudo useradd -r -s /usr/sbin/nologin -d /var/lib/tor tor
+		fi
+		
+		# Ensure directories
+		sudo mkdir -p /var/lib/tor
+		sudo chown tor:tor /var/lib/tor
+		sudo chmod 700 /var/lib/tor
+		
+		sudo mkdir -p /etc/tor
+		sudo mkdir -p /var/log/tor
+		sudo chown tor:tor /var/log/tor
+		
+		# Write config
+		sudo tee /etc/tor/torrc > /dev/null <<'EOF'
+# Tor daemon configuration
+# Generated by decentral-nodes/tor
+
+# SOCKS5 proxy for applications (opt-in routing)
+SOCKSPort 9050
+SOCKSPort 127.0.0.1:9050
+
+# Control port for tor-ctl
+ControlPort 9051
+
+# Data directory
+DataDirectory /var/lib/tor
+
+# Log to file
+Log notice file /var/log/tor/tor.log
+
+# Security: restrict to localhost
+SocksListenAddress 127.0.0.1
+ControlListenAddress 127.0.0.1
+
+# Reduced circuit fingerprinting
+CircuitBuildTimeout 30
+
+# Client-only mode (no relay)
+ClientOnly 1
+EOF
+		sudo chown tor:tor /etc/tor/torrc
+		sudo chmod 600 /etc/tor/torrc
+		
+		# Write systemd unit
+		sudo tee /etc/systemd/system/tor.service > /dev/null <<'EOF'
+[Unit]
+Description=Tor Daemon
+Documentation=https://www.torproject.org/
+After=network.target
+
+[Service]
+Type=simple
+User=tor
+Group=tor
+ExecStart=/usr/bin/tor -f /etc/tor/torrc
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		sudo systemctl daemon-reload
+		sudo systemctl enable tor.service
+		info "wrote /etc/systemd/system/tor.service"
+		info ""
+		info "next:"
+		info "    sudo systemctl start tor.service"
+		info "    tor daemon status"
+		info "    tor daemon monitor -f"
+		info ""
+		info "SOCKS5 proxy: 127.0.0.1:9050"
+		info "Control port: 127.0.0.1:9051"
+	fi
+}
+
+cmd_disable() {
+	info "disabling tor service..."
+	cmd_stop "$@" 2>/dev/null || true
+	
+	if is_macos; then
+		if [ -f "/Library/LaunchDaemons/net.tor.tor.plist" ]; then
+			sudo launchctl unload /Library/LaunchDaemons/net.tor.tor.plist 2>/dev/null || true
+			sudo rm /Library/LaunchDaemons/net.tor.tor.plist
+			info "removed /Library/LaunchDaemons/net.tor.tor.plist"
+		fi
+	else
+		if [ -f "/etc/systemd/system/tor.service" ]; then
+			sudo systemctl stop tor.service 2>/dev/null || true
+			sudo systemctl disable tor.service 2>/dev/null || true
+			sudo rm /etc/systemd/system/tor.service
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/tor.service"
+		fi
+	fi
+	info "tor service disabled"
+	info "data directory preserved: /var/lib/tor"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	help)     usage ;;
+	*)       usage; exit 1 ;;
+esac
