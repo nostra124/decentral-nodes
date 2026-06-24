@@ -92,7 +92,7 @@ is_macos() { [ "$(uname -s)" = "Darwin" ]; }
 
 usage() {
 	cat >&2 <<EOF
-usage: i2pd daemon <subcommand> [args]
+usage: i2pd-node daemon <subcommand> [args]
 
    Lifecycle of the underlying i2pd process.
    System-mode only (like bitcoin/lightning).
@@ -105,11 +105,16 @@ usage: i2pd daemon <subcommand> [args]
      monitor                     tail the daemon log
 
    setup:
-     install [--from <src>]      install i2pd binary (brew|apt|source)
+     install                     install i2pd binary (brew|apt)
      enable                      install + start unit (system-mode)
      disable                     stop service and remove unit
 
-   see 'i2pd daemon help <subcommand>' for detailed usage.
+   reseed (self-hosted bootstrap):
+     reseed-export               export routerInfo files for seeding
+     reseed-server               configure as reseed server
+     reseed-bootstrap <url>      bootstrap from custom reseed URL
+
+   see 'i2pd-node daemon help <subcommand>' for detailed usage.
 EOF
 	exit 1
 }
@@ -461,19 +466,174 @@ cmd_disable() {
 		fi
 	fi
 	info "i2pd service disabled"
-	info "data directory preserved: /var/lib/i2pd"
+	info "data directory preserved: /opt/local/var/lib/i2pd"
+}
+
+# --- self-hosted reseed commands ---------------------------------------------
+
+cmd_reseed_export() {
+	info "exporting routerInfo files for seeding..."
+	
+	local datadir="/opt/local/var/lib/i2pd"
+	local netdb_dir="$datadir/netDb"
+	
+	if [ ! -d "$netdb_dir" ]; then
+		error "netDb directory not found at $netdb_dir"
+		error "i2pd must be running and connected to build routerInfos"
+		exit 1
+	fi
+	
+	local export_dir="/tmp/i2pd-reseed-export"
+	rm -rf "$export_dir"
+	mkdir -p "$export_dir"
+	
+	# Copy routerInfo files (exclude our own)
+	local router_hash
+	router_hash=$(sudo cat "$datadir/router.info" 2>/dev/null | grep -o 'router_ident.*' | head -1 | sha256sum | cut -d' ' -f1 || echo "")
+	
+	sudo find "$netdb_dir" -name "routerInfo-*.dat" -type f | head -50 | while read -r file; do
+		local basename=$(basename "$file")
+		sudo cp "$file" "$export_dir/$basename"
+	done
+	
+	# Create reseed bundle
+	local bundle="$HOME/i2pd-reseed-$(date +%Y%m%d).tar.gz"
+	tar -czf "$bundle" -C "$export_dir" .
+	
+	info "exported $(ls -1 "$export_dir" | wc -l) routerInfo files"
+	info "bundle created: $bundle"
+	info ""
+	info "to use as reseed server:"
+	info "  1. Upload $bundle to your public web server"
+	info "  2. Extract and serve via HTTPS"
+	info "  3. Bootstrap with: i2pd-node reseed-bootstrap https://your-server.com/routerInfo/"
+	
+	rm -rf "$export_dir"
+}
+
+cmd_reseed_server() {
+	info "configuring i2pd as reseed server..."
+	
+	local datadir="/opt/local/var/lib/i2pd"
+	local config_file="/opt/local/etc/i2pd/i2pd.conf"
+	
+	# Enable floodfill mode
+	sudo sed -i.bak 's/^floodfill = false/floodfill = true/' "$config_file" 2>/dev/null || \
+		sudo bash -c 'echo "floodfill = true" >> "$config_file"'
+	
+	# Create web server directory for routerInfos
+	sudo mkdir -p /var/www/i2pd-reseed
+	sudo chown _i2pd:_i2pd /var/www/i2pd-reseed
+	
+	# Export routerInfos periodically
+	sudo tee /etc/i2pd/reseed-cron.sh > /dev/null <<'EOF'
+#!/bin/bash
+DATADIR="/opt/local/var/lib/i2pd"
+WEBDIR="/var/www/i2pd-reseed"
+mkdir -p "$WEBDIR"
+find "$DATADIR/netDb" -name "routerInfo-*.dat" -mtime -7 -exec cp {} "$WEBDIR/" \;
+cd "$WEBDIR"
+tar -czf reseed.tar.gz routerInfo-*.dat
+EOF
+	sudo chmod +x /etc/i2pd/reseed-cron.sh
+	
+	info "configured i2pd as floodfill (reseed server)"
+	info "routerInfos will be available at: /var/www/i2pd-reseed/"
+	info ""
+	info "to serve via HTTPS, configure your web server:"
+	info "  nginx/apache: point to /var/www/i2pd-reseed/"
+	info "  add to cron for daily updates: 0 2 * * * /etc/i2pd/reseed-cron.sh"
+	info ""
+	info "restart i2pd to activate floodfill mode:"
+	info "  i2pd-node restart"
+}
+
+cmd_reseed_bootstrap() {
+	if [ -z "$1" ]; then
+		error "usage: i2pd-node reseed-bootstrap <url>"
+		error "  url: base URL to routerInfo files (e.g., https://your-server.com/routerInfo/)"
+		exit 1
+	fi
+	
+	local base_url="$1"
+	local datadir="/opt/local/var/lib/i2pd"
+	local netdb_dir="$datadir/netDb"
+	
+	info "bootstrapping i2pd from custom reseed: $base_url"
+	
+	# Stop i2pd first
+	cmd_stop 2>/dev/null || true
+	
+	# Create netDb directory
+	sudo mkdir -p "$netdb_dir"
+	sudo chown _i2pd:_i2pd "$netdb_dir"
+	
+	# Download routerInfo files
+	local tmpdir="/tmp/i2pd-bootstrap-$$"
+	mkdir -p "$tmpdir"
+	
+	info "downloading routerInfo files..."
+	
+	# Try to download a bundle first
+	if curl -fsSL "$base_url/reseed.tar.gz" -o "$tmpdir/reseed.tar.gz" 2>/dev/null; then
+		info "found reseed bundle, extracting..."
+		tar -xzf "$tmpdir/reseed.tar.gz" -C "$tmpdir"
+	else
+		# Try individual routerInfo files
+		info "downloading individual routerInfo files..."
+		for i in $(seq 1 50); do
+			local padded=$(printf "%05d" $i)
+			curl -fsSL "$base_url/routerInfo-$padded.dat" -o "$tmpdir/routerInfo-$padded.dat" 2>/dev/null || true
+		done
+	fi
+	
+	local count=$(ls -1 "$tmpdir"/routerInfo-*.dat 2>/dev/null | wc -l)
+	
+	if [ "$count" -eq 0 ]; then
+		error "failed to download any routerInfo files from $base_url"
+		error "make sure the URL points to a directory with routerInfo-*.dat files"
+		rm -rf "$tmpdir"
+		exit 1
+	fi
+	
+	# Copy to netDb
+	sudo cp "$tmpdir"/routerInfo-*.dat "$netdb_dir/"
+	sudo chown _i2pd:_i2pd "$netdb_dir"/*.dat
+	
+	info "imported $count routerInfo files"
+	
+	# Update config to use local reseed
+	sudo sed -i.bak '/^\[reseed\]/,/^\[/d' /opt/local/etc/i2pd/i2pd.conf 2>/dev/null || true
+	sudo bash -c 'cat >> /opt/local/etc/i2pd/i2pd.conf << EOF
+
+[reseed]
+verify = false
+urls = '"$base_url"'/reseed.tar.gz
+EOF'
+	
+	rm -rf "$tmpdir"
+	
+	info "bootstrap complete"
+	info "starting i2pd..."
+	
+	# Start i2pd
+	sleep 2
+	cmd_start
 }
 
 # Dispatch
 case "${1:-help}" in
-	start)    shift; cmd_start "$@" ;;
-	stop)     shift; cmd_stop "$@" ;;
-	restart)  shift; cmd_restart "$@" ;;
-	status)   shift; cmd_status "$@" ;;
-	monitor)  shift; cmd_monitor "$@" ;;
-	install)  shift; cmd_install "$@" ;;
-	enable)   shift; cmd_enable "$@" ;;
-	disable)  shift; cmd_disable "$@" ;;
-	help)     usage ;;
-	*)       usage; exit 1 ;;
+	start)              shift; cmd_start "$@" ;;
+	stop)               shift; cmd_stop "$@" ;;
+	restart)            shift; cmd_restart "$@" ;;
+	status)             shift; cmd_status "$@" ;;
+	monitor)            shift; cmd_monitor "$@" ;;
+	install)            shift; cmd_install "$@" ;;
+	enable)             shift; cmd_enable "$@" ;;
+	disable)            shift; cmd_disable "$@" ;;
+	reseed-export)      shift; cmd_reseed_export "$@" ;;
+	reseed-server)      shift; cmd_reseed_server "$@" ;;
+	reseed-bootstrap)   shift; cmd_reseed_bootstrap "$@" ;;
+	help)               usage ;;
+	*)                  usage; exit 1 ;;
 esac
