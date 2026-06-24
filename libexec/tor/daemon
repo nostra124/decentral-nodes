@@ -80,7 +80,8 @@ tor_running() {
 	if command -v systemctl >/dev/null 2>&1; then
 		systemctl --quiet is-active tor.service 2>/dev/null
 	elif command -v launchctl >/dev/null 2>&1; then
-		launchctl list net.tor.tor >/dev/null 2>&1
+		# System services need sudo launchctl list
+		sudo launchctl list net.tor.tor 2>/dev/null | grep -q "PID"
 	else
 		pgrep -x tor >/dev/null 2>&1
 	fi
