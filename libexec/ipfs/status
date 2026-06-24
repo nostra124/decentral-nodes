@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# ipfs status — shortcut for daemon status
+exec "$(cd "$(dirname "$0")/.." && pwd)/ipfs/daemon" status "$@"

@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# tor status — shortcut for daemon status
+exec "$(cd "$(dirname "$0")/.." && pwd)/tor/daemon" status "$@"
