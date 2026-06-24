@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+cat <<'EOF'
+storj-node — manage a Storj storage node
+
+COMMANDS
+  daemon start     Start storagenode
+  daemon stop      Stop storagenode
+  daemon status    Check if storagenode is running
+  daemon monitor   Tail the node log
+  daemon install   Download storagenode binary
+  daemon enable    Install + configure as system service
+  daemon disable   Stop service and remove unit
+
+USAGE
+  storj-node daemon status
+  storj-node daemon enable
+  storj-node daemon start
+
+STORJ PROVIDES
+  - Decentralized cloud storage node
+  - Earn STORJ tokens for hosting data
+  - Encrypted, distributed storage
+
+SERVICES
+  Dashboard:  http://127.0.0.1:14002
+
+FILES
+  Config:    /etc/storj/
+  Data:      /var/lib/storj/storage/
+  Logs:      /var/log/storj/
+
+REQUIREMENTS
+  - Identity file (created via: storagenode identity create)
+  - Authorization token from storj.io
+  - Storage allocation (disk space)
+
+SETUP
+  1. Create identity:    storagenode identity create
+  2. Get auth token:     https://storj.io/
+  3. Setup storage:      Allocate disk space in /var/lib/storj/storage
+  4. Start node:         storj-node daemon start
+
+SEE ALSO
+  https://docs.storj.io/node
+  https://storj.io/
+EOF

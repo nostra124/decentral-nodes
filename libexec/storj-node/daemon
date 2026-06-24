@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+
+############################################################################
+# storj daemon — system-default storj storage node service.
+#
+# Tier 3 (Storage/Privacy) tool. Provides decentralized cloud storage
+# node functionality (opt-in).
+#
+# Storj provides:
+#   - Decentralized cloud storage node
+#   - Earn STORJ tokens for hosting data
+#   - Encrypted, distributed storage
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: storj-node daemon <subcommand> [args]
+
+   Lifecycle of the storj storage node.
+
+   lifecycle:
+     start                       bring up storagenode (via launchd/systemd)
+     stop                        graceful shutdown
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the node log
+
+   setup:
+     install                     download storagenode binary
+     enable                      install + start unit (system-mode)
+     disable                     stop service and remove unit
+     setup                       configure storage node (identity, storage)
+
+   see 'storj-node daemon help <subcommand>' for detailed usage.
+EOF
+	exit 1
+}
+
+storj_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active storagenode.service 2>/dev/null
+	elif command -v launchctl >/dev/null 2>&1; then
+		sudo launchctl list io.storj.storagenode 2>/dev/null | grep -q "PID"
+	else
+		pgrep -f "storagenode" >/dev/null 2>&1
+	fi
+}
+
+cmd_start() {
+	if storj_running; then
+		info "storagenode already running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl load -w /Library/LaunchDaemons/io.storj.storagenode.plist
+	else
+		sudo systemctl start storagenode.service
+	fi
+	info "storagenode started"
+}
+
+cmd_stop() {
+	if ! storj_running; then
+		info "storagenode not running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl unload /Library/LaunchDaemons/io.storj.storagenode.plist
+	else
+		sudo systemctl stop storagenode.service
+	fi
+	info "storagenode stopped"
+}
+
+cmd_restart() {
+	cmd_stop "$@" || true
+	sleep 2
+	cmd_start "$@"
+}
+
+cmd_status() {
+	if storj_running; then
+		echo "running"
+		if command -v storagenode >/dev/null 2>&1; then
+			storagenode status 2>/dev/null || true
+		fi
+	else
+		echo "down"
+	fi
+}
+
+cmd_monitor() {
+	local logfile="/var/log/storj/storagenode.log"
+	[ -f "$logfile" ] || { error "no log file found"; exit 2; }
+	exec tail "${@:--f}" "$logfile"
+}
+
+cmd_install() {
+	info "installing Storj storagenode..."
+	
+	local arch; arch=$(uname -m)
+	[ "$arch" = "x86_64" ] && arch=amd64
+	[ "$arch" = "aarch64" ] && arch=arm64
+	[ "$arch" = "arm64" ] && arch=arm64
+	
+	local os; os=$(uname -s | tr '[:upper:]' '[:lower:]')
+	
+	local version="v1.106.4"
+	local url="https://github.com/storj/storj/releases/latest/download/storagenode_${os}_${arch}.zip"
+	
+	info "downloading storagenode for ${os}_${arch}..."
+	
+	local tmpdir; tmpdir=$(mktemp -d)
+	cd "$tmpdir"
+	
+	if command -v curl >/dev/null 2>&1; then
+		curl -sL "$url" -o storagenode.zip
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q "$url" -O storagenode.zip
+	else
+		error "curl or wget required"
+		exit 1
+	fi
+	
+	unzip -q storagenode.zip || { error "failed to extract storagenode"; rm -rf "$tmpdir"; exit 1; }
+	
+	sudo mkdir -p /usr/local/bin
+	sudo mv storagenode /usr/local/bin/ 2>/dev/null || sudo mv storagenode_${os}_${arch} /usr/local/bin/storagenode
+	sudo chmod +x /usr/local/bin/storagenode
+	
+	rm -rf "$tmpdir"
+	cd - >/dev/null
+	
+	info "storagenode installed: $(/usr/local/bin/storagenode version 2>&1 | head -1 || echo 'version unknown')"
+	info ""
+	info "Before running:"
+	info "    1. Create identity: storagenode identity create"
+	info "    2. Setup storage allocation"
+	info "    3. Get authorization token from storj.io"
+}
+
+cmd_enable() {
+	info "enabling storagenode system service..."
+	
+	# Create user/group
+	if is_macos; then
+		if ! dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}' | grep -q '^319$'; then
+			info "creating _storj group (GID 319)"
+			sudo dscl . -create /Groups/_storj
+			sudo dscl . -create /Groups/_storj PrimaryGroupID 319
+		fi
+		if ! id _storj >/dev/null 2>&1; then
+			info "creating _storj service account"
+			local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+			local uid=$((max_uid + 1))
+			sudo dscl . -create /Users/_storj
+			sudo dscl . -create /Users/_storj UserShell /usr/bin/false
+			sudo dscl . -create /Users/_storj UniqueID "$uid"
+			sudo dscl . -create /Users/_storj PrimaryGroupID 319
+			sudo dscl . -create /Users/_storj NFSHomeDirectory /var/lib/storj
+			sudo dscl . -create /Users/_storj RealName "Storj Node"
+		fi
+		
+		# Create directories
+		local storj_gid; storj_gid=$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '/^_storj /{print $2}')
+		sudo mkdir -p /var/lib/storj
+		sudo chown _storj:"$storj_gid" /var/lib/storj
+		sudo chmod 700 /var/lib/storj
+		
+		sudo mkdir -p /var/log/storj
+		sudo chown _storj:"$storj_gid" /var/log/storj
+		
+		sudo mkdir -p /etc/storj
+		sudo chown _storj:"$storj_gid" /etc/storj
+		sudo chmod 755 /etc/storj
+		
+		# Find storagenode binary
+		local storj_bin; storj_bin=$(command -v storagenode 2>/dev/null || echo "/usr/local/bin/storagenode")
+		
+		# Write launchd plist
+		sudo tee /Library/LaunchDaemons/io.storj.storagenode.plist > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.storj.storagenode</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${storj_bin}</string>
+        <string>--config-dir=/etc/storj</string>
+        <string>--storage-dir=/var/lib/storj/storage</string>
+    </array>
+    <key>UserName</key>
+    <string>_storj</string>
+    <key>GroupName</key>
+    <string>_storj</string>
+    <key>WorkingDirectory</key>
+    <string>/var/lib/storj</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/var/lib/storj</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/storj/storagenode.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/storj/storagenode.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote /Library/LaunchDaemons/io.storj.storagenode.plist"
+		sudo launchctl load -w /Library/LaunchDaemons/io.storj.storagenode.plist
+		info "storagenode service enabled"
+		info ""
+		info "next:"
+		info "    storj-node daemon start"
+		info "    storj-node daemon status"
+		info "    storj-node daemon monitor -f"
+		info ""
+		info "Before starting:"
+		info "    1. Create identity: storagenode identity create"
+		info "    2. Get authorization token from storj.io"
+		info "    3. Setup storage allocation in /var/lib/storj/storage"
+		info ""
+		info "Dashboard: http://127.0.0.1:14002"
+	else
+		# Linux
+		if ! id storj >/dev/null 2>&1; then
+			info "creating storj service account"
+			sudo useradd -r -s /usr/sbin/nologin -d /var/lib/storj storj
+		fi
+		
+		# Create directories
+		sudo mkdir -p /var/lib/storj
+		sudo chown storj:storj /var/lib/storj
+		sudo chmod 700 /var/lib/storj
+		
+		sudo mkdir -p /var/log/storj
+		sudo chown storj:storj /var/log/storj
+		
+		sudo mkdir -p /etc/storj
+		sudo chown storj:storj /etc/storj
+		sudo chmod 755 /etc/storj
+		
+		# Write systemd unit
+		local storj_bin; storj_bin=$(command -v storagenode 2>/dev/null || echo "/usr/local/bin/storagenode")
+		
+		sudo tee /etc/systemd/system/storagenode.service > /dev/null <<EOF
+[Unit]
+Description=Storj Storage Node
+Documentation=https://docs.storj.io/node
+After=network.target
+
+[Service]
+Type=simple
+User=storj
+Group=storj
+Environment=HOME=/var/lib/storj
+ExecStart=${storj_bin} --config-dir=/etc/storj --storage-dir=/var/lib/storj/storage
+Restart=on-failure
+RestartSec=5
+StandardOutput=file:/var/log/storj/storagenode.log
+StandardError=file:/var/log/storj/storagenode.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		sudo systemctl daemon-reload
+		sudo systemctl enable storagenode.service
+		info "wrote /etc/systemd/system/storagenode.service"
+		info ""
+		info "next:"
+		info "    sudo systemctl start storagenode.service"
+		info "    storj-node daemon status"
+		info "    storj-node daemon monitor -f"
+		info ""
+		info "Before starting:"
+		info "    1. Create identity: storagenode identity create"
+		info "    2. Get authorization token from storj.io"
+		info "    3. Setup storage allocation in /var/lib/storj/storage"
+		info ""
+		info "Dashboard: http://127.0.0.1:14002"
+	fi
+}
+
+cmd_disable() {
+	info "disabling storagenode service..."
+	cmd_stop "$@" 2>/dev/null || true
+	
+	if is_macos; then
+		if [ -f "/Library/LaunchDaemons/io.storj.storagenode.plist" ]; then
+			sudo launchctl unload /Library/LaunchDaemons/io.storj.storagenode.plist 2>/dev/null || true
+			sudo rm /Library/LaunchDaemons/io.storj.storagenode.plist
+			info "removed /Library/LaunchDaemons/io.storj.storagenode.plist"
+		fi
+	else
+		if [ -f "/etc/systemd/system/storagenode.service" ]; then
+			sudo systemctl stop storagenode.service 2>/dev/null || true
+			sudo systemctl disable storagenode.service 2>/dev/null || true
+			sudo rm /etc/systemd/system/storagenode.service
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/storagenode.service"
+		fi
+	fi
+	info "storagenode service disabled"
+	info "data directory preserved: /var/lib/storj"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	help)     usage ;;
+	*)       usage; exit 1 ;;
+esac

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+
+############################################################################
+# joinmarket-node — manage a JoinMarket daemon for Bitcoin CoinJoin.
+#
+# Tier 3 (Privacy Tools) tool. Provides CoinJoin functionality for
+# Bitcoin transactions (opt-in).
+#
+# Commands:
+#   daemon start   — start joinmarket daemon (system-mode)
+#   daemon stop    — stop joinmarket daemon
+#   daemon status  — check if joinmarket is running
+#   daemon install — install joinmarket binary
+#   daemon enable  — install + configure as system service
+#   daemon disable — stop and remove service
+#
+# Usage:
+#   joinmarket-node daemon status
+#   joinmarket-node daemon enable
+#   joinmarket-node daemon start
+#
+# CoinJoin provides:
+#   - Bitcoin transaction privacy via collaborative transactions
+#   - Maker/Taker functionality
+#   - Wallet management
+############################################################################
+
+# This should always be the first line of code to facilitate debugging
+[ -n "$SELF_DEBUG" ] && set -vx
+
+# Per FEAT-194: VERSION read at runtime from VERSION at the repo root
+__d="$(cd "$(dirname "$0")" && pwd)"; __s="$(basename "$0")"
+VERSION=$(cat "$__d/../VERSION" 2>/dev/null || cat "$__d/../share/$__s/version" 2>/dev/null || echo '1.0.0')
+unset __d __s
+SELF=$(basename "$0")
+
+# Resolve $SELF_LIBEXEC (FEAT-001 libexec convention)
+if [ -z "$SELF_LIBEXEC" ]; then
+	for _d in \
+		"$(cd "$(dirname "$0")/../libexec" 2>/dev/null && pwd)" \
+		"$HOME/.local/libexec" \
+		"/usr/local/libexec" \
+		"/usr/libexec"; do
+		[ -d "$_d/$SELF" ] && SELF_LIBEXEC="$_d" && break
+	done
+	unset _d
+fi
+
+die() {
+	echo "$1" >&2
+	exit "${2:-1}"
+}
+
+fatal() {
+	echo "$SELF: fatal - $1" >&2
+	exit "${2:-1}"
+}
+
+debug() {
+	[ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2
+}
+
+info() {
+	if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi
+}
+
+warn() {
+	echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2
+}
+
+error() {
+	echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2
+}
+
+has() {
+	local KIND=$1
+	local NAME=$2
+	type -t "$KIND:$NAME" | grep -q function
+}
+
+# We run getopts as early as possible so global flags are caught before
+# the command dispatch at the end of the file.
+while getopts "c:dqpt" flag; do
+	if [ x"$1" = x'-q' ]; then SELF_QUIET=1; fi
+	if [ x"$1" = x'-d' ]; then SELF_DEBUG=1; fi
+	if [ x"$1" = x'-t' ]; then SELF_TEST=1; fi
+done
+shift $((OPTIND - 1))
+
+# Command dispatch — every verb maps to libexec/joinmarket/$verb.
+if [ $# -eq 0 ]; then
+	"$SELF_LIBEXEC/$SELF/help" 2>&1 | head -20
+	die "Run '$SELF help' for usage."
+fi
+
+verb="$1"; shift
+if [ ! -x "$SELF_LIBEXEC/$SELF/$verb" ]; then
+	warn "unknown verb: $verb"
+	die "Run '$SELF help' for usage."
+fi
+
+# Export VERSION for subcommands (FEAT-194)
+export SELF_VERSION="$VERSION"
+
+exec "$SELF_LIBEXEC/$SELF/$verb" "$@"

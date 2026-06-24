@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+cat <<'EOF'
+joinmarket-node — manage a JoinMarket daemon for Bitcoin CoinJoin
+
+COMMANDS
+  daemon start     Start joinmarket daemon
+  daemon stop      Stop joinmarket daemon
+  daemon status    Check if joinmarket is running
+  daemon monitor   Tail the daemon log
+  daemon install   Install joinmarket (via pip)
+  daemon enable    Install + configure as system service
+  daemon disable   Stop service and remove unit
+
+USAGE
+  joinmarket-node daemon status
+  joinmarket-node daemon enable
+  joinmarket-node daemon start
+
+JOINMARKET PROVIDES
+  - Bitcoin CoinJoin transactions (maker/taker)
+  - Privacy via collaborative transactions
+  - Yield generation for makers
+
+SERVICES
+  Wallet RPC:  http://127.0.0.1:28183
+
+FILES
+  Config:    /etc/joinmarket/
+  Data:      /var/lib/joinmarket/
+  Logs:      /var/log/joinmarket/
+
+REQUIREMENTS
+  - Python 3.7+
+  - Bitcoin Core (for wallet backend)
+  - pip3 (for installation)
+
+SEE ALSO
+  https://github.com/JoinMarket-Org/joinmarket-clientserver
+EOF

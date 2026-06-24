@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+
+############################################################################
+# joinmarket daemon — system-default joinmarket service.
+#
+# Tier 3 (Privacy Tools) tool. Provides CoinJoin functionality for
+# Bitcoin transactions (opt-in).
+#
+# JoinMarket provides:
+#   - Bitcoin CoinJoin transactions (maker/taker)
+#   - Privacy via collaborative transactions
+#   - Yield generation for makers
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: joinmarket-node daemon <subcommand> [args]
+
+   Lifecycle of the joinmarket daemon.
+
+   lifecycle:
+     start                       bring up joinmarketd (via launchd/systemd)
+     stop                        graceful shutdown
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the daemon log
+
+   setup:
+     install                     install joinmarket (pip/source)
+     enable                      install + start unit (system-mode)
+     disable                     stop service and remove unit
+
+   see 'joinmarket-node daemon help <subcommand>' for detailed usage.
+EOF
+	exit 1
+}
+
+jm_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active joinmarket.service 2>/dev/null
+	elif command -v launchctl >/dev/null 2>&1; then
+		sudo launchctl list org.joinmarket.joinmarketd 2>/dev/null | grep -q "PID"
+	else
+		pgrep -f "joinmarketd" >/dev/null 2>&1
+	fi
+}
+
+cmd_start() {
+	if jm_running; then
+		info "joinmarket already running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl load -w /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist
+	else
+		sudo systemctl start joinmarket.service
+	fi
+	info "joinmarket started"
+}
+
+cmd_stop() {
+	if ! jm_running; then
+		info "joinmarket not running"
+		return 0
+	fi
+	
+	if is_macos; then
+		sudo launchctl unload /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist
+	else
+		sudo systemctl stop joinmarket.service
+	fi
+	info "joinmarket stopped"
+}
+
+cmd_restart() {
+	cmd_stop "$@" || true
+	sleep 2
+	cmd_start "$@"
+}
+
+cmd_status() {
+	if jm_running; then
+		echo "running"
+		if command -v jmwalletd >/dev/null 2>&1; then
+			echo "Wallet RPC: http://127.0.0.1:28183"
+		fi
+	else
+		echo "down"
+	fi
+}
+
+cmd_monitor() {
+	local logfile="/var/log/joinmarket/joinmarket.log"
+	[ -f "$logfile" ] || { error "no log file found"; exit 2; }
+	exec tail "${@:--f}" "$logfile"
+}
+
+cmd_install() {
+	info "installing JoinMarket..."
+	
+	# Check Python 3
+	if ! command -v python3 >/dev/null 2>&1; then
+		error "python3 not found — install Python 3 first"
+		exit 1
+	fi
+	
+	# Install via pip
+	if command -v pip3 >/dev/null 2>&1; then
+		info "installing via pip3..."
+		pip3 install joinmarket --user || {
+			error "pip installation failed"
+			info "try: pip3 install joinmarket --user"
+			exit 1
+		}
+	else
+		error "pip3 not found — install pip first"
+		exit 1
+	fi
+	
+	info "JoinMarket installed: $(python3 -c 'import joinmarket; print(joinmarket.__version__)' 2>/dev/null || echo 'version unknown')"
+	info ""
+	info "To create a wallet:"
+	info "    jmwalletd.py"
+}
+
+cmd_enable() {
+	info "enabling joinmarket system service..."
+	
+	# Create user/group
+	if is_macos; then
+		if ! dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '{print $2}' | grep -q '^318$'; then
+			info "creating _joinmarket group (GID 318)"
+			sudo dscl . -create /Groups/_joinmarket
+			sudo dscl . -create /Groups/_joinmarket PrimaryGroupID 318
+		fi
+		if ! id _joinmarket >/dev/null 2>&1; then
+			info "creating _joinmarket service account"
+			local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+			local uid=$((max_uid + 1))
+			sudo dscl . -create /Users/_joinmarket
+			sudo dscl . -create /Users/_joinmarket UserShell /usr/bin/false
+			sudo dscl . -create /Users/_joinmarket UniqueID "$uid"
+			sudo dscl . -create /Users/_joinmarket PrimaryGroupID 318
+			sudo dscl . -create /Users/_joinmarket NFSHomeDirectory /var/lib/joinmarket
+			sudo dscl . -create /Users/_joinmarket RealName "JoinMarket Daemon"
+		fi
+		
+		# Create directories
+		local jm_gid; jm_gid=$(dscl . -list /Groups PrimaryGroupID 2>/dev/null | awk '/^_joinmarket /{print $2}')
+		sudo mkdir -p /var/lib/joinmarket
+		sudo chown _joinmarket:"$jm_gid" /var/lib/joinmarket
+		sudo chmod 700 /var/lib/joinmarket
+		
+		sudo mkdir -p /var/log/joinmarket
+		sudo chown _joinmarket:"$jm_gid" /var/log/joinmarket
+		
+		sudo mkdir -p /etc/joinmarket
+		sudo chown _joinmarket:"$jm_gid" /etc/joinmarket
+		sudo chmod 755 /etc/joinmarket
+		
+		# Find joinmarket binary
+		local jm_bin; jm_bin=$(command -v jmwalletd.py 2>/dev/null || command -v joinmarketd 2>/dev/null || echo "/usr/local/bin/jmwalletd.py")
+		
+		# Write launchd plist
+		sudo tee /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.joinmarket.joinmarketd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${jm_bin}</string>
+        <string>--datadir=/var/lib/joinmarket</string>
+        <string>--rpcport=27183</string>
+    </array>
+    <key>UserName</key>
+    <string>_joinmarket</string>
+    <key>GroupName</key>
+    <string>_joinmarket</string>
+    <key>WorkingDirectory</key>
+    <string>/var/lib/joinmarket</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/var/lib/joinmarket</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/joinmarket/joinmarket.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/joinmarket/joinmarket.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist"
+		sudo launchctl load -w /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist
+		info "joinmarket service enabled"
+		info ""
+		info "next:"
+		info "    joinmarket-node daemon start"
+		info "    joinmarket-node daemon status"
+		info "    joinmarket-node daemon monitor -f"
+		info ""
+		info "Wallet RPC:  http://127.0.0.1:28183"
+	else
+		# Linux
+		if ! id joinmarket >/dev/null 2>&1; then
+			info "creating joinmarket service account"
+			sudo useradd -r -s /usr/sbin/nologin -d /var/lib/joinmarket joinmarket
+		fi
+		
+		# Create directories
+		sudo mkdir -p /var/lib/joinmarket
+		sudo chown joinmarket:joinmarket /var/lib/joinmarket
+		sudo chmod 700 /var/lib/joinmarket
+		
+		sudo mkdir -p /var/log/joinmarket
+		sudo chown joinmarket:joinmarket /var/log/joinmarket
+		
+		sudo mkdir -p /etc/joinmarket
+		sudo chown joinmarket:joinmarket /etc/joinmarket
+		sudo chmod 755 /etc/joinmarket
+		
+		# Write systemd unit
+		local jm_bin; jm_bin=$(command -v jmwalletd.py 2>/dev/null || command -v joinmarketd 2>/dev/null || echo "/usr/local/bin/jmwalletd.py")
+		
+		sudo tee /etc/systemd/system/joinmarket.service > /dev/null <<EOF
+[Unit]
+Description=JoinMarket Daemon
+Documentation=https://github.com/JoinMarket-Org/joinmarket-clientserver
+After=network.target bitcoind.service
+
+[Service]
+Type=simple
+User=joinmarket
+Group=joinmarket
+Environment=HOME=/var/lib/joinmarket
+ExecStart=${jm_bin} --datadir=/var/lib/joinmarket --rpcport=27183
+Restart=on-failure
+RestartSec=5
+StandardOutput=file:/var/log/joinmarket/joinmarket.log
+StandardError=file:/var/log/joinmarket/joinmarket.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		sudo systemctl daemon-reload
+		sudo systemctl enable joinmarket.service
+		info "wrote /etc/systemd/system/joinmarket.service"
+		info ""
+		info "next:"
+		info "    sudo systemctl start joinmarket.service"
+		info "    joinmarket-node daemon status"
+		info "    joinmarket-node daemon monitor -f"
+		info ""
+		info "Wallet RPC:  http://127.0.0.1:28183"
+	fi
+}
+
+cmd_disable() {
+	info "disabling joinmarket service..."
+	cmd_stop "$@" 2>/dev/null || true
+	
+	if is_macos; then
+		if [ -f "/Library/LaunchDaemons/org.joinmarket.joinmarketd.plist" ]; then
+			sudo launchctl unload /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist 2>/dev/null || true
+			sudo rm /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist
+			info "removed /Library/LaunchDaemons/org.joinmarket.joinmarketd.plist"
+		fi
+	else
+		if [ -f "/etc/systemd/system/joinmarket.service" ]; then
+			sudo systemctl stop joinmarket.service 2>/dev/null || true
+			sudo systemctl disable joinmarket.service 2>/dev/null || true
+			sudo rm /etc/systemd/system/joinmarket.service
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/joinmarket.service"
+		fi
+	fi
+	info "joinmarket service disabled"
+	info "data directory preserved: /var/lib/joinmarket"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	help)     usage ;;
+	*)       usage; exit 1 ;;
+esac
