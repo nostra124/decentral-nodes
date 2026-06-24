@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-exec "$(cd "$(dirname "$0")/.." && pwd)/ipfs/daemon" start "$@"
+exec "$(cd "$(dirname "$0")/.." && pwd)/ipfs-node/daemon" start "$@"

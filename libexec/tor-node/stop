@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-exec "$(cd "$(dirname "$0")/.." && pwd)/tor/daemon" stop "$@"
+exec "$(cd "$(dirname "$0")/.." && pwd)/tor-node/daemon" stop "$@"
