@@ -18,9 +18,9 @@ own dispatcher and libexec tree.
 | `bin/monero-node` | Monero node frontend: wallet, daemon, transactions |
 | `bin/stacks-node` | Stacks node frontend: Bitcoin-aware smart contracts |
 
-**Tier 2** (Network Privacy): `tor-node`, `i2pd-node`, `ipfs-node` — implemented
+**Tier 2** (Network Privacy): `tor-node`, `ipfs-node` — implemented; `m2pd-node` (external: github.com/nostra124/m2pd)
 
-**Tier 3** (Advanced): `joinmarket-node`, `storj-node`, `hns-node` (Handshake), `yggdrasil-node` — planned
+**Tier 3** (Advanced): `joinmarket-node`, `storj-node` — implemented; `hns-node` (Handshake), `yggdrasil-node` — planned
 
 ## Install
 

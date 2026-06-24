@@ -30,19 +30,19 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 | Handshake (HNS) | ✓ Tier 3 | Decentralized DNS root replacement |
 | Yggdrasil | ✓ Tier 3 | IPv6 overlay network, later stage |
 | Tor | Tier 2 | Core privacy layer, selective routing (not forced) |
-| I2Pd | Tier 2 | Alternative privacy network |
+| m2pd | Tier 2 | I2P network daemon (P2P bootstrap capable) |
 | Whonix | Tier 3 | VM-based isolation (later stage) |
 
 ### Privacy Architecture
 - **Selective Tor routing**: Services opt-in to Tor, not all traffic forced through Tor
-- Tor/I2Pd daemons run as system services (Tier 2)
+- Tor/m2pd daemons run as system services (Tier 2)
 - Applications connect through Tor when needed (opt-in basis)
 - JoinMarket can operate over Tor (Tier 3)
 
 ### Naming
 - Repository: `decentral-nodes`
 - rpk package identity: `decentral-nodes`
-- Commands use `-node` suffix: `bitcoin-node`, `lightning-node`, `fulcrum-node`, `liquid-node`, `monero-node`, `stacks-node`, `tor-node`, `i2pd-node`, `ipfs-node`
+- Commands use `-node` suffix: `bitcoin-node`, `lightning-node`, `fulcrum-node`, `liquid-node`, `monero-node`, `stacks-node`, `tor-node`, `ipfs-node`, `joinmarket-node`, `storj-node`
 
 ## Progress
 
@@ -55,21 +55,25 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 - Privacy architecture: selective Tor routing (not forced)
 - **Tier 2 tools implemented**:
   - Tor daemon: `bin/tor-node`, `libexec/tor-node/daemon`, `libexec/tor-node/help`
-  - I2Pd daemon: `bin/i2pd-node`, `libexec/i2pd-node/daemon`, `libexec/i2pd-node/help`
   - IPFS daemon: `bin/ipfs-node`, `libexec/ipfs-node/daemon`, `libexec/ipfs-node/help`
+- **Tier 3 tools implemented**:
+  - JoinMarket: `bin/joinmarket-node`, `libexec/joinmarket-node/daemon`, `libexec/joinmarket-node/help`
+  - Storj: `bin/storj-node`, `libexec/storj-node/daemon`, `libexec/storj-node/help`
 
 ### In Progress
-- Test IPFS daemon enable/start on macOS (needs: `brew install ipfs`)
-- I2Pd waiting for reseed servers to recover
+- m2pd (I2P network daemon): Source at `/Users/rene/Projekte/m2pd`, needs integration wrapper
+- IPFS daemon: Installed, wrapper exists, needs launchd fix
+- JoinMarket: Wrapper created, needs testing
+- Storj: Wrapper created, needs testing
 
 ### Tested
-- **I2Pd daemon** (macOS): Running but blocked by reseed issues
-  - Service: running (PID 37049)
-  - Issue: I2P reseed servers failing (SSL errors, HTTP 410)
-  - Status: Cannot bootstrap to I2P network
-  - Error: "Reseed: SU3 download failed"
-  - Known issue: Many I2P reseed servers offline/unreliable (June 2026)
-  
+- **m2pd daemon** (macOS, balmung): Working with P2P bootstrap
+  - Fork: https://github.com/nostra124/m2pd (private)
+  - Feature: `--bootstrap=<host:port>` for peer-to-peer bootstrap
+  - Feature: `/routerInfo` HTTP endpoint for peer bootstrapping
+  - Installed: `/usr/local/bin/m2pd` on local macOS
+  - Installed: `/usr/sbin/m2pd` on balmung
+   
 - **Tor daemon** (macOS): Working
   - Service: running
   - SOCKS5: 127.0.0.1:9050
@@ -77,19 +81,15 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
   - Selective routing: opt-in via SOCKS5
 
 ### Known Issues & Solutions
-- **I2Pd reseed failures** (June 2026): I2P network bootstrap servers (reseed.i2p-projekt.de, netdb.i2p2.no) returning SSL errors and HTTP 410. 
-  
-  **Solution implemented**: Self-hosted reseed commands
+- **m2pd P2P bootstrap**: Use `--bootstrap=<host:port>` to bootstrap from a trusted peer instead of centralized reseed servers.
+   
   ```bash
-  # On a server with working I2P:
-  i2pd-node daemon reseed-export
-  # Upload ~/i2pd-reseed-*.tar.gz to your public web server
+  # On server (running m2pd with HTTP console on 0.0.0.0):
+  m2pd --conf=/etc/m2pd/m2pd.conf
   
-  # On this machine:
-  i2pd-node daemon reseed-bootstrap https://yourserver.com/i2p/
+  # On client (new instance):
+  m2pd --bootstrap=server.example.com:7070
   ```
-  
-  This allows decentralized bootstrap without public reseed servers.
 
 ### Resolved
 - Stacks chainstate archive now available at archive.hiro.so (205GB .tar.zst format)
@@ -102,10 +102,12 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 - `/Users/rene/Projekte/bitcoin/install`: Standalone installer
 - `/Users/rene/Projekte/bitcoin/bin/tor-node`: Tor daemon dispatcher
 - `/Users/rene/Projekte/bitcoin/libexec/tor-node/daemon`: Tor daemon implementation
-- `/Users/rene/Projekte/bitcoin/bin/i2pd-node`: I2Pd daemon dispatcher
-- `/Users/rene/Projekte/bitcoin/libexec/i2pd-node/daemon`: I2Pd daemon implementation
 - `/Users/rene/Projekte/bitcoin/bin/ipfs-node`: IPFS daemon dispatcher
 - `/Users/rene/Projekte/bitcoin/libexec/ipfs-node/daemon`: IPFS daemon implementation
+- `/Users/rene/Projekte/bitcoin/bin/joinmarket-node`: JoinMarket daemon dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/joinmarket-node/daemon`: JoinMarket daemon implementation
+- `/Users/rene/Projekte/bitcoin/bin/storj-node`: Storj node dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/storj-node/daemon`: Storj node implementation
 - `/Users/rene/Projekte/bitcoin/libexec/stacks-node/daemon`: Stacks daemon script
 - `/Users/rene/Projekte/bitcoin/STACKS_PRUNING.md`: Pruning issue documentation
 
