@@ -76,12 +76,20 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
   - Control: 127.0.0.1:9051
   - Selective routing: opt-in via SOCKS5
 
-### Known Issues
-- **I2Pd reseed failures** (June 2026): I2P network bootstrap servers (reseed.i2p-projekt.de, netdb.i2p2.no) returning SSL errors and HTTP 410. Affects new I2P installations globally. Alternatives:
-  1. Wait for reseed servers to recover
-  2. Use alternative I2P router with better bootstrap (I2P Java)
-  3. Manually copy netDb from working I2P router
-  4. Use Tor instead for privacy (already working)
+### Known Issues & Solutions
+- **I2Pd reseed failures** (June 2026): I2P network bootstrap servers (reseed.i2p-projekt.de, netdb.i2p2.no) returning SSL errors and HTTP 410. 
+  
+  **Solution implemented**: Self-hosted reseed commands
+  ```bash
+  # On a server with working I2P:
+  i2pd-node daemon reseed-export
+  # Upload ~/i2pd-reseed-*.tar.gz to your public web server
+  
+  # On this machine:
+  i2pd-node daemon reseed-bootstrap https://yourserver.com/i2p/
+  ```
+  
+  This allows decentralized bootstrap without public reseed servers.
 
 ### Resolved
 - Stacks chainstate archive now available at archive.hiro.so (205GB .tar.zst format)

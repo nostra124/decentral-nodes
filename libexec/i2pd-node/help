@@ -20,6 +20,16 @@ SUBCOMMANDS
         enable      install + configure as system service
         disable     stop service and remove unit
 
+    self-hosted reseed (bootstrap without public reseed servers):
+        reseed-export
+            Export routerInfo files for seeding (creates tar.gz)
+        
+        reseed-server
+            Configure i2pd as floodfill reseed server
+        
+        reseed-bootstrap <url>
+            Bootstrap from custom reseed URL
+
 DESCRIPTION
     Tier 2 (Network Privacy) tool. Provides a local I2P router for
     applications to connect to I2P network on-demand (opt-in).
@@ -31,6 +41,27 @@ DESCRIPTION
         - Web console:  http://127.0.0.1:7070
 
     No forced routing — applications opt-in to I2P routing.
+
+SELF-HOSTED RESEED WORKFLOW
+    Public reseed servers are often unreliable. Bootstrap from your
+    own server instead:
+
+    1. On a server with working I2P connectivity:
+       
+       i2pd-node daemon reseed-export
+       # Creates: ~/i2pd-reseed-YYYYMMDD.tar.gz
+       
+       # Upload to your public web server
+       scp ~/i2pd-reseed-*.tar.gz yourserver:/var/www/html/i2p/
+    
+    2. On this machine, bootstrap from your server:
+       
+       i2pd-node daemon reseed-bootstrap https://yourserver.com/i2p/
+    
+    3. Once connected, become a reseed server yourself:
+       
+       i2pd-node daemon reseed-server
+       # Serves routerInfos via /var/www/i2pd-reseed/
 
 EXAMPLES
     # Install and enable I2Pd
@@ -49,11 +80,14 @@ EXAMPLES
     # Monitor the log
     i2pd-node monitor -f
 
+    # Self-hosted bootstrap (when public reseeds fail)
+    i2pd-node daemon reseed-bootstrap https://yourserver.com/i2p/
+
 FILES
-    /etc/i2pd/i2pd.conf      I2Pd configuration
-    /var/lib/i2pd/           I2Pd data directory
-    /var/log/i2pd/i2pd.log   I2Pd log file (Linux)
-    /var/lib/i2pd/i2pd.log   I2Pd log file (macOS)
+    /opt/local/etc/i2pd/i2pd.conf      I2Pd configuration (macOS)
+    /opt/local/var/lib/i2pd/           I2Pd data directory (macOS)
+    /var/www/i2pd-reseed/              Reseed server directory
+    ~/i2pd-reseed-*.tar.gz              Exported reseed bundle
 
 SEE ALSO
     bitcoin-node(1), lightning-node(1), tor-node(1), ipfs-node(1)
