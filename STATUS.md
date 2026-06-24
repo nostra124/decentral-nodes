@@ -42,7 +42,7 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 ### Naming
 - Repository: `decentral-nodes`
 - rpk package identity: `decentral-nodes`
-- Commands remain unchanged: `bitcoin`, `lightning`, `fulcrum`, `liquid`, `monero`, `stacks`, etc.
+- Commands use `-node` suffix: `bitcoin-node`, `lightning-node`, `fulcrum-node`, `liquid-node`, `monero-node`, `stacks-node`, `tor-node`, `i2pd-node`, `ipfs-node`
 
 ## Progress
 
@@ -54,9 +54,9 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 - Architecture decisions documented: JoinMarket, Storj, HNS, Yggdrasil in Tier 3
 - Privacy architecture: selective Tor routing (not forced)
 - **Tier 2 tools implemented**:
-  - Tor daemon: `bin/tor`, `libexec/tor/daemon`, `libexec/tor/help`
-  - I2Pd daemon: `bin/i2pd`, `libexec/i2pd/daemon`, `libexec/i2pd/help`
-  - IPFS daemon: `bin/ipfs`, `libexec/ipfs/daemon`, `libexec/ipfs/help`
+  - Tor daemon: `bin/tor-node`, `libexec/tor-node/daemon`, `libexec/tor-node/help`
+  - I2Pd daemon: `bin/i2pd-node`, `libexec/i2pd-node/daemon`, `libexec/i2pd-node/help`
+  - IPFS daemon: `bin/ipfs-node`, `libexec/ipfs-node/daemon`, `libexec/ipfs-node/help`
 
 ### In Progress
 - Test Tor daemon enable/start on macOS
@@ -80,13 +80,13 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 - `/Users/rene/Projekte/bitcoin/.rpk/identity`: Package identity (now `decentral-nodes`)
 - `/Users/rene/Projekte/bitcoin/configure`: Build configuration
 - `/Users/rene/Projekte/bitcoin/install`: Standalone installer
-- `/Users/rene/Projekte/bitcoin/bin/tor`: Tor daemon dispatcher
-- `/Users/rene/Projekte/bitcoin/libexec/tor/daemon`: Tor daemon implementation
-- `/Users/rene/Projekte/bitcoin/bin/i2pd`: I2Pd daemon dispatcher
-- `/Users/rene/Projekte/bitcoin/libexec/i2pd/daemon`: I2Pd daemon implementation
-- `/Users/rene/Projekte/bitcoin/bin/ipfs`: IPFS daemon dispatcher
-- `/Users/rene/Projekte/bitcoin/libexec/ipfs/daemon`: IPFS daemon implementation
-- `/Users/rene/Projekte/bitcoin/libexec/stacks/daemon`: Stacks daemon script
+- `/Users/rene/Projekte/bitcoin/bin/tor-node`: Tor daemon dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/tor-node/daemon`: Tor daemon implementation
+- `/Users/rene/Projekte/bitcoin/bin/i2pd-node`: I2Pd daemon dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/i2pd-node/daemon`: I2Pd daemon implementation
+- `/Users/rene/Projekte/bitcoin/bin/ipfs-node`: IPFS daemon dispatcher
+- `/Users/rene/Projekte/bitcoin/libexec/ipfs-node/daemon`: IPFS daemon implementation
+- `/Users/rene/Projekte/bitcoin/libexec/stacks-node/daemon`: Stacks daemon script
 - `/Users/rene/Projekte/bitcoin/STACKS_PRUNING.md`: Pruning issue documentation
 
 ## Critical Context

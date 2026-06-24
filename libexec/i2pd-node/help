@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# i2pd help — usage information for i2pd(1).
+# i2pd-node help — usage information for i2pd-node(1).
 
 cat <<EOF
-i2pd(1) — manage an I2P daemon for anonymous networking
+i2pd-node(1) — manage an I2P daemon for anonymous networking
 
 USAGE
-    i2pd daemon <subcommand> [args]
+    i2pd-node daemon <subcommand> [args]
 
 SUBCOMMANDS
     lifecycle:
@@ -34,20 +34,20 @@ DESCRIPTION
 
 EXAMPLES
     # Install and enable I2Pd
-    i2pd daemon install
-    i2pd daemon enable
+    i2pd-node install
+    i2pd-node enable
 
     # Start the daemon
-    i2pd daemon start
+    i2pd-node start
 
     # Check status
-    i2pd daemon status
+    i2pd-node status
 
     # Access I2P web console
     open http://127.0.0.1:7070
 
     # Monitor the log
-    i2pd daemon monitor -f
+    i2pd-node monitor -f
 
 FILES
     /etc/i2pd/i2pd.conf      I2Pd configuration
@@ -56,7 +56,7 @@ FILES
     /var/lib/i2pd/i2pd.log   I2Pd log file (macOS)
 
 SEE ALSO
-    bitcoin(1), lightning(1), tor(1), ipfs(1)
+    bitcoin-node(1), lightning-node(1), tor-node(1), ipfs-node(1)
 
 FEAT-310 — Tier 2 privacy tools
 EOF

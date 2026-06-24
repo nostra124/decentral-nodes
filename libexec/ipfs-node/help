@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# ipfs help — usage information for ipfs(1).
+# ipfs-node help — usage information for ipfs-node(1).
 
 cat <<EOF
-ipfs(1) — manage an IPFS daemon for decentralized storage
+ipfs-node(1) — manage an IPFS daemon for decentralized storage
 
 USAGE
-    ipfs daemon <subcommand> [args]
+    ipfs-node daemon <subcommand> [args]
 
 SUBCOMMANDS
     lifecycle:
@@ -33,14 +33,14 @@ DESCRIPTION
 
 EXAMPLES
     # Install and enable IPFS
-    ipfs daemon install
-    ipfs daemon enable
+    ipfs-node install
+    ipfs-node enable
 
     # Start the daemon
-    ipfs daemon start
+    ipfs-node start
 
     # Check status and get peer ID
-    ipfs daemon status
+    ipfs-node status
 
     # Add a file to IPFS
     ipfs add myfile.txt
@@ -52,14 +52,14 @@ EXAMPLES
     open http://127.0.0.1:5001/webui
 
     # Monitor the log
-    ipfs daemon monitor -f
+    ipfs-node monitor -f
 
 FILES
     /var/lib/ipfs/         IPFS repository and data
     /var/log/ipfs/ipfs.log IPFS log file
 
 SEE ALSO
-    bitcoin(1), lightning(1), tor(1), i2pd(1)
+    bitcoin-node(1), lightning-node(1), tor-node(1), i2pd-node(1)
 
 FEAT-310 — Tier 2 privacy tools
 EOF

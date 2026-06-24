@@ -11,16 +11,16 @@ own dispatcher and libexec tree.
 
 | Command | Purpose |
 |---|---|
-| `bin/bitcoin` | BIP plugins (BIP 13/32/39/173/174/340/341/350/380, WIF), wallet surface, daemon abstraction |
-| `bin/lightning` | Core-Lightning (clightning) frontend: channels, invoices, payments, LNURL, the `.well-known/lightning/` HTTP API |
-| `bin/fulcrum` | Electrum/Fulcrum index server frontend |
-| `bin/liquid` | Liquid Network (Elements) frontend: peg-ins, peg-outs, assets |
-| `bin/monero` | Monero node frontend: wallet, daemon, transactions |
-| `bin/stacks` | Stacks node frontend: Bitcoin-aware smart contracts |
+| `bin/bitcoin-node` | BIP plugins (BIP 13/32/39/173/174/340/341/350/380, WIF), wallet surface, daemon abstraction |
+| `bin/lightning-node` | Core-Lightning (clightning) frontend: channels, invoices, payments, LNURL, the `.well-known/lightning/` HTTP API |
+| `bin/fulcrum-node` | Electrum/Fulcrum index server frontend |
+| `bin/liquid-node` | Liquid Network (Elements) frontend: peg-ins, peg-outs, assets |
+| `bin/monero-node` | Monero node frontend: wallet, daemon, transactions |
+| `bin/stacks-node` | Stacks node frontend: Bitcoin-aware smart contracts |
 
-**Tier 2** (Network Privacy): `tor`, `i2pd`, `ipfs`, `bittorrent` — planned
+**Tier 2** (Network Privacy): `tor-node`, `i2pd-node`, `ipfs-node` — implemented
 
-**Tier 3** (Advanced): `joinmarket`, `storj`, `hns` (Handshake), `yggdrasil` — planned
+**Tier 3** (Advanced): `joinmarket-node`, `storj-node`, `hns-node` (Handshake), `yggdrasil-node` — planned
 
 ## Install
 
@@ -47,8 +47,8 @@ Or in two steps:
 
 | Path | Purpose |
 |---|---|
-| `bin/bitcoin`, `bin/lightning` | entry points (one dispatcher per command) |
-| `libexec/bitcoin/`, `libexec/lightning/` | per-command sub-commands / plugins |
+| `bin/bitcoin-node`, `bin/lightning-node` | entry points (one dispatcher per command) |
+| `libexec/bitcoin-node/`, `libexec/lightning-node/` | per-command sub-commands / plugins |
 | `share/<cmd>/` | per-command runtime assets (wordlists, schema.sql, hooks, CGI) |
 | `share/doc/<cmd>/` | per-command docs + vendored standards (BIPs, BOLTs, LNURL) |
 | `share/man/man1/<cmd>-*.1` | man pages |
@@ -61,7 +61,7 @@ Or in two steps:
 
 ## Documentation
 
-- `man bitcoin`, `man lightning`
+- `man bitcoin-node`, `man lightning-node`
 - `docs/bitcoin-walkthrough.md`, `docs/lightning.md` — CLI references
 - `share/doc/lightning/walkthrough/README.md` — Lightning walkthrough
 - `share/doc/bitcoin/bips/` — vendored BIPs

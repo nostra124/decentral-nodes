@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 
 ############################################################################
-# ipfs — manage an IPFS daemon for decentralized storage.
+# i2pd-node — manage an I2P daemon for privacy and anonymous networking.
 #
-# Tier 2 (Network Privacy) tool. Provides a local IPFS node for
-# content-addressed storage and retrieval (opt-in).
+# Tier 2 (Network Privacy) tool. Provides a local I2P router for
+# applications to connect to I2P network (opt-in).
 #
 # Commands:
-#   daemon start   — start ipfs daemon (system-mode)
-#   daemon stop    — stop ipfs daemon
-#   daemon status  — check if ipfs is running
-#   daemon monitor — tail the ipfs log
-#   daemon install — install ipfs binary
+#   daemon start   — start i2pd daemon (system-mode)
+#   daemon stop    — stop i2pd daemon
+#   daemon status  — check if i2pd is running
+#   daemon monitor — tail the i2pd log
+#   daemon install — install i2pd binary
 #   daemon enable  — install + configure as system service
 #   daemon disable — stop and remove service
 #
 # Usage:
-#   ipfs daemon status
-#   ipfs daemon enable
-#   ipfs daemon start
+#   i2pd-node daemon status
+#   i2pd-node daemon enable
+#   i2pd-node daemon start
 #
-# Selective usage: Applications connect to IPFS API/Gateway as needed.
-# No forced usage of IPFS.
+# Selective routing: Applications connect to I2P tunnels as needed.
+# No forced routing through I2P.
 ############################################################################
 
 # This should always be the first line of code to facilitate debugging
@@ -86,7 +86,7 @@ while getopts "c:dqpt" flag; do
 done
 shift $((OPTIND - 1))
 
-# Command dispatch — every verb maps to libexec/ipfs/$verb.
+# Command dispatch — every verb maps to libexec/i2pd/$verb.
 if [ $# -eq 0 ]; then
 	"$SELF_LIBEXEC/$SELF/help" 2>&1 | head -20
 	die "Run '$SELF help' for usage."

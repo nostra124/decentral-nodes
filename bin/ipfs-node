@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 
 ############################################################################
-# tor — manage a Tor daemon for privacy and selective routing.
+# ipfs-node — manage an IPFS daemon for decentralized storage.
 #
-# Tier 2 (Network Privacy) tool. Provides a local Tor SOCKS5 proxy
-# for applications to route traffic through Tor on-demand (opt-in).
+# Tier 2 (Network Privacy) tool. Provides a local IPFS node for
+# content-addressed storage and retrieval (opt-in).
 #
 # Commands:
-#   daemon start   — start tor daemon (system-mode)
-#   daemon stop    — stop tor daemon
-#   daemon status  — check if tor is running
-#   daemon monitor — tail the tor log
-#   daemon install — install tor binary
+#   daemon start   — start ipfs daemon (system-mode)
+#   daemon stop    — stop ipfs daemon
+#   daemon status  — check if ipfs is running
+#   daemon monitor — tail the ipfs log
+#   daemon install — install ipfs binary
 #   daemon enable  — install + configure as system service
 #   daemon disable — stop and remove service
 #
 # Usage:
-#   tor daemon status
-#   tor daemon enable
-#   tor daemon start
+#   ipfs-node daemon status
+#   ipfs-node daemon enable
+#   ipfs-node daemon start
 #
-# Selective routing: Applications connect to 127.0.0.1:9050 (SOCKS5)
-# or 127.0.0.1:9051 (ControlPort) as needed. No forced routing.
+# Selective usage: Applications connect to IPFS API/Gateway as needed.
+# No forced usage of IPFS.
 ############################################################################
 
 # This should always be the first line of code to facilitate debugging
@@ -86,7 +86,7 @@ while getopts "c:dqpt" flag; do
 done
 shift $((OPTIND - 1))
 
-# Command dispatch — every verb maps to libexec/tor/$verb.
+# Command dispatch — every verb maps to libexec/ipfs/$verb.
 if [ $# -eq 0 ]; then
 	"$SELF_LIBEXEC/$SELF/help" 2>&1 | head -20
 	die "Run '$SELF help' for usage."

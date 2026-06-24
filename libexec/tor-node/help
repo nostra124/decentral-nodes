@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# tor help — usage information for tor(1).
+# tor-node help — usage information for tor-node(1).
 
 cat <<EOF
-tor(1) — manage a Tor daemon for privacy and selective routing
+tor-node(1) — manage a Tor daemon for privacy and selective routing
 
 USAGE
-    tor daemon <subcommand> [args]
+    tor-node daemon <subcommand> [args]
 
 SUBCOMMANDS
     lifecycle:
@@ -32,20 +32,20 @@ DESCRIPTION
 
 EXAMPLES
     # Install and enable Tor
-    tor daemon install
-    tor daemon enable
+    tor-node install
+    tor-node enable
 
     # Start the daemon
-    tor daemon start
+    tor-node start
 
     # Check status
-    tor daemon status
+    tor-node status
 
     # Route curl through Tor
     curl --socks5 127.0.0.1:9050 https://check.torproject.org/
 
     # Monitor the log
-    tor daemon monitor -f
+    tor-node monitor -f
 
 FILES
     /etc/tor/torrc          Tor configuration
@@ -54,7 +54,7 @@ FILES
     /var/lib/tor/log        Tor log file (macOS)
 
 SEE ALSO
-    bitcoin(1), lightning(1), i2pd(1), ipfs(1)
+    bitcoin-node(1), lightning-node(1), i2pd-node(1), ipfs-node(1)
 
 FEAT-310 — Tier 2 privacy tools
 EOF

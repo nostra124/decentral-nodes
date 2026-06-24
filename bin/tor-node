@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 
 ############################################################################
-# i2pd — manage an I2P daemon for privacy and anonymous networking.
+# tor-node — manage a Tor daemon for privacy and selective routing.
 #
-# Tier 2 (Network Privacy) tool. Provides a local I2P router for
-# applications to connect to I2P network (opt-in).
+# Tier 2 (Network Privacy) tool. Provides a local Tor SOCKS5 proxy
+# for applications to route traffic through Tor on-demand (opt-in).
 #
 # Commands:
-#   daemon start   — start i2pd daemon (system-mode)
-#   daemon stop    — stop i2pd daemon
-#   daemon status  — check if i2pd is running
-#   daemon monitor — tail the i2pd log
-#   daemon install — install i2pd binary
+#   daemon start   — start tor daemon (system-mode)
+#   daemon stop    — stop tor daemon
+#   daemon status  — check if tor is running
+#   daemon monitor — tail the tor log
+#   daemon install — install tor binary
 #   daemon enable  — install + configure as system service
 #   daemon disable — stop and remove service
 #
 # Usage:
-#   i2pd daemon status
-#   i2pd daemon enable
-#   i2pd daemon start
+#   tor-node daemon status
+#   tor-node daemon enable
+#   tor-node daemon start
 #
-# Selective routing: Applications connect to I2P tunnels as needed.
-# No forced routing through I2P.
+# Selective routing: Applications connect to 127.0.0.1:9050 (SOCKS5)
+# or 127.0.0.1:9051 (ControlPort) as needed. No forced routing.
 ############################################################################
 
 # This should always be the first line of code to facilitate debugging
@@ -86,7 +86,7 @@ while getopts "c:dqpt" flag; do
 done
 shift $((OPTIND - 1))
 
-# Command dispatch — every verb maps to libexec/i2pd/$verb.
+# Command dispatch — every verb maps to libexec/tor/$verb.
 if [ $# -eq 0 ]; then
 	"$SELF_LIBEXEC/$SELF/help" 2>&1 | head -20
 	die "Run '$SELF help' for usage."
