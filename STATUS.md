@@ -60,8 +60,16 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
 
 ### In Progress
 - Test Tor daemon enable/start on macOS
-- Test I2Pd daemon enable/start on macOS
 - Test IPFS daemon enable/start on macOS
+
+### Tested
+- **I2Pd daemon** (macOS): Working
+  - Service: running (PID 37049)
+  - SOCKS5: 127.0.0.1:4447
+  - HTTP proxy: 127.0.0.1:4444
+  - SAM bridge: 127.0.0.1:7656
+  - Config: /opt/local/etc/i2pd/i2pd.conf (MacPorts)
+  - Data: /opt/local/var/lib/i2pd
 
 ### Resolved
 - Stacks chainstate archive now available at archive.hiro.so (205GB .tar.zst format)
