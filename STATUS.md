@@ -59,17 +59,29 @@ Fix Stacks sync with pruned Bitcoin node, rename repository to `decentral-nodes`
   - IPFS daemon: `bin/ipfs-node`, `libexec/ipfs-node/daemon`, `libexec/ipfs-node/help`
 
 ### In Progress
-- Test Tor daemon enable/start on macOS
-- Test IPFS daemon enable/start on macOS
+- Test IPFS daemon enable/start on macOS (needs: `brew install ipfs`)
+- I2Pd waiting for reseed servers to recover
 
 ### Tested
-- **I2Pd daemon** (macOS): Working
+- **I2Pd daemon** (macOS): Running but blocked by reseed issues
   - Service: running (PID 37049)
-  - SOCKS5: 127.0.0.1:4447
-  - HTTP proxy: 127.0.0.1:4444
-  - SAM bridge: 127.0.0.1:7656
-  - Config: /opt/local/etc/i2pd/i2pd.conf (MacPorts)
-  - Data: /opt/local/var/lib/i2pd
+  - Issue: I2P reseed servers failing (SSL errors, HTTP 410)
+  - Status: Cannot bootstrap to I2P network
+  - Error: "Reseed: SU3 download failed"
+  - Known issue: Many I2P reseed servers offline/unreliable (June 2026)
+  
+- **Tor daemon** (macOS): Working
+  - Service: running
+  - SOCKS5: 127.0.0.1:9050
+  - Control: 127.0.0.1:9051
+  - Selective routing: opt-in via SOCKS5
+
+### Known Issues
+- **I2Pd reseed failures** (June 2026): I2P network bootstrap servers (reseed.i2p-projekt.de, netdb.i2p2.no) returning SSL errors and HTTP 410. Affects new I2P installations globally. Alternatives:
+  1. Wait for reseed servers to recover
+  2. Use alternative I2P router with better bootstrap (I2P Java)
+  3. Manually copy netDb from working I2P router
+  4. Use Tor instead for privacy (already working)
 
 ### Resolved
 - Stacks chainstate archive now available at archive.hiro.so (205GB .tar.zst format)
