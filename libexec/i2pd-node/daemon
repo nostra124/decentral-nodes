@@ -483,32 +483,67 @@ cmd_reseed_export() {
 		exit 1
 	fi
 	
-	local export_dir="/tmp/i2pd-reseed-export"
-	rm -rf "$export_dir"
-	mkdir -p "$export_dir"
+	# Find Apache document root
+	local www_root="${I2PD_WWW_ROOT:-}"
+	if [ -z "$www_root" ]; then
+		if is_macos; then
+			www_root="/Library/WebServer/Documents"
+		else
+			www_root="/var/www/html"
+		fi
+	fi
+	
+	local reseed_dir="$www_root/i2pd-reseed"
+	
+	info "using web root: $www_root"
+	
+	# Check if Apache is installed
+	if [ ! -d "$www_root" ]; then
+		error "Apache document root not found at $www_root"
+		error "install Apache first:"
+		if is_macos; then
+			error "  sudo apachectl start"
+		else
+			error "  sudo apt install apache2"
+		fi
+		exit 1
+	fi
+	
+	# Create reseed directory
+	sudo mkdir -p "$reseed_dir"
 	
 	# Copy routerInfo files (exclude our own)
-	local router_hash
-	router_hash=$(sudo cat "$datadir/router.info" 2>/dev/null | grep -o 'router_ident.*' | head -1 | sha256sum | cut -d' ' -f1 || echo "")
-	
+	local count=0
 	sudo find "$netdb_dir" -name "routerInfo-*.dat" -type f | head -50 | while read -r file; do
 		local basename=$(basename "$file")
-		sudo cp "$file" "$export_dir/$basename"
+		sudo cp "$file" "$reseed_dir/$basename"
+		count=$((count + 1))
 	done
 	
+	count=$(sudo ls -1 "$reseed_dir"/routerInfo-*.dat 2>/dev/null | wc -l)
+	
 	# Create reseed bundle
-	local bundle="$HOME/i2pd-reseed-$(date +%Y%m%d).tar.gz"
-	tar -czf "$bundle" -C "$export_dir" .
+	local bundle_file="$reseed_dir/reseed.tar.gz"
+	sudo tar -czf "$bundle_file" -C "$reseed_dir" routerInfo-*.dat 2>/dev/null || {
+		error "failed to create reseed bundle"
+		exit 1
+	}
 	
-	info "exported $(ls -1 "$export_dir" | wc -l) routerInfo files"
-	info "bundle created: $bundle"
+	sudo chown -R "${APACHE_USER:-www-data}:${APACHE_GROUP:-www-data}" "$reseed_dir" 2>/dev/null || \
+		sudo chown -R root:wheel "$reseed_dir" 2>/dev/null || true
+	
+	info "exported $count routerInfo files to $reseed_dir/"
+	info "bundle created: $bundle_file"
 	info ""
-	info "to use as reseed server:"
-	info "  1. Upload $bundle to your public web server"
-	info "  2. Extract and serve via HTTPS"
-	info "  3. Bootstrap with: i2pd-node reseed-bootstrap https://your-server.com/routerInfo/"
-	
-	rm -rf "$export_dir"
+	info "Apache configuration:"
+	info "  DocumentRoot is already: $www_root"
+	info "  Reseed URL: http://$(hostname)/i2pd-reseed/"
+	info ""
+	info "For HTTPS, configure Apache with SSL certificate"
+	info "  Reseed URL: https://$(hostname)/i2pd-reseed/"
+	info ""
+	info "To bootstrap another i2pd installation:"
+	info "  i2pd-node daemon reseed-bootstrap http://$(hostname)/i2pd-reseed/"
 }
 
 cmd_reseed_server() {
@@ -521,37 +556,69 @@ cmd_reseed_server() {
 	sudo sed -i.bak 's/^floodfill = false/floodfill = true/' "$config_file" 2>/dev/null || \
 		sudo bash -c 'echo "floodfill = true" >> "$config_file"'
 	
-	# Create web server directory for routerInfos
-	sudo mkdir -p /var/www/i2pd-reseed
-	sudo chown _i2pd:_i2pd /var/www/i2pd-reseed
+	# Find Apache document root
+	local www_root="${I2PD_WWW_ROOT:-}"
+	if [ -z "$www_root" ]; then
+		if is_macos; then
+			www_root="/Library/WebServer/Documents"
+		else
+			www_root="/var/www/html"
+		fi
+	fi
 	
-	# Export routerInfos periodically
+	local reseed_dir="$www_root/i2pd-reseed"
+	
+	# Create reseed directory
+	sudo mkdir -p "$reseed_dir"
+	
+	# Create cron script for daily updates
 	sudo tee /etc/i2pd/reseed-cron.sh > /dev/null <<'EOF'
 #!/bin/bash
 DATADIR="/opt/local/var/lib/i2pd"
-WEBDIR="/var/www/i2pd-reseed"
-mkdir -p "$WEBDIR"
-find "$DATADIR/netDb" -name "routerInfo-*.dat" -mtime -7 -exec cp {} "$WEBDIR/" \;
-cd "$WEBDIR"
+WWW_ROOT="${I2PD_WWW_ROOT:-/Library/WebServer/Documents}"
+RESEED_DIR="$WWW_ROOT/i2pd-reseed"
+
+mkdir -p "$RESEED_DIR"
+
+# Copy recent routerInfo files (last 7 days)
+find "$DATADIR/netDb" -name "routerInfo-*.dat" -mtime -7 -exec cp {} "$RESEED_DIR/" \;
+
+# Create bundle
+cd "$RESEED_DIR"
 tar -czf reseed.tar.gz routerInfo-*.dat
+
+# Set permissions
+chown -R ${APACHE_USER:-www-data}:${APACHE_GROUP:-www-data} "$RESEED_DIR" 2>/dev/null || \
+	chown -R root:wheel "$RESEED_DIR" 2>/dev/null || true
 EOF
 	sudo chmod +x /etc/i2pd/reseed-cron.sh
 	
+	# Add to cron if not already
+	if ! sudo crontab -l 2>/dev/null | grep -q "reseed-cron.sh"; then
+		sudo (crontab -l 2>/dev/null; echo "0 2 * * * /etc/i2pd/reseed-cron.sh") | sudo crontab -
+		info "added daily cron job to update reseed files"
+	fi
+	
 	info "configured i2pd as floodfill (reseed server)"
-	info "routerInfos will be available at: /var/www/i2pd-reseed/"
+	info "routerInfos will be served from: $reseed_dir/"
 	info ""
-	info "to serve via HTTPS, configure your web server:"
-	info "  nginx/apache: point to /var/www/i2pd-reseed/"
-	info "  add to cron for daily updates: 0 2 * * * /etc/i2pd/reseed-cron.sh"
+	info "Apache is already configured with DocumentRoot: $www_root"
+	info "Reseed will be available at: http://$(hostname)/i2pd-reseed/"
+	info ""
+	info "to enable HTTPS, configure Apache SSL certificate"
 	info ""
 	info "restart i2pd to activate floodfill mode:"
-	info "  i2pd-node restart"
+	info "  bin/i2pd-node restart"
 }
 
 cmd_reseed_bootstrap() {
 	if [ -z "$1" ]; then
-		error "usage: i2pd-node reseed-bootstrap <url>"
-		error "  url: base URL to routerInfo files (e.g., https://your-server.com/routerInfo/)"
+		error "usage: i2pd-node daemon reseed-bootstrap <url>"
+		error "  url: base URL to routerInfo files"
+		error "  example: http://yourserver.com/i2pd-reseed/"
+		error ""
+		error "to export from a working i2pd installation:"
+		error "  i2pd-node daemon reseed-export"
 		exit 1
 	fi
 	
@@ -574,24 +641,39 @@ cmd_reseed_bootstrap() {
 	
 	info "downloading routerInfo files..."
 	
-	# Try to download a bundle first
-	if curl -fsSL "$base_url/reseed.tar.gz" -o "$tmpdir/reseed.tar.gz" 2>/dev/null; then
+	# Try bundle first
+	if curl -fsSL --max-time 30 "$base_url/reseed.tar.gz" -o "$tmpdir/reseed.tar.gz" 2>/dev/null; then
 		info "found reseed bundle, extracting..."
-		tar -xzf "$tmpdir/reseed.tar.gz" -C "$tmpdir"
+		tar -xzf "$tmpdir/reseed.tar.gz" -C "$tmpdir" 2>/dev/null || {
+			error "failed to extract reseed bundle"
+			rm -rf "$tmpdir"
+			exit 1
+		}
 	else
-		# Try individual routerInfo files
+		# Try individual files
 		info "downloading individual routerInfo files..."
-		for i in $(seq 1 50); do
+		for i in $(seq 1 100); do
 			local padded=$(printf "%05d" $i)
-			curl -fsSL "$base_url/routerInfo-$padded.dat" -o "$tmpdir/routerInfo-$padded.dat" 2>/dev/null || true
+			if curl -fsSL --max-time 5 "$base_url/routerInfo-$padded.dat" -o "$tmpdir/routerInfo-$padded.dat" 2>/dev/null; then
+				: # success
+			else
+				break
+			fi
 		done
 	fi
 	
-	local count=$(ls -1 "$tmpdir"/routerInfo-*.dat 2>/dev/null | wc -l)
+	local count=$(ls -1 "$tmpdir"/routerInfo-*.dat 2>/dev/null | wc -l | tr -d ' ')
 	
 	if [ "$count" -eq 0 ]; then
 		error "failed to download any routerInfo files from $base_url"
-		error "make sure the URL points to a directory with routerInfo-*.dat files"
+		error ""
+		error "make sure the URL points to a directory with:"
+		error "  - routerInfo-*.dat files, OR"
+		error "  - reseed.tar.gz bundle"
+		error ""
+		error "example URLs:"
+		error "  http://yourserver.com/i2pd-reseed/"
+		error "  https://friend-server.com/routerInfos/"
 		rm -rf "$tmpdir"
 		exit 1
 	fi
@@ -602,14 +684,14 @@ cmd_reseed_bootstrap() {
 	
 	info "imported $count routerInfo files"
 	
-	# Update config to use local reseed
+	# Update config
 	sudo sed -i.bak '/^\[reseed\]/,/^\[/d' /opt/local/etc/i2pd/i2pd.conf 2>/dev/null || true
-	sudo bash -c 'cat >> /opt/local/etc/i2pd/i2pd.conf << EOF
+	sudo bash -c "cat >> /opt/local/etc/i2pd/i2pd.conf << EOF
 
 [reseed]
 verify = false
-urls = '"$base_url"'/reseed.tar.gz
-EOF'
+urls = $base_url/reseed.tar.gz
+EOF"
 	
 	rm -rf "$tmpdir"
 	
@@ -619,6 +701,10 @@ EOF'
 	# Start i2pd
 	sleep 2
 	cmd_start
+	
+	info ""
+	info "monitor connection with: bin/i2pd-node monitor"
+	info "bootstrap may take 5-10 minutes to build tunnels"
 }
 
 # Dispatch

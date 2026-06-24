@@ -44,24 +44,40 @@ DESCRIPTION
 
 SELF-HOSTED RESEED WORKFLOW
     Public reseed servers are often unreliable. Bootstrap from your
-    own server instead:
+    own Apache web server instead:
 
-    1. On a server with working I2P connectivity:
+    1. Ensure Apache is running:
+       
+       # macOS (built-in)
+       sudo apachectl start
+       
+       # Linux
+       sudo apt install apache2
+       sudo systemctl start apache2
+    
+    2. On a server with working I2P connectivity:
        
        i2pd-node daemon reseed-export
-       # Creates: ~/i2pd-reseed-YYYYMMDD.tar.gz
+       # Exports to: /Library/WebServer/Documents/i2pd-reseed/ (macOS)
+       #          or: /var/www/html/i2pd-reseed/ (Linux)
        
-       # Upload to your public web server
-       scp ~/i2pd-reseed-*.tar.gz yourserver:/var/www/html/i2p/
+       # The files are now in Apache's document root
+       # No upload needed - already served!
     
-    2. On this machine, bootstrap from your server:
+    3. Bootstrap this machine from your server:
        
-       i2pd-node daemon reseed-bootstrap https://yourserver.com/i2p/
+       i2pd-node daemon reseed-bootstrap http://yourserver.com/i2pd-reseed/
     
-    3. Once connected, become a reseed server yourself:
+    4. Optional: Become a reseed server yourself:
        
        i2pd-node daemon reseed-server
-       # Serves routerInfos via /var/www/i2pd-reseed/
+       # Configures floodfill mode + daily cron job
+       # Serves from Apache's document root
+
+    Environment variables:
+        I2PD_WWW_ROOT    Override Apache document root
+        APACHE_USER      Apache user (default: www-data/wheel)
+        APACHE_GROUP     Apache group (default: www-data/wheel)
 
 EXAMPLES
     # Install and enable I2Pd
@@ -86,8 +102,8 @@ EXAMPLES
 FILES
     /opt/local/etc/i2pd/i2pd.conf      I2Pd configuration (macOS)
     /opt/local/var/lib/i2pd/           I2Pd data directory (macOS)
-    /var/www/i2pd-reseed/              Reseed server directory
-    ~/i2pd-reseed-*.tar.gz              Exported reseed bundle
+    /Library/WebServer/Documents/i2pd-reseed/  Reseed files (macOS Apache)
+    /var/www/html/i2pd-reseed/          Reseed files (Linux Apache)
 
 SEE ALSO
     bitcoin-node(1), lightning-node(1), tor-node(1), ipfs-node(1)
