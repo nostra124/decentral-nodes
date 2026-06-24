@@ -157,10 +157,25 @@ cmd_status() {
 }
 
 cmd_monitor() {
-	local logfile="/var/log/i2pd/i2pd.log"
-	[ -f "$logfile" ] || logfile="/var/lib/i2pd/i2pd.log"
-	[ -f "$logfile" ] || { error "no log file found"; exit 2; }
-	exec tail "${@:--f}" "$logfile"
+	# MacPorts path first (macOS)
+	local logfile="/opt/local/var/lib/i2pd/i2pd.log"
+	if sudo test -f "$logfile" 2>/dev/null; then
+		exec sudo tail "${@:--f}" "$logfile"
+	fi
+	
+	# Standard Linux paths
+	logfile="/var/log/i2pd/i2pd.log"
+	if [ -f "$logfile" ]; then
+		exec tail "${@:--f}" "$logfile"
+	fi
+	
+	logfile="/var/lib/i2pd/i2pd.log"
+	if [ -f "$logfile" ]; then
+		exec tail "${@:--f}" "$logfile"
+	fi
+	
+	error "no log file found"
+	exit 2
 }
 
 cmd_install() {
