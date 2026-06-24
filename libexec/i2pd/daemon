@@ -212,6 +212,9 @@ cmd_enable() {
 			sudo dscl . -create /Users/_i2pd PrimaryGroupID 316
 			sudo dscl . -create /Users/_i2pd NFSHomeDirectory /var/lib/i2pd
 			sudo dscl . -create /Users/_i2pd RealName "I2P Daemon"
+		else
+			# Update home directory for existing user
+			sudo dscl . -create /Users/_i2pd NFSHomeDirectory /var/lib/i2pd
 		fi
 		
 		# Ensure directories
@@ -266,12 +269,6 @@ enabled = true
 address = 127.0.0.1
 port = 7654
 
-# Web console
-[webconsole]
-enabled = true
-address = 127.0.0.1
-port = 7070
-
 # Reduce resource usage
 [limits]
 transit = 128
@@ -283,7 +280,7 @@ EOF
 		# Find i2pd binary
 		local i2pd_bin; i2pd_bin=$(command -v i2pd 2>/dev/null || echo "/usr/local/bin/i2pd")
 		
-		# Write launchd plist
+		# Write launchd plist (use MacPorts default config)
 		sudo tee /Library/LaunchDaemons/net.i2p.i2pd.plist > /dev/null <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -294,20 +291,28 @@ EOF
     <key>ProgramArguments</key>
     <array>
         <string>${i2pd_bin}</string>
-        <string>--conf=/etc/i2pd/i2pd.conf</string>
+        <string>--conf=/opt/local/etc/i2pd/i2pd.conf</string>
+        <string>--datadir=/opt/local/var/lib/i2pd</string>
     </array>
     <key>UserName</key>
     <string>_i2pd</string>
     <key>GroupName</key>
     <string>_i2pd</string>
+    <key>WorkingDirectory</key>
+    <string>/opt/local/var/lib/i2pd</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/opt/local/var/lib/i2pd</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/var/lib/i2pd/i2pd.log</string>
+    <string>/opt/local/var/lib/i2pd/i2pd.log</string>
     <key>StandardErrorPath</key>
-    <string>/var/lib/i2pd/i2pd.log</string>
+    <string>/opt/local/var/lib/i2pd/i2pd.log</string>
 </dict>
 </plist>
 EOF
