@@ -2,7 +2,7 @@
 id: FEAT-269
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `lightning daemon` is network-aware: regtest/testnet/signet run in parallel to mainnet

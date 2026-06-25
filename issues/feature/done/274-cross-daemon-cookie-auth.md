@@ -2,7 +2,7 @@
 id: FEAT-274
 type: feature
 priority: high
-status: open
+status: done
 ---
 
 # Cross-daemon RPC auth: bitcoind cookie is group-readable for sibling daemons

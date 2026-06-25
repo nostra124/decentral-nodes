@@ -2,7 +2,7 @@
 id: FEAT-268
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `bitcoin daemon` is network-aware: regtest/testnet/signet run in parallel to mainnet

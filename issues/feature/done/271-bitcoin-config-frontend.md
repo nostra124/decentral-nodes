@@ -2,7 +2,7 @@
 id: FEAT-271
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `bitcoin config` — view/edit the effective bitcoind configuration

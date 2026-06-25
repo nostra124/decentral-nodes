@@ -2,7 +2,7 @@
 id: FEAT-266
 type: feature
 priority: low
-status: open
+status: done
 ---
 
 # `bitcoin price get` (no date) returns the current spot price

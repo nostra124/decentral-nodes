@@ -2,7 +2,7 @@
 id: FEAT-298
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `config list` as TSV with defaults + `/etc` config across all three daemons

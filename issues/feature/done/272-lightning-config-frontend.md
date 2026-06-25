@@ -2,7 +2,7 @@
 id: FEAT-272
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `lightning config` — view/edit the effective lightningd configuration

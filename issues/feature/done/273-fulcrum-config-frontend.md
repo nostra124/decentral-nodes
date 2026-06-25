@@ -2,7 +2,7 @@
 id: FEAT-273
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # `fulcrum config` — list/get/set/unset/path over fulcrum.conf
