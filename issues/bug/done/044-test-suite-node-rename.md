@@ -2,7 +2,7 @@
 id: BUG-044
 type: bug
 priority: high
-status: open
+status: done
 ---
 
 # Unit tests still invoke the pre-`-node` binary names (CI red)

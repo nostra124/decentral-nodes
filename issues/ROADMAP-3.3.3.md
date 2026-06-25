@@ -11,16 +11,13 @@ until this lands, so it ships first as a patch.
 
 ---
 
-## BUG-044 — unit tests still invoke the pre-`-node` binary names
-**File:** `issues/bug/044-test-suite-node-rename.md`
-**Effort:** ~moderate (mechanical path updates across tests/unit/*.bats,
-plus a handful of `$SELF`-dependent assertion fixes)
-The `bats + pytest unit tests` workflow is red on `master` and every PR:
-the dispatchers were renamed to the `-node` suffix but the unit tests
-still reference the removed `bin/<cmd>` paths (exit 127). Add a guard
-that every `bin/<cmd>` path a test references resolves to an executable,
-then update the suites to the `-node` names and the
-`libexec/<cmd>-node/` layout.
+## BUG-044 — unit tests still invoke the pre-`-node` binary names ✅ DONE
+**File:** `issues/bug/done/044-test-suite-node-rename.md`
+**Landed:** test guard `tests/unit/dispatcher-paths.bats` + the full
+`-node` repoint across tests and the cross-verb source calls the rename
+missed (bip32/wif self-calls, bip341/bip174 + lightning sibling paths,
+`_rebalance`). Full unit suite green locally (bitcoin 235, lightning 887,
++ pytest 116) and CI green on this PR.
 
 ## BUG-043 — SIT apache CGI account-API / LNURL / walkthrough suites
 **File:** `issues/bug/043-sit-cgi-account-api-suites.md`
