@@ -3,13 +3,16 @@ Makefile
 
 # Make build tree
 build/
-.claude/
 
 # Python bytecode for the FEAT-196 CGI scripts
 __pycache__/
 *.pyc
 
 # Claude Code local runtime + per-user state (locks, local overrides).
-# A shared .claude/settings.json may be committed explicitly if wanted.
+# The shared SessionStart hook + settings are committed explicitly; the
+# rest of .claude/ (per-user state) stays ignored.
 .claude/*
 !.claude/settings.json
+!.claude/hooks
+.claude/hooks/*
+!.claude/hooks/session-start.sh

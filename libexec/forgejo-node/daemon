@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+
+############################################################################
+# forgejo daemon — system-default Forgejo Git forge service.
+#
+# Tier 3 (Self-hosting) tool. Installs and operates the Forgejo server
+# (https://forgejo.org/) following the upstream binary-install layout:
+#   binary  /usr/local/bin/forgejo
+#   account git (system user, /home/git)
+#   config  /etc/forgejo/app.ini
+#   Data    /var/lib/forgejo
+#   logs    /var/lib/forgejo/log
+#
+# System-mode only (boot-persistent service under a dedicated account),
+# matching the daemon posture in CLAUDE.md §1. The web UI binds
+# 127.0.0.1:3000 by default; put a reverse proxy in front for TLS.
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# Pinned default; override with FORGEJO_VERSION=x.y.z.
+FORGEJO_VERSION="${FORGEJO_VERSION:-11.0.1}"
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: forgejo-node daemon <subcommand> [args]
+
+   Lifecycle of the Forgejo Git forge server.
+
+   lifecycle:
+     start                       bring up forgejo web (via systemd/launchd)
+     stop                        graceful shutdown
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the forgejo log
+
+   setup:
+     install                     download the forgejo server binary
+     enable                      install unit + create account/dirs (system)
+     disable                     stop service and remove unit
+
+   The web UI binds 127.0.0.1:3000 by default. Complete first-run setup
+   in the browser, then create the admin user. See forgejo-node-daemon(1).
+EOF
+	exit 1
+}
+
+forgejo_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active forgejo.service 2>/dev/null
+	elif command -v launchctl >/dev/null 2>&1; then
+		sudo launchctl list org.forgejo.forgejo 2>/dev/null | grep -q "PID"
+	else
+		pgrep -f "forgejo web" >/dev/null 2>&1
+	fi
+}
+
+cmd_start() {
+	if forgejo_running; then
+		info "forgejo already running"
+		return 0
+	fi
+	if is_macos; then
+		sudo launchctl load -w /Library/LaunchDaemons/org.forgejo.forgejo.plist
+	else
+		sudo systemctl start forgejo.service
+	fi
+	info "forgejo started — web UI on http://127.0.0.1:3000"
+}
+
+cmd_stop() {
+	if ! forgejo_running; then
+		info "forgejo not running"
+		return 0
+	fi
+	if is_macos; then
+		sudo launchctl unload /Library/LaunchDaemons/org.forgejo.forgejo.plist
+	else
+		sudo systemctl stop forgejo.service
+	fi
+	info "forgejo stopped"
+}
+
+cmd_restart() {
+	cmd_stop "$@" || true
+	sleep 2
+	cmd_start "$@"
+}
+
+cmd_status() {
+	if forgejo_running; then
+		echo "running"
+		command -v forgejo >/dev/null 2>&1 && forgejo --version 2>/dev/null | head -1 || true
+	else
+		echo "down"
+	fi
+}
+
+cmd_monitor() {
+	local logfile="/var/lib/forgejo/log/forgejo.log"
+	[ -f "$logfile" ] || logfile="/var/log/forgejo/forgejo.log"
+	[ -f "$logfile" ] || { error "no log file found (looked in /var/lib/forgejo/log and /var/log/forgejo)"; exit 2; }
+	exec tail "${@:--f}" "$logfile"
+}
+
+cmd_install() {
+	info "installing Forgejo server ${FORGEJO_VERSION}..."
+
+	local arch; arch=$(uname -m)
+	case "$arch" in
+		x86_64|amd64) arch=amd64 ;;
+		aarch64|arm64) arch=arm64 ;;
+		*) error "unsupported architecture: $arch"; exit 1 ;;
+	esac
+	local os; os=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+	# Forgejo publishes one static binary per OS/arch on Codeberg.
+	local url="https://codeberg.org/forgejo/forgejo/releases/download/v${FORGEJO_VERSION}/forgejo-${FORGEJO_VERSION}-${os}-${arch}"
+	info "downloading $url"
+
+	local tmpdir; tmpdir=$(mktemp -d)
+	if command -v curl >/dev/null 2>&1; then
+		curl -fSL "$url" -o "$tmpdir/forgejo" || { error "download failed"; rm -rf "$tmpdir"; exit 1; }
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q "$url" -O "$tmpdir/forgejo" || { error "download failed"; rm -rf "$tmpdir"; exit 1; }
+	else
+		error "curl or wget required"; rm -rf "$tmpdir"; exit 1
+	fi
+
+	sudo install -m 0755 "$tmpdir/forgejo" /usr/local/bin/forgejo
+	rm -rf "$tmpdir"
+
+	command -v git >/dev/null 2>&1 || warn "git not found — Forgejo needs git (and git-lfs) at runtime"
+	info "forgejo installed: $(/usr/local/bin/forgejo --version 2>&1 | head -1 || echo 'version unknown')"
+	info "next: forgejo-node daemon enable"
+}
+
+cmd_enable() {
+	command -v forgejo >/dev/null 2>&1 || [ -x /usr/local/bin/forgejo ] || {
+		warn "forgejo binary not found — run 'forgejo-node daemon install' first"
+	}
+	info "enabling forgejo system service..."
+
+	local bin; bin=$(command -v forgejo 2>/dev/null || echo /usr/local/bin/forgejo)
+
+	if is_macos; then
+		# Service account (_forgejo) + dirs.
+		if ! id _forgejo >/dev/null 2>&1; then
+			info "creating _forgejo service account"
+			local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+			local uid=$((max_uid + 1))
+			sudo dscl . -create /Groups/_forgejo
+			sudo dscl . -create /Users/_forgejo
+			sudo dscl . -create /Users/_forgejo UserShell /usr/bin/false
+			sudo dscl . -create /Users/_forgejo UniqueID "$uid"
+			sudo dscl . -create /Users/_forgejo PrimaryGroupID 20
+			sudo dscl . -create /Users/_forgejo NFSHomeDirectory /var/lib/forgejo
+			sudo dscl . -create /Users/_forgejo RealName "Forgejo"
+		fi
+		sudo mkdir -p /var/lib/forgejo/custom /var/lib/forgejo/data /var/lib/forgejo/log /etc/forgejo
+		sudo chown -R _forgejo:staff /var/lib/forgejo
+		sudo chmod 750 /var/lib/forgejo
+		sudo chown root:_forgejo /etc/forgejo && sudo chmod 770 /etc/forgejo
+
+		sudo tee /Library/LaunchDaemons/org.forgejo.forgejo.plist > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.forgejo.forgejo</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${bin}</string>
+        <string>web</string>
+        <string>--config</string>
+        <string>/etc/forgejo/app.ini</string>
+    </array>
+    <key>UserName</key>
+    <string>_forgejo</string>
+    <key>WorkingDirectory</key>
+    <string>/var/lib/forgejo</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/var/lib/forgejo</string>
+        <key>GITEA_WORK_DIR</key>
+        <string>/var/lib/forgejo</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/lib/forgejo/log/forgejo.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/lib/forgejo/log/forgejo.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote /Library/LaunchDaemons/org.forgejo.forgejo.plist"
+	else
+		# Linux: the official Forgejo layout uses a system 'git' account.
+		if ! id git >/dev/null 2>&1; then
+			info "creating git service account"
+			sudo useradd --system --shell /bin/bash --comment 'Git Version Control' \
+				--create-home --home-dir /home/git git
+		fi
+		sudo mkdir -p /var/lib/forgejo/custom /var/lib/forgejo/data /var/lib/forgejo/log /etc/forgejo
+		sudo chown -R git:git /var/lib/forgejo
+		sudo chmod 750 /var/lib/forgejo
+		sudo chown root:git /etc/forgejo && sudo chmod 770 /etc/forgejo
+
+		sudo tee /etc/systemd/system/forgejo.service > /dev/null <<EOF
+[Unit]
+Description=Forgejo (Git with a cup of tea)
+Documentation=https://forgejo.org/docs/
+After=network.target
+
+[Service]
+Type=simple
+User=git
+Group=git
+WorkingDirectory=/var/lib/forgejo
+ExecStart=${bin} web --config /etc/forgejo/app.ini
+Restart=always
+RestartSec=2s
+Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/var/lib/forgejo
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		sudo systemctl daemon-reload
+		sudo systemctl enable forgejo.service
+		info "wrote /etc/systemd/system/forgejo.service"
+	fi
+
+	info ""
+	info "next:"
+	info "    forgejo-node daemon start"
+	info "    open http://127.0.0.1:3000 and finish first-run setup"
+	info "    (config is written to /etc/forgejo/app.ini)"
+	info ""
+	info "then wire up CI runners:"
+	info "    forgejo-node runner platforms"
+	info "    forgejo-node runner register --instance http://127.0.0.1:3000 --token <tok> --platform docker"
+}
+
+cmd_disable() {
+	info "disabling forgejo service..."
+	cmd_stop "$@" 2>/dev/null || true
+	if is_macos; then
+		if [ -f /Library/LaunchDaemons/org.forgejo.forgejo.plist ]; then
+			sudo launchctl unload /Library/LaunchDaemons/org.forgejo.forgejo.plist 2>/dev/null || true
+			sudo rm /Library/LaunchDaemons/org.forgejo.forgejo.plist
+			info "removed /Library/LaunchDaemons/org.forgejo.forgejo.plist"
+		fi
+	else
+		if [ -f /etc/systemd/system/forgejo.service ]; then
+			sudo systemctl disable forgejo.service 2>/dev/null || true
+			sudo rm /etc/systemd/system/forgejo.service
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/forgejo.service"
+		fi
+	fi
+	info "forgejo service disabled"
+	info "Data directory preserved: /var/lib/forgejo"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	help|-h|--help) usage ;;
+	*)        usage; exit 1 ;;
+esac

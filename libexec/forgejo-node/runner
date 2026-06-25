@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+
+############################################################################
+# forgejo runner — install and operate Forgejo Actions runners.
+#
+# Tier 3 (Self-hosting) tool. This is the headline of forgejo-node: it
+# wires up CI runners for SPECIFIC PLATFORMS. A Forgejo runner advertises
+# its capabilities to the instance through *labels*; each label binds a
+# friendly name to an execution backend:
+#
+#   docker  ->  docker://node:20-bookworm   jobs run in throwaway OCI
+#                                            containers (needs docker/podman)
+#   lxc     ->  lxc://debian:bookworm        jobs run in LXC system
+#                                            containers (needs lxc; Linux)
+#   host    ->  host                         jobs run directly on the host
+#                                            (no isolation — trusted repos)
+#   macos   ->  host                         jobs run on a macOS host
+#                                            (host backend; launchd service)
+#   windows ->  host                         jobs run on a Windows host
+#                                            (host backend; via WSL or a
+#                                            self-wrapped daemon)
+#
+# 'forgejo-node runner platforms' prints the presets; 'register' applies
+# one (or a custom --labels list) and 'enable' installs the daemon unit.
+#
+# Runner binary: /usr/local/bin/forgejo-runner
+# Account:       _forgejo-runner (macOS) / forgejo-runner (Linux)
+# Work dir:      /var/lib/forgejo-runner   (holds .runner + config.yaml)
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# Pinned default; override with FORGEJO_RUNNER_VERSION=x.y.z.
+FORGEJO_RUNNER_VERSION="${FORGEJO_RUNNER_VERSION:-6.3.1}"
+RUNNER_WORKDIR="${FORGEJO_RUNNER_WORKDIR:-/var/lib/forgejo-runner}"
+RUNNER_CONFIG="${FORGEJO_RUNNER_CONFIG:-/etc/forgejo-runner/config.yaml}"
+
+# --- platform presets --------------------------------------------------------
+# Map a platform keyword to the label string the runner registers with.
+# Override the image/distro with FORGEJO_RUNNER_IMAGE / FORGEJO_RUNNER_LXC.
+platform_labels() {
+	local platform="$1"
+	local image="${FORGEJO_RUNNER_IMAGE:-node:20-bookworm}"
+	local lxc="${FORGEJO_RUNNER_LXC:-debian:bookworm}"
+	case "$platform" in
+		docker)
+			echo "docker:docker://${image},ubuntu-latest:docker://${image},ubuntu-22.04:docker://${image}"
+			;;
+		lxc)
+			echo "lxc:lxc://${lxc},self-hosted:lxc://${lxc}"
+			;;
+		host)
+			echo "host:host,self-hosted:host"
+			;;
+		macos)
+			# Jobs run natively on the macOS host (the 'host' backend).
+			echo "macos:host,macos-latest:host,self-hosted:host"
+			;;
+		windows)
+			# Jobs run natively on the Windows host (the 'host' backend).
+			echo "windows:host,windows-latest:host,self-hosted:host"
+			;;
+		*)
+			return 1
+			;;
+	esac
+}
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: forgejo-node runner <subcommand> [args]
+
+   Install and operate Forgejo Actions runners, by platform.
+
+   setup:
+     install                     download the forgejo-runner binary
+     platforms                   list platform label presets
+     register [opts]             register a runner against an instance
+     generate-config             write a default config.yaml
+     enable                      install the runner system service
+     disable                     stop service and remove unit
+
+   lifecycle:
+     start | stop | restart      drive the runner daemon
+     status                      health check
+     monitor                     tail the runner log
+
+   register options:
+     --instance URL              Forgejo instance base URL (required)
+     --token TOKEN               registration token from the instance
+                                 (Site/Repo/Org -> Actions -> Runners)
+     --platform NAME             apply a label preset (default: docker);
+                                 one of: docker lxc host macos windows
+     --labels a:b://c,...        explicit label list (overrides --platform)
+     --name NAME                 runner name (default: hostname)
+
+   examples:
+     forgejo-node runner install
+     forgejo-node runner platforms
+     forgejo-node runner register --instance http://127.0.0.1:3000 \\
+         --token XXXX --platform docker
+     forgejo-node runner enable && forgejo-node runner start
+
+   See forgejo-node-runner(1).
+EOF
+	exit 1
+}
+
+cmd_platforms() {
+	cat <<EOF
+Forgejo runner platform presets (use with: runner register --platform <name>)
+
+  docker   jobs run in throwaway OCI containers
+           labels: $(platform_labels docker)
+           needs:  docker or podman on the runner host
+
+  lxc      jobs run in LXC system containers
+           labels: $(platform_labels lxc)
+           needs:  lxc + the runner's lxc backend
+
+  host     jobs run directly on the host (no isolation)
+           labels: $(platform_labels host)
+           needs:  nothing extra; only for trusted repositories
+
+  macos    jobs run natively on a macOS host (host backend)
+           labels: $(platform_labels macos)
+           needs:  forgejo-runner running on the Mac; 'runner enable'
+                   installs a launchd service. Use 'docker' instead if
+                   Docker Desktop is present and you want isolation.
+
+  windows  jobs run natively on a Windows host (host backend)
+           labels: $(platform_labels windows)
+           needs:  forgejo-runner.exe on the Windows machine. This bash
+                   node can 'register' the runner and emit the labels,
+                   but installing a *native* Windows service is out of
+                   scope (no systemd/launchd) — run it under WSL (treated
+                   as Linux) or wrap 'forgejo-runner daemon' yourself
+                   (e.g. nssm / a scheduled task).
+
+Backends by OS:
+  - docker  : Linux, macOS, Windows (needs a Docker/Podman daemon)
+  - lxc     : Linux only
+  - host    : any OS the forgejo-runner binary runs on (Linux/macOS/Windows)
+
+Override images:
+  FORGEJO_RUNNER_IMAGE=node:20-bookworm   (docker preset base image)
+  FORGEJO_RUNNER_LXC=debian:bookworm      (lxc preset distro)
+Or pass an explicit --labels list to 'register'.
+EOF
+}
+
+runner_bin() {
+	command -v forgejo-runner 2>/dev/null || echo /usr/local/bin/forgejo-runner
+}
+
+cmd_install() {
+	info "installing forgejo-runner ${FORGEJO_RUNNER_VERSION}..."
+
+	local arch; arch=$(uname -m)
+	case "$arch" in
+		x86_64|amd64) arch=amd64 ;;
+		aarch64|arm64) arch=arm64 ;;
+		*) error "unsupported architecture: $arch"; exit 1 ;;
+	esac
+	local os; os=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+	local url="https://code.forgejo.org/forgejo/runner/releases/download/v${FORGEJO_RUNNER_VERSION}/forgejo-runner-${FORGEJO_RUNNER_VERSION}-${os}-${arch}"
+	info "downloading $url"
+
+	local tmpdir; tmpdir=$(mktemp -d)
+	if command -v curl >/dev/null 2>&1; then
+		curl -fSL "$url" -o "$tmpdir/forgejo-runner" || { error "download failed"; rm -rf "$tmpdir"; exit 1; }
+	elif command -v wget >/dev/null 2>&1; then
+		wget -q "$url" -O "$tmpdir/forgejo-runner" || { error "download failed"; rm -rf "$tmpdir"; exit 1; }
+	else
+		error "curl or wget required"; rm -rf "$tmpdir"; exit 1
+	fi
+
+	sudo install -m 0755 "$tmpdir/forgejo-runner" /usr/local/bin/forgejo-runner
+	rm -rf "$tmpdir"
+	info "forgejo-runner installed: $($(runner_bin) --version 2>&1 | head -1 || echo 'version unknown')"
+	info "next: forgejo-node runner register --instance <url> --token <tok> --platform docker"
+}
+
+cmd_register() {
+	local instance="" token="" platform="docker" labels="" name=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--instance) instance="$2"; shift 2 ;;
+			--token)    token="$2"; shift 2 ;;
+			--platform) platform="$2"; shift 2 ;;
+			--labels)   labels="$2"; shift 2 ;;
+			--name)     name="$2"; shift 2 ;;
+			-h|--help)  usage ;;
+			*) error "unknown register option: $1"; usage ;;
+		esac
+	done
+
+	[ -n "$instance" ] || { error "--instance is required (the Forgejo base URL)"; exit 2; }
+	[ -n "$token" ]    || { error "--token is required (get one from Actions -> Runners on the instance)"; exit 2; }
+	[ -n "$name" ]     || name="$(hostname -s 2>/dev/null || hostname)"
+
+	if [ -z "$labels" ]; then
+		labels="$(platform_labels "$platform")" || {
+			error "unknown platform '$platform' — try: docker, lxc, host (see 'runner platforms')"; exit 2
+		}
+	fi
+
+	local bin; bin="$(runner_bin)"
+	[ -x "$bin" ] || { error "forgejo-runner not installed — run 'forgejo-node runner install' first"; exit 1; }
+
+	info "registering runner '$name' against $instance"
+	info "platform=$platform labels=$labels"
+
+	sudo mkdir -p "$RUNNER_WORKDIR"
+	# Register non-interactively; the .runner credential lands in the workdir.
+	( cd "$RUNNER_WORKDIR" && sudo "$bin" register \
+		--no-interactive \
+		--instance "$instance" \
+		--token "$token" \
+		--name "$name" \
+		--labels "$labels" ) || { error "registration failed"; exit 1; }
+
+	info "runner registered — credentials in $RUNNER_WORKDIR/.runner"
+	info "next: forgejo-node runner enable && forgejo-node runner start"
+}
+
+cmd_generate_config() {
+	local bin; bin="$(runner_bin)"
+	sudo mkdir -p "$(dirname "$RUNNER_CONFIG")"
+	if [ -x "$bin" ]; then
+		"$bin" generate-config | sudo tee "$RUNNER_CONFIG" >/dev/null
+	else
+		# Minimal fallback config if the binary isn't present yet.
+		sudo tee "$RUNNER_CONFIG" >/dev/null <<'EOF'
+log:
+  level: info
+runner:
+  capacity: 1
+  timeout: 3h
+  fetch_timeout: 5s
+cache:
+  enabled: true
+container:
+  network: ""
+  privileged: false
+  options:
+host:
+  workdir_parent:
+EOF
+	fi
+	info "wrote $RUNNER_CONFIG"
+}
+
+cmd_enable() {
+	info "enabling forgejo-runner system service..."
+	local bin; bin="$(runner_bin)"
+
+	[ -f "$RUNNER_CONFIG" ] || cmd_generate_config
+
+	if is_macos; then
+		if ! id _forgejo-runner >/dev/null 2>&1; then
+			info "creating _forgejo-runner service account"
+			local max_uid; max_uid=$(dscl . -list /Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+			local uid=$((max_uid + 1))
+			sudo dscl . -create /Groups/_forgejo-runner
+			sudo dscl . -create /Users/_forgejo-runner
+			sudo dscl . -create /Users/_forgejo-runner UserShell /usr/bin/false
+			sudo dscl . -create /Users/_forgejo-runner UniqueID "$uid"
+			sudo dscl . -create /Users/_forgejo-runner PrimaryGroupID 20
+			sudo dscl . -create /Users/_forgejo-runner NFSHomeDirectory "$RUNNER_WORKDIR"
+		fi
+		sudo mkdir -p "$RUNNER_WORKDIR"
+		sudo chown -R _forgejo-runner:staff "$RUNNER_WORKDIR"
+
+		sudo tee /Library/LaunchDaemons/org.forgejo.runner.plist > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.forgejo.runner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${bin}</string>
+        <string>daemon</string>
+        <string>--config</string>
+        <string>${RUNNER_CONFIG}</string>
+    </array>
+    <key>UserName</key>
+    <string>_forgejo-runner</string>
+    <key>WorkingDirectory</key>
+    <string>${RUNNER_WORKDIR}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/forgejo-runner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/forgejo-runner.log</string>
+</dict>
+</plist>
+EOF
+		info "wrote /Library/LaunchDaemons/org.forgejo.runner.plist"
+	else
+		if ! id forgejo-runner >/dev/null 2>&1; then
+			info "creating forgejo-runner service account"
+			sudo useradd --system --shell /usr/sbin/nologin --home-dir "$RUNNER_WORKDIR" forgejo-runner
+		fi
+		# For the docker preset the runner needs access to the docker socket.
+		if getent group docker >/dev/null 2>&1; then
+			sudo usermod -aG docker forgejo-runner 2>/dev/null || true
+		fi
+		sudo mkdir -p "$RUNNER_WORKDIR"
+		sudo chown -R forgejo-runner:forgejo-runner "$RUNNER_WORKDIR"
+
+		sudo tee /etc/systemd/system/forgejo-runner.service > /dev/null <<EOF
+[Unit]
+Description=Forgejo Actions runner
+Documentation=https://forgejo.org/docs/latest/admin/actions/
+After=network.target
+
+[Service]
+Type=simple
+User=forgejo-runner
+Group=forgejo-runner
+WorkingDirectory=${RUNNER_WORKDIR}
+ExecStart=${bin} daemon --config ${RUNNER_CONFIG}
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		sudo systemctl daemon-reload
+		sudo systemctl enable forgejo-runner.service
+		info "wrote /etc/systemd/system/forgejo-runner.service"
+	fi
+	info "next: forgejo-node runner start"
+}
+
+runner_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active forgejo-runner.service 2>/dev/null
+	elif command -v launchctl >/dev/null 2>&1; then
+		sudo launchctl list org.forgejo.runner 2>/dev/null | grep -q "PID"
+	else
+		pgrep -f "forgejo-runner daemon" >/dev/null 2>&1
+	fi
+}
+
+cmd_start() {
+	if runner_running; then info "forgejo-runner already running"; return 0; fi
+	if is_macos; then
+		sudo launchctl load -w /Library/LaunchDaemons/org.forgejo.runner.plist
+	else
+		sudo systemctl start forgejo-runner.service
+	fi
+	info "forgejo-runner started"
+}
+
+cmd_stop() {
+	if ! runner_running; then info "forgejo-runner not running"; return 0; fi
+	if is_macos; then
+		sudo launchctl unload /Library/LaunchDaemons/org.forgejo.runner.plist
+	else
+		sudo systemctl stop forgejo-runner.service
+	fi
+	info "forgejo-runner stopped"
+}
+
+cmd_restart() { cmd_stop "$@" || true; sleep 2; cmd_start "$@"; }
+
+cmd_status() {
+	if runner_running; then echo "running"; else echo "down"; fi
+}
+
+cmd_monitor() {
+	if command -v journalctl >/dev/null 2>&1; then
+		exec sudo journalctl -u forgejo-runner.service "${@:--f}"
+	fi
+	local logfile="/var/log/forgejo-runner.log"
+	[ -f "$logfile" ] || { error "no log file found"; exit 2; }
+	exec tail "${@:--f}" "$logfile"
+}
+
+cmd_disable() {
+	info "disabling forgejo-runner service..."
+	cmd_stop "$@" 2>/dev/null || true
+	if is_macos; then
+		if [ -f /Library/LaunchDaemons/org.forgejo.runner.plist ]; then
+			sudo launchctl unload /Library/LaunchDaemons/org.forgejo.runner.plist 2>/dev/null || true
+			sudo rm /Library/LaunchDaemons/org.forgejo.runner.plist
+			info "removed /Library/LaunchDaemons/org.forgejo.runner.plist"
+		fi
+	else
+		if [ -f /etc/systemd/system/forgejo-runner.service ]; then
+			sudo systemctl disable forgejo-runner.service 2>/dev/null || true
+			sudo rm /etc/systemd/system/forgejo-runner.service
+			sudo systemctl daemon-reload
+			info "removed /etc/systemd/system/forgejo-runner.service"
+		fi
+	fi
+	info "forgejo-runner service disabled"
+	info "Work directory preserved: $RUNNER_WORKDIR"
+}
+
+# Dispatch
+case "${1:-help}" in
+	install)         shift; cmd_install "$@" ;;
+	platforms)       shift; cmd_platforms "$@" ;;
+	register)        shift; cmd_register "$@" ;;
+	generate-config) shift; cmd_generate_config "$@" ;;
+	enable)          shift; cmd_enable "$@" ;;
+	disable)         shift; cmd_disable "$@" ;;
+	start)           shift; cmd_start "$@" ;;
+	stop)            shift; cmd_stop "$@" ;;
+	restart)         shift; cmd_restart "$@" ;;
+	status)          shift; cmd_status "$@" ;;
+	monitor)         shift; cmd_monitor "$@" ;;
+	help|-h|--help)  usage ;;
+	*)               usage; exit 1 ;;
+esac

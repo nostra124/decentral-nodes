@@ -1,0 +1,160 @@
+.TH FORGEJO-NODE-RUNNER 1 "2026" "decentral-nodes" "User Commands"
+.SH NAME
+forgejo-node-runner \- install and operate Forgejo Actions runners by platform
+.SH SYNOPSIS
+.B forgejo-node runner
+.I subcommand
+.RI [ args ]
+.SH DESCRIPTION
+Install, register, and operate
+.B Forgejo Actions
+runners. A runner advertises its capabilities to the Forgejo instance
+through
+.IR labels ;
+each label binds a friendly name to an execution backend. This command's
+job is to make wiring up runners for
+.I specific platforms
+straightforward via presets.
+.SH PLATFORMS
+.TP
+.B docker
+Jobs run in throwaway OCI containers. Labels:
+.IR "docker:docker://node:20-bookworm" ", " "ubuntu-latest:docker://..." .
+Requires docker or podman on the runner host.
+.TP
+.B lxc
+Jobs run in LXC system containers. Labels:
+.IR "lxc:lxc://debian:bookworm" ", " "self-hosted:lxc://..." .
+Requires lxc and the runner's lxc backend.
+.TP
+.B host
+Jobs run directly on the host with no isolation. Labels:
+.IR "host:host" ", " "self-hosted:host" .
+Use only for trusted repositories.
+.TP
+.B macos
+Jobs run natively on a macOS host (the host backend). Labels:
+.IR "macos:host" ", " "macos-latest:host" .
+.B enable
+installs a launchd service. Use the
+.B docker
+preset instead if Docker Desktop is present and you want isolation.
+.TP
+.B windows
+Jobs run natively on a Windows host (the host backend). Labels:
+.IR "windows:host" ", " "windows-latest:host" .
+This node can
+.B register
+the runner and emit the labels, but installing a native Windows service
+is out of scope (no systemd/launchd): run it under WSL (treated as Linux)
+or wrap
+.I forgejo-runner daemon
+yourself (e.g. nssm or a scheduled task).
+.PP
+Backend availability by OS:
+.B docker
+on Linux/macOS/Windows (needs a Docker or Podman daemon),
+.B lxc
+on Linux only,
+.B host
+on any OS the runner binary runs on.
+.PP
+Override the preset images with
+.B FORGEJO_RUNNER_IMAGE
+(docker base image) and
+.B FORGEJO_RUNNER_LXC
+(lxc distro), or pass an explicit
+.B \-\-labels
+list.
+.SH SUBCOMMANDS
+.TP
+.B install
+Download the
+.I forgejo-runner
+binary to
+.I /usr/local/bin/forgejo-runner
+from the official release. Set
+.B FORGEJO_RUNNER_VERSION
+to pin a version.
+.TP
+.B platforms
+Print the platform label presets and what each requires.
+.TP
+.BI "register " "[options]"
+Register a runner against an instance. Options:
+.RS
+.TP
+.BI \-\-instance " URL"
+Forgejo instance base URL (required).
+.TP
+.BI \-\-token " TOKEN"
+Registration token from the instance (Site/Repo/Org \(-> Actions \(->
+Runners) (required).
+.TP
+.BI \-\-platform " NAME"
+Apply a label preset (default:
+.BR docker );
+one of
+.BR docker ", " lxc ", " host ", " macos ", " windows .
+.TP
+.BI \-\-labels " a:b://c,..."
+Explicit label list (overrides
+.BR \-\-platform ).
+.TP
+.BI \-\-name " NAME"
+Runner name (default: hostname).
+.RE
+.TP
+.B generate-config
+Write a default runner
+.I config.yaml
+to
+.IR /etc/forgejo-runner/config.yaml .
+.TP
+.B enable
+Provision the
+.B forgejo-runner
+account and work directory, install the service unit, and register it to
+start at boot. For the docker preset, the account is added to the
+.B docker
+group when present.
+.TP
+.B disable
+Stop the service and remove its unit. The work directory is preserved.
+.TP
+.BR start / stop / restart
+Drive the installed runner daemon.
+.TP
+.B status
+Report whether the runner is running.
+.TP
+.B monitor
+Tail the runner log (via journald when available).
+.SH FILES
+.TP
+.I /usr/local/bin/forgejo-runner
+The runner binary.
+.TP
+.I /etc/forgejo-runner/config.yaml
+Runner configuration.
+.TP
+.I /var/lib/forgejo-runner
+Work directory (holds the
+.I .runner
+credential).
+.SH ENVIRONMENT
+.TP
+.B FORGEJO_RUNNER_VERSION
+Version to download in
+.BR install .
+.TP
+.BR FORGEJO_RUNNER_IMAGE ", " FORGEJO_RUNNER_LXC
+Override the docker/lxc preset images.
+.SH SEE ALSO
+.BR forgejo-node (1),
+.BR forgejo-node-daemon (1)
+.br
+https://forgejo.org/docs/latest/admin/actions/
+.SH HISTORY
+Introduced alongside
+.BR forgejo-node (1).

@@ -41,7 +41,9 @@ REL_MANDIR     = $(patsubst $(PREFIX)/%,%,$(MANDIR))
 
 # The commands this one package ships. Each has bin/<cmd>, libexec/<cmd>/,
 # share/<cmd>/, share/doc/<cmd>/. monero (FEAT-299) is the fourth.
-PACKAGES = bitcoin lightning fulcrum monero
+# forgejo-node (self-hosted Git forge + CI runners) uses the -node name
+# to match its bin/ and libexec/ directories.
+PACKAGES = bitcoin lightning fulcrum monero forgejo-node
 
 BUILD_DIR = build/$(PACKAGE)
 

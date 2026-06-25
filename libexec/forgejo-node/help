@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+
+cat <<'EOF'
+forgejo-node — install and operate a Forgejo Git forge + CI runners
+
+COMMANDS
+  version            Print the package version
+  daemon install     Download the forgejo server binary
+  daemon enable      Install + configure as a system service
+  daemon start       Start the forgejo web service
+  daemon stop        Stop the forgejo web service
+  daemon status      Check whether forgejo is running
+  daemon monitor     Tail the forgejo log
+  daemon disable     Stop service and remove unit
+
+  runner install     Download the forgejo-runner binary
+  runner platforms   List platform label presets (docker/lxc/host)
+  runner register    Register a runner against an instance, by platform
+  runner enable      Install + configure the runner as a system service
+  runner start       Start the runner daemon
+  runner status      Check whether the runner is running
+  runner disable     Stop service and remove unit
+
+USAGE
+  forgejo-node daemon enable
+  forgejo-node daemon start
+  forgejo-node runner platforms
+  forgejo-node runner register --instance http://127.0.0.1:3000 \
+      --token <tok> --platform docker
+
+FORGEJO PROVIDES
+  - Self-hosted Git forge (a community fork of Gitea)
+  - Issues, pull requests, packages, releases
+  - Forgejo Actions: CI/CD with GitHub-Actions-compatible workflows
+
+PLATFORMS (runner)
+  docker   jobs run in throwaway OCI containers (needs docker/podman)
+  lxc      jobs run in LXC system containers (needs lxc; Linux only)
+  host     jobs run directly on the host (no isolation; trusted repos)
+  macos    jobs run natively on a macOS host (host backend; launchd)
+  windows  jobs run natively on a Windows host (host backend; run via
+           WSL or wrap 'forgejo-runner daemon' — native service is
+           out of scope for this bash node)
+
+SERVICES
+  Web UI:  http://127.0.0.1:3000
+
+FILES
+  Binary:  /usr/local/bin/forgejo, /usr/local/bin/forgejo-runner
+  Config:  /etc/forgejo/app.ini, /etc/forgejo-runner/config.yaml
+  Data:    /var/lib/forgejo, /var/lib/forgejo-runner
+
+SETUP
+  1. Install server:   forgejo-node daemon install
+  2. Enable + start:   forgejo-node daemon enable && forgejo-node daemon start
+  3. Finish setup:     open http://127.0.0.1:3000, create the admin user
+  4. Install runner:   forgejo-node runner install
+  5. Pick a platform:  forgejo-node runner platforms
+  6. Register:         forgejo-node runner register --instance <url> \
+                           --token <tok> --platform docker
+  7. Enable + start:   forgejo-node runner enable && forgejo-node runner start
+
+SEE ALSO
+  forgejo-node-daemon(1), forgejo-node-runner(1)
+  https://forgejo.org/
+EOF

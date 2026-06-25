@@ -20,7 +20,7 @@ own dispatcher and libexec tree.
 
 **Tier 2** (Network Privacy): `tor-node`, `ipfs-node` — implemented; `m2pd-node` (external: github.com/nostra124/m2pd)
 
-**Tier 3** (Advanced): `joinmarket-node`, `storj-node` — implemented; `hns-node` (Handshake), `yggdrasil-node` — planned
+**Tier 3** (Advanced): `joinmarket-node`, `storj-node`, `forgejo-node` (self-hosted Git forge + CI runners) — implemented; `hns-node` (Handshake), `yggdrasil-node` — planned
 
 ## Install
 
