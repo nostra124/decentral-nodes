@@ -11,9 +11,14 @@
 #   docker  ->  docker://node:20-bookworm   jobs run in throwaway OCI
 #                                            containers (needs docker/podman)
 #   lxc     ->  lxc://debian:bookworm        jobs run in LXC system
-#                                            containers (needs lxc)
+#                                            containers (needs lxc; Linux)
 #   host    ->  host                         jobs run directly on the host
 #                                            (no isolation — trusted repos)
+#   macos   ->  host                         jobs run on a macOS host
+#                                            (host backend; launchd service)
+#   windows ->  host                         jobs run on a Windows host
+#                                            (host backend; via WSL or a
+#                                            self-wrapped daemon)
 #
 # 'forgejo-node runner platforms' prints the presets; 'register' applies
 # one (or a custom --labels list) and 'enable' installs the daemon unit.
@@ -58,6 +63,14 @@ platform_labels() {
 		host)
 			echo "host:host,self-hosted:host"
 			;;
+		macos)
+			# Jobs run natively on the macOS host (the 'host' backend).
+			echo "macos:host,macos-latest:host,self-hosted:host"
+			;;
+		windows)
+			# Jobs run natively on the Windows host (the 'host' backend).
+			echo "windows:host,windows-latest:host,self-hosted:host"
+			;;
 		*)
 			return 1
 			;;
@@ -89,7 +102,8 @@ usage: forgejo-node runner <subcommand> [args]
      --instance URL              Forgejo instance base URL (required)
      --token TOKEN               registration token from the instance
                                  (Site/Repo/Org -> Actions -> Runners)
-     --platform docker|lxc|host  apply a label preset (default: docker)
+     --platform NAME             apply a label preset (default: docker);
+                                 one of: docker lxc host macos windows
      --labels a:b://c,...        explicit label list (overrides --platform)
      --name NAME                 runner name (default: hostname)
 
@@ -120,6 +134,26 @@ Forgejo runner platform presets (use with: runner register --platform <name>)
   host     jobs run directly on the host (no isolation)
            labels: $(platform_labels host)
            needs:  nothing extra; only for trusted repositories
+
+  macos    jobs run natively on a macOS host (host backend)
+           labels: $(platform_labels macos)
+           needs:  forgejo-runner running on the Mac; 'runner enable'
+                   installs a launchd service. Use 'docker' instead if
+                   Docker Desktop is present and you want isolation.
+
+  windows  jobs run natively on a Windows host (host backend)
+           labels: $(platform_labels windows)
+           needs:  forgejo-runner.exe on the Windows machine. This bash
+                   node can 'register' the runner and emit the labels,
+                   but installing a *native* Windows service is out of
+                   scope (no systemd/launchd) — run it under WSL (treated
+                   as Linux) or wrap 'forgejo-runner daemon' yourself
+                   (e.g. nssm / a scheduled task).
+
+Backends by OS:
+  - docker  : Linux, macOS, Windows (needs a Docker/Podman daemon)
+  - lxc     : Linux only
+  - host    : any OS the forgejo-runner binary runs on (Linux/macOS/Windows)
 
 Override images:
   FORGEJO_RUNNER_IMAGE=node:20-bookworm   (docker preset base image)

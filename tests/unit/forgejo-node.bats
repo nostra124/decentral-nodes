@@ -76,6 +76,31 @@ setup() {
 	[[ "$output" == *"docker://alpine:3.20"* ]]
 }
 
+@test "runner platforms lists macos and windows (host-backend) presets" {
+	run "$FORGEJO" runner platforms
+	[ "$status" -eq 0 ]
+	[[ "$output" == *macos* ]]
+	[[ "$output" == *windows* ]]
+	[[ "$output" == *"macos:host"* ]]
+	[[ "$output" == *"windows:host"* ]]
+}
+
+@test "runner register accepts the macos platform preset" {
+	# Missing binary aborts after preset resolution — proving 'macos' is
+	# a known platform (an unknown one would be rejected earlier).
+	run "$FORGEJO" runner register --instance http://127.0.0.1:3000 \
+		--token T --platform macos
+	[ "$status" -ne 0 ]
+	[[ "$output" != *"unknown platform"* ]]
+}
+
+@test "runner register accepts the windows platform preset" {
+	run "$FORGEJO" runner register --instance http://127.0.0.1:3000 \
+		--token T --platform windows
+	[ "$status" -ne 0 ]
+	[[ "$output" != *"unknown platform"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # runner register: argument validation (no network, no side effects)
 # ---------------------------------------------------------------------------

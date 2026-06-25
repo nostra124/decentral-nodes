@@ -35,8 +35,12 @@ FORGEJO PROVIDES
 
 PLATFORMS (runner)
   docker   jobs run in throwaway OCI containers (needs docker/podman)
-  lxc      jobs run in LXC system containers (needs lxc)
+  lxc      jobs run in LXC system containers (needs lxc; Linux only)
   host     jobs run directly on the host (no isolation; trusted repos)
+  macos    jobs run natively on a macOS host (host backend; launchd)
+  windows  jobs run natively on a Windows host (host backend; run via
+           WSL or wrap 'forgejo-runner daemon' — native service is
+           out of scope for this bash node)
 
 SERVICES
   Web UI:  http://127.0.0.1:3000
