@@ -29,6 +29,22 @@ setup() {
 	fi
 }
 
+@test "BUG-044: no tests/unit suite sources a pre-rename libexec/<cmd>/ verb" {
+	# Catches sibling/source refs like $SELF_LIBEXEC/bitcoin/bip174, including
+	# the bash-quoting variant ($SELF_LIBEXEC"'/bitcoin/bip174). Data dirs
+	# ($XDG_*/bitcoin/wallets, $LIGHTNING_DIR/bitcoin/config) are not libexec
+	# and are matched by the LIBEXEC-prefixed anchor only.
+	local hits
+	hits="$(grep -rnE '(SELF_LIBEXEC|libexec)["'\''[:space:]]*/(bitcoin|lightning|monero|fulcrum|liquid|stacks)/' \
+		--include='*.bats' "$BATS_TEST_DIRNAME" \
+		| grep -vE '\-node/' | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+	if [ -n "$hits" ]; then
+		echo "stale pre-rename libexec verb refs still present:" >&2
+		echo "$hits" >&2
+		return 1
+	fi
+}
+
 @test "BUG-044: each -node dispatcher exists and 'version' prints VERSION" {
 	local v; v="$(cat "$REPO/VERSION")"
 	for cmd in bitcoin-node lightning-node fulcrum-node monero-node; do

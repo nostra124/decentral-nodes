@@ -94,7 +94,7 @@ teardown() { rm -rf "$HOME"; }
 	export SELF_LIBEXEC
 	export SELF_DEBUG=""
 	sighash="$(bash -c '
-		source "'"$SELF_LIBEXEC"'/bitcoin/bip174"
+		source "'"$SELF_LIBEXEC"'/bitcoin-node/bip174"
 		psbt:_bip341_sighash "'"$tx_hex"'" 0 \
 			"a086010000000000" \
 			"225120'"${OUTPUT_X,,}"'" \
