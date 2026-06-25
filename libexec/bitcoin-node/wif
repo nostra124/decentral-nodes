@@ -151,11 +151,11 @@ command:encode() {
 		if [ -n "$COMMAND_PUB" ]; then
 			printf "\x01"
 		fi
-	} | bitcoin bip13 base58-encode
+	} | bitcoin-node bip13 base58-encode
 }
 
 command:decode() {
-	bitcoin bip13 base58-decode | tail -c +2 | head -c 32 | if test -t 1; then
+	bitcoin-node bip13 base58-decode | tail -c +2 | head -c 32 | if test -t 1; then
 	{
 		# see https://stackoverflow.com/questions/48101258/how-to-convert-an-ecdsa-key-to-pem-format
 		basenc --base16 -d <<< "302E0201010420"

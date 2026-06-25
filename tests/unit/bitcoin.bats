@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# Unit tests for bin/bitcoin — the BIP-173/350 + bip32/39/49/84
+# Unit tests for bin/bitcoin-node — the BIP-173/350 + bip32/39/49/84
 # wallet frontend (FEAT-006..019). Pinned to semver per FEAT-005.
 #
 # Coverage scope: the dispatcher surface (version / help / modules)
@@ -20,7 +20,7 @@ setup() {
 	unset XDG_SOURCE_HOME XDG_BACKUP_HOME XDG_RUNTIME_DIR
 	export HOME
 	export SELF_QUIET=1
-	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	# FEAT-020: pin SELF_LIBEXEC so a system-installed bitcoin
 	# at /usr/local/libexec cannot pollute the in-tree test run.
 	export SELF_LIBEXEC="$BATS_TEST_DIRNAME/../../libexec"
@@ -120,10 +120,10 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# modules — directory listing under $SELF_LIBEXEC/bitcoin/
+# modules — directory listing under $SELF_LIBEXEC/bitcoin-node/
 # ---------------------------------------------------------------------------
 
-@test "modules lists the modules shipped under libexec/bitcoin/" {
+@test "modules lists the modules shipped under libexec/bitcoin-node/" {
 	run "$BITCOIN_BIN" modules
 	[ "$status" -eq 0 ]
 	# FEAT-021: assert all four shipped modules, not just the
@@ -239,13 +239,13 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# FEAT-006: bin/bitcoin is sourceable as a function library so the
+# FEAT-006: bin/bitcoin-node is sourceable as a function library so the
 # vector .t files can `. bitcoin.sh` without re-running the dispatcher.
 # When sourced, the file defines all its functions and returns 0
 # without producing output.
 # ---------------------------------------------------------------------------
 
-@test "bin/bitcoin is sourceable without side effects" {
+@test "bin/bitcoin-node is sourceable without side effects" {
 	run bash -c "source '$BITCOIN_BIN'; echo SOURCED_OK"
 	[ "$status" -eq 0 ]
 	[[ "$output" == *"SOURCED_OK"* ]]
@@ -253,7 +253,7 @@ teardown() {
 	[[ "$output" != *"module related commands"* ]]
 }
 
-@test "sourcing bin/bitcoin defines the BIP function library" {
+@test "sourcing bin/bitcoin-node defines the BIP function library" {
 	run bash -c "source '$BITCOIN_BIN'; \
 		for f in bitcoinAddress segwitAddress segwit_decode segwit_verify convertbits bip49 bip84 bip85 p2pkh-address p2wpkh; do \
 			declare -F \"\$f\" >/dev/null || { echo missing: \$f; exit 1; }; \
@@ -364,7 +364,7 @@ STUB
 	chmod +x "$stub_dir/secret"
 	# bin/ on PATH because libexec plugins shell out to the parent
 	# `bitcoin` dispatcher (e.g. `bip32 create` does
-	# `... | bitcoin bip13 base58-encode`).
+	# `... | bitcoin-node bip13 base58-encode`).
 	PATH="$BATS_TEST_DIRNAME/../../bin:$stub_dir:$PATH"
 	export PATH
 	export XDG_DATA_HOME="$BATS_TMPDIR/xdg-data"
@@ -649,7 +649,7 @@ mempool_fees_fixture() {
 
 # ---------------------------------------------------------------------------
 # FEAT-025 follow-up — the seed-derivation primitive, originally
-# at libexec/bitcoin/mnemonic-to-seed (FEAT-025 vendoring), then
+# at libexec/bitcoin-node/mnemonic-to-seed (FEAT-025 vendoring), then
 # folded into bip39 as a subcommand (FEAT-035 Stream A, 1.23.0),
 # and now reached exclusively through the canonical
 # 'bitcoin bip39 mnemonic-to-seed' verb after the FEAT-035 alias
@@ -679,7 +679,7 @@ mempool_fees_fixture() {
 
 @test "BUG-013 — bip32 derive resolves end-to-end from a seed (non-hardened path)" {
 	repo_root="$BATS_TEST_DIRNAME/../../"
-	PATH="$repo_root/bin:$repo_root/libexec/bitcoin:$PATH" \
+	PATH="$repo_root/bin:$repo_root/libexec/bitcoin-node:$PATH" \
 	XDG_SHARE_HOME="$repo_root/share" \
 	SELF_LIBEXEC="$repo_root/libexec" \
 	run bash -c '
@@ -687,7 +687,7 @@ mempool_fees_fixture() {
 		                 abandon abandon abandon abandon about \
 		  | basenc --base16 -w0 \
 		  | bip32 create -s 2>/dev/null \
-		  | bitcoin bip13 base58-decode \
+		  | bitcoin-node bip13 base58-decode \
 		  | bip32 derive m/0
 	'
 	[ "$status" -eq 0 ]
@@ -1316,10 +1316,10 @@ build_alice_psbt() {
 	der_sig="${psig%01}"
 	# Compute the same sighash the signer used and verify with openssl.
 	# FEAT-035 Stream D: psbt:_bip143_sighash moved from bin/bitcoin
-	# into the libexec/bitcoin/bip174 plugin (PR #36); source the
+	# into the libexec/bitcoin-node/bip174 plugin (PR #36); source the
 	# plugin to reach the private helper. bip174 is source-safe (it
 	# checks BASH_SOURCE before running its dispatcher).
-	sighash="$(BITCOIN_BIP174="$BATS_TEST_DIRNAME/../../libexec/bitcoin/bip174" bash -c '
+	sighash="$(BITCOIN_BIP174="$BATS_TEST_DIRNAME/../../libexec/bitcoin-node/bip174" bash -c '
 		source "$BITCOIN_BIP174"
 		psbt:_bip143_sighash "'"$tx_hex"'" 0 \
 			"1976a914c0cebcd6c3d3ca8c75dc5ec62ebe55330ef910e288ac" \
@@ -2518,7 +2518,7 @@ STR
 
 @test "BUG-014 — bip32 derive m/.../N (neutering) resolves" {
 	repo_root="$BATS_TEST_DIRNAME/../../"
-	PATH="$repo_root/bin:$repo_root/libexec/bitcoin:$PATH" \
+	PATH="$repo_root/bin:$repo_root/libexec/bitcoin-node:$PATH" \
 	XDG_SHARE_HOME="$repo_root/share" \
 	SELF_LIBEXEC="$repo_root/libexec" \
 	run bash -c '
@@ -2526,7 +2526,7 @@ STR
 		                 abandon abandon abandon abandon about \
 		  | basenc --base16 -w0 \
 		  | bip32 create -s 2>/dev/null \
-		  | bitcoin bip13 base58-decode \
+		  | bitcoin-node bip13 base58-decode \
 		  | bip32 derive m/84h/0h/0h/0/0/N
 	'
 	[ "$status" -eq 0 ]
@@ -2535,15 +2535,15 @@ STR
 }
 
 # ---------------------------------------------------------------------------
-# FEAT-195 (1.30.0) — runtime dependency boundary: bin/bitcoin must call
+# FEAT-195 (1.30.0) — runtime dependency boundary: bin/bitcoin-node must call
 # only account / config / secret / crypt at runtime (plus BIP plugin
 # primitives). Forbidden sibling scripts are cache, check, data, hosts,
 # repo, scripts, task, user (as invoked commands, not variable names or
 # comment text). This test guards against re-introduction.
 # ---------------------------------------------------------------------------
 
-@test "FEAT-195 — bin/bitcoin has no invocations of forbidden sibling scripts" {
-	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+@test "FEAT-195 — bin/bitcoin-node has no invocations of forbidden sibling scripts" {
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	# Pattern: forbidden word at the start of a statement (leading whitespace
 	# allowed) but NOT as a variable name (preceded by $), not in a comment
 	# (line starts with optional-space then #), and not as a git config key
@@ -2555,21 +2555,21 @@ STR
 		# statement. Exclude lines where it appears only inside a string or
 		# variable name.
 		if grep -qE "^\s*${word}\s" "$script" 2>/dev/null; then
-			echo "VIOLATION: '$word' appears as a command invocation in bin/bitcoin" >&2
+			echo "VIOLATION: '$word' appears as a command invocation in bin/bitcoin-node" >&2
 			grep -nE "^\s*${word}\s" "$script" >&2
 			return 1
 		fi
 		# Also catch subshell forms: $(<word> ...) or `<word> `
 		if grep -qE "\$\(\s*${word}\s|\`\s*${word}\s" "$script" 2>/dev/null; then
-			echo "VIOLATION: '$word' used in command substitution in bin/bitcoin" >&2
+			echo "VIOLATION: '$word' used in command substitution in bin/bitcoin-node" >&2
 			grep -nE "\$\(\s*${word}\s|\`\s*${word}\s" "$script" >&2
 			return 1
 		fi
 	done
 }
 
-@test "FEAT-195 — bin/bitcoin calls 'secret' only for seed operations" {
-	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+@test "FEAT-195 — bin/bitcoin-node calls 'secret' only for seed operations" {
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	# Every 'secret' invocation must be 'secret get/put/rm' against a
 	# <wallet>/seed path. No other secret operations are expected.
 	while IFS=: read -r _lineno content; do
@@ -2604,14 +2604,14 @@ STR
 # dir-removed-mid-run trigger is an unstageable race.
 # ---------------------------------------------------------------------------
 @test "BUG-026 — every wallet commit subshell guards 'cd \$path'" {
-	script="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	script="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	# A standalone, unguarded `cd "$path"` (no `|| exit`/`|| return`/`|| {`
 	# on the same line) is the dangerous form. Safe forms are
 	# `cd "$path" || exit 1` and `( cd "$path" && … )`.
 	bad=0
 	while IFS= read -r line; do
 		bad=$((bad + 1))
-		echo "UNGUARDED cd in bin/bitcoin: $line" >&2
+		echo "UNGUARDED cd in bin/bitcoin-node: $line" >&2
 	done < <(grep -nE '^[[:space:]]*cd "\$path"[[:space:]]*$' "$script")
 	[ "$bad" -eq 0 ]
 }
@@ -2834,7 +2834,7 @@ FEAT047_PUBKEY="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817
 
 # ---------------------------------------------------------------------------
 # FEAT-059 — fulcrum (Electrum protocol) backend. The Electrum client
-# lives inside bin/bitcoin (no shelling out to the `fulcrum` command,
+# lives inside bin/bitcoin-node (no shelling out to the `fulcrum` command,
 # CLAUDE.md §4). The socket is stubbed with canned JSON via
 # $BITCOIN_FULCRUM_FIXTURE (a dir of <electrum.method>.json files).
 # ---------------------------------------------------------------------------
@@ -2939,7 +2939,7 @@ fulcrum_fixture() {
 }
 
 @test "FEAT-059 AC7 — the fulcrum backend never invokes the 'fulcrum' command" {
-	# Boundary: bin/bitcoin must not shell out to the fulcrum/fulcrumd
+	# Boundary: bin/bitcoin-node must not shell out to the fulcrum/fulcrumd
 	# command (the backend speaks Electrum directly). Function names like
 	# backend:fulcrum:... are fine; a bare 'fulcrum '/'fulcrumd ' command
 	# at statement start or in $(...) is the violation.

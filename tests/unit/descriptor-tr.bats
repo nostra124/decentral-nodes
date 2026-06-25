@@ -13,7 +13,7 @@ setup() {
 	HOME="$(mktemp -d "$BATS_TMPDIR/home.XXXXXX")"
 	unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME
 	export HOME SELF_QUIET=1
-	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	export SELF_LIBEXEC="$BATS_TEST_DIRNAME/../../libexec"
 	XPUB=xpub6BgBgsespWvERF3LHQu6CnqdvfEvtMcQjYrcRzx53QJjSxarj2afYWcLteoGVky7D3UKDP9QyrLprQ3VCECoY49yfdDEHGCtMMj92pReUsQ
 	ADDRESS=bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr

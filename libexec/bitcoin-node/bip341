@@ -145,7 +145,7 @@ command:address() {
 	Qx=$(command:tweak "$ix") || return $?
 	vals=$(_hex_to_5bit "$Qx")     # 52 five-bit values from 32 bytes
 	libexec="${SELF_LIBEXEC:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
-	"$libexec/bitcoin/bip350" encode-values "$hrp" 1 $vals
+	"$libexec/bitcoin-node/bip350" encode-values "$hrp" 1 $vals
 }
 
 command:help() {

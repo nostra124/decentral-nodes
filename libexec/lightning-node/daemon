@@ -705,7 +705,7 @@ cmd_start() {
 	fi
 
 	# Auto-unlock hook (FEAT-184).
-	if [ -x "$SELF_LIBEXEC/lightning/wallet" ] && command -v secret >/dev/null 2>&1; then
+	if [ -x "$SELF_LIBEXEC/lightning-node/wallet" ] && command -v secret >/dev/null 2>&1; then
 		# Wait briefly for the daemon to start asking for a password.
 		for _ in 1 2 3 4 5; do
 			if cli getinfo >/dev/null 2>&1; then
@@ -713,7 +713,7 @@ cmd_start() {
 			fi
 			# clightning needs the password if the HSM is encrypted;
 			# `wallet unlock --stored` is a no-op when not encrypted.
-			"$SELF_LIBEXEC/lightning/wallet" unlock --stored 2>/dev/null && return 0 || true
+			"$SELF_LIBEXEC/lightning-node/wallet" unlock --stored 2>/dev/null && return 0 || true
 			sleep 1
 		done
 	fi
@@ -748,13 +748,13 @@ auto_bootstrap_peers() {
 	if [ -n "$LIGHTNING_NO_BOOTSTRAP" ]; then
 		return 0
 	fi
-	[ -x "$SELF_LIBEXEC/lightning/peer" ] || return 0
+	[ -x "$SELF_LIBEXEC/lightning-node/peer" ] || return 0
 	local count
 	count=$(cli listpeers 2>/dev/null | jq -r '.peers | length' 2>/dev/null) || count=""
 	[ -n "$count" ] || return 0
 	if [ "$count" -eq 0 ] 2>/dev/null; then
 		info "zero peers — bootstrapping the gossip graph"
-		"$SELF_LIBEXEC/lightning/peer" bootstrap || true
+		"$SELF_LIBEXEC/lightning-node/peer" bootstrap || true
 	fi
 }
 

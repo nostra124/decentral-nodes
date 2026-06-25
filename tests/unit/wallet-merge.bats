@@ -16,7 +16,7 @@ setup() {
 	HOME="$(mktemp -d "$BATS_TMPDIR/home.XXXXXX")"
 	unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_SHARE_HOME
 	export HOME SELF_QUIET=1
-	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	export SELF_LIBEXEC="$BATS_TEST_DIRNAME/../../libexec"
 	# stub `secret` that backs to a per-test store (mirrors setup_wallet_env)
 	export SECRET_STORE="$HOME/secret-store"

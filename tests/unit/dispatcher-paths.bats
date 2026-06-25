@@ -1,0 +1,40 @@
+#!/usr/bin/env bats
+#
+# BUG-044 regression: the unit suites must reference the current `-node`
+# dispatcher names, not the pre-rename `bin/<cmd>` paths removed by
+# commit e732c2b. Invoking a removed path makes bats fail with exit 127
+# ("command not found"), which is what reddened the merge gate.
+#
+# This guard fails while any test still hard-codes a bare pre-rename
+# dispatcher path, and proves each renamed dispatcher actually runs.
+
+setup() {
+	REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+}
+
+# Bare pre-rename dispatcher references: `bin/<cmd>` NOT followed by '-'
+# (which would be the new `-node` name) and NOT followed by an alnum
+# (which would be `bitcoind` / `bitcoin-cli` / `lightningd`).
+@test "BUG-044: no tests/unit suite references a pre-rename bin/<cmd> path" {
+	# Functional references only — bats comment lines (e.g. historical
+	# "moved from bin/bitcoin" notes) are not invocations and are exempt.
+	local hits
+	hits="$(grep -rnE 'bin/(bitcoin|lightning|monero|fulcrum|liquid|stacks)([^-a-zA-Z0-9]|$)' \
+		--include='*.bats' "$BATS_TEST_DIRNAME" \
+		| grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+	if [ -n "$hits" ]; then
+		echo "stale pre-rename dispatcher paths still present:" >&2
+		echo "$hits" >&2
+		return 1
+	fi
+}
+
+@test "BUG-044: each -node dispatcher exists and 'version' prints VERSION" {
+	local v; v="$(cat "$REPO/VERSION")"
+	for cmd in bitcoin-node lightning-node fulcrum-node monero-node; do
+		[ -x "$REPO/bin/$cmd" ] || { echo "missing $REPO/bin/$cmd"; return 1; }
+		run env SELF_LIBEXEC="$REPO/libexec" "$REPO/bin/$cmd" version
+		[ "$status" -eq 0 ] || { echo "$cmd version exited $status"; return 1; }
+		[ "$output" = "$v" ] || { echo "$cmd version=$output want $v"; return 1; }
+	done
+}

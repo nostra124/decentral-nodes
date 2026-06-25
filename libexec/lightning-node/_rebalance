@@ -226,7 +226,7 @@ swap_rebalance() {
 		return 0
 	fi
 	# Two-step: drain source channel, fill destination channel.
-	local self_bin="$SELF_LIBEXEC/lightning"
+	local self_bin="$SELF_LIBEXEC/lightning-node"
 	if ! "$self_bin/liquidity" loop out "$AMOUNT" >/dev/null 2>&1; then
 		error "swap fallback failed at \`liquidity loop out\`"
 		exit 4

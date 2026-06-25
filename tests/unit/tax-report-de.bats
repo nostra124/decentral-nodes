@@ -17,7 +17,7 @@ setup() {
 	unset XDG_SOURCE_HOME XDG_BACKUP_HOME XDG_RUNTIME_DIR
 	export HOME
 	export SELF_QUIET=1
-	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	export SELF_LIBEXEC="$BATS_TEST_DIRNAME/../../libexec"
 	export XDG_DATA_HOME="$HOME/data"
 	export BITCOIN_PRICE_CACHE="$HOME/price.tsv"

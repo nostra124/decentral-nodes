@@ -15,8 +15,8 @@
 
 setup() {
 	REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-	FULCRUM="$REPO/bin/fulcrum"
-	BITCOIN="$REPO/bin/bitcoin"
+	FULCRUM="$REPO/bin/fulcrum-node"
+	BITCOIN="$REPO/bin/bitcoin-node"
 	export SELF_LIBEXEC="$REPO/libexec"
 
 	FROOT="$BATS_TEST_TMPDIR"
@@ -106,22 +106,22 @@ fixdir() {  # create a fixture dir with one <method>.json; echo its path
 	local prefix="$FROOT/prefix"; mkdir -p "$prefix"
 	( cd "$REPO" && ./configure --prefix="$prefix" >/dev/null 2>&1 && make install >/dev/null 2>&1 )
 	# Staged build tree (stow source) mirrors $PREFIX *relative* —
-	# build/bitcoin/bin, not build/bitcoin$prefix/bin. The latter was the
+	# build/decentral-nodes/bin, not build/bitcoin$prefix/bin. The latter was the
 	# double-prefix packaging bug (BUG-038): absolute staging + `stow -t
 	# $PREFIX` left files at $PREFIX$PREFIX/… and never on PATH.
-	[ -f "$REPO/build/bitcoin/bin/bitcoin" ]
-	[ -f "$REPO/build/bitcoin/bin/fulcrum" ]
-	[ -d "$REPO/build/bitcoin/libexec/bitcoin" ]
-	[ -d "$REPO/build/bitcoin/libexec/fulcrum" ]
+	[ -f "$REPO/build/decentral-nodes/bin/bitcoin-node" ]
+	[ -f "$REPO/build/decentral-nodes/bin/fulcrum-node" ]
+	[ -d "$REPO/build/decentral-nodes/libexec/bitcoin" ]
+	[ -d "$REPO/build/decentral-nodes/libexec/fulcrum" ]
 	# …and `stow -t $PREFIX` installs directly into $PREFIX.
-	[ -x "$prefix/bin/bitcoin" ]
-	[ -x "$prefix/bin/fulcrum" ]
+	[ -x "$prefix/bin/bitcoin-node" ]
+	[ -x "$prefix/bin/fulcrum-node" ]
 	[ -f "$prefix/share/lightning/apache/lnurlp.conf" ]
 	( cd "$REPO" && make uninstall >/dev/null 2>&1; rm -rf build Makefile )
 }
 
-@test "FEAT-055 AC6: .rpk/identity is unchanged (bitcoin); no second package" {
-	[ "$(cat "$REPO/.rpk/identity")" = bitcoin ]
+@test "FEAT-055 AC6: .rpk/identity is the meta-package (decentral-nodes); no second package" {
+	[ "$(cat "$REPO/.rpk/identity")" = decentral-nodes ]
 }
 
 @test "FEAT-055 AC4: lint covers fulcrum and shellcheck flags a broken file" {
@@ -147,14 +147,14 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	return 1
 }
 
-@test "FEAT-055 AC5: bin/fulcrum + libexec/fulcrum/* call no forbidden siblings" {
-	run _scan_forbidden "$REPO/bin/fulcrum"
+@test "FEAT-055 AC5: bin/fulcrum-node + libexec/fulcrum-node/* call no forbidden siblings" {
+	run _scan_forbidden "$REPO/bin/fulcrum-node"
 	[ "$status" -eq 1 ]
 	local f
 	while IFS= read -r f; do
 		run _scan_forbidden "$f"
 		[ "$status" -eq 1 ] || { echo "forbidden call in $f"; return 1; }
-	done < <(find "$REPO/libexec/fulcrum" -type f)
+	done < <(find "$REPO/libexec/fulcrum-node" -type f)
 }
 
 @test "FEAT-055 AC5: the scanner catches a planted forbidden sibling call" {
@@ -304,13 +304,13 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	# top-level shims (fulcrum enable/start/status/…) are gone. install +
 	# admin verbs stay top-level.
 	for v in enable disable start stop status monitor space; do
-		[ ! -e "$REPO/libexec/fulcrum/$v" ] || { echo "lingering top-level shim: $v"; return 1; }
+		[ ! -e "$REPO/libexec/fulcrum-node/$v" ] || { echo "lingering top-level shim: $v"; return 1; }
 		run "$FULCRUM" "$v" --help
 		[ "$status" -ne 0 ]
-		[[ "$output" == *"not a fulcrum command"* ]]
+		[[ "$output" == *"not a fulcrum-node command"* ]]
 	done
 	# install stays top-level.
-	[ -e "$REPO/libexec/fulcrum/install" ]
+	[ -e "$REPO/libexec/fulcrum-node/install" ]
 }
 
 @test "daemon status: help + listing mention status" {
@@ -575,7 +575,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	# (via the test-only $FULCRUM_SYSTEM_BINDIRS knob) must win over PATH.
 	run env -u FULCRUM_FULCRUMD FULCRUM_SYSTEM_BINDIRS="$sysdir" \
 		PATH="$pathdir:$PATH" bash -c \
-		'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum/daemon"
+		'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum-node/daemon"
 	[ "$status" -eq 0 ]
 	[ "$output" = "$sysdir/Fulcrum" ]
 }
@@ -587,7 +587,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	local emptydir="$FROOT/empty-sys"; mkdir -p "$emptydir"
 	run env -u FULCRUM_FULCRUMD FULCRUM_SYSTEM_BINDIRS="$emptydir" \
 		PATH="$pathdir:$PATH" bash -c \
-		'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum/daemon"
+		'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum-node/daemon"
 	[ "$status" -eq 0 ]
 	[ "$output" = "$pathdir/Fulcrum" ]
 }
@@ -597,7 +597,7 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	printf '#!/usr/bin/env bash\n:\n' > "$sysdir/Fulcrum"
 	chmod +x "$sysdir/Fulcrum"
 	run env FULCRUM_FULCRUMD=/my/override/Fulcrum FULCRUM_SYSTEM_BINDIRS="$sysdir" \
-		bash -c 'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum/daemon"
+		bash -c 'source "$1"; daemon:_fulcrumd' _ "$REPO/libexec/fulcrum-node/daemon"
 	[ "$status" -eq 0 ]
 	[ "$output" = "/my/override/Fulcrum" ]
 }
@@ -882,7 +882,7 @@ feat298_env() {
 @test "FEAT-058 AC8: 'fulcrum query' is not a known verb" {
 	run "$FULCRUM" query
 	[ "$status" -ne 0 ]
-	[[ "$output" == *"not a fulcrum command"* ]]
+	[[ "$output" == *"not a fulcrum-node command"* ]]
 }
 
 # ===========================================================================
