@@ -1,0 +1,72 @@
+.TH FORGEJO-NODE 1 "2026" "decentral-nodes" "User Commands"
+.SH NAME
+forgejo-node \- install and operate a Forgejo Git forge and its CI runners
+.SH SYNOPSIS
+.B forgejo-node
+.I command
+.RI [ subcommand ]
+.RI [ args ]
+.SH DESCRIPTION
+.B forgejo-node
+installs and operates
+.B Forgejo
+(https://forgejo.org/), a lightweight self-hostable Git forge \(em a
+community fork of Gitea \(em together with its CI runners
+.RB ( "Forgejo Actions" ).
+.PP
+The command is a thin dispatcher: each verb maps to an executable under
+.IR libexec/forgejo-node/ .
+Two verbs carry the weight:
+.B daemon
+manages the Forgejo server, and
+.B runner
+installs and registers Actions runners for specific platforms
+.RB ( docker / lxc / host ).
+.PP
+Following the daemon posture in the stack
+.RB ( CLAUDE.md " \(sc1),"
+the server runs system-mode under a dedicated
+.B git
+account, with
+.I /var/lib/forgejo
+for data and
+.I /etc/forgejo/app.ini
+for config. The web UI binds 127.0.0.1:3000; front it with a reverse
+proxy for TLS.
+.SH COMMANDS
+.TP
+.B version
+Print the package version.
+.TP
+.B daemon " " \fIsubcommand\fR
+Lifecycle and setup of the Forgejo server. See
+.BR forgejo-node-daemon (1).
+.TP
+.B runner " " \fIsubcommand\fR
+Install, register, and operate Forgejo Actions runners by platform. See
+.BR forgejo-node-runner (1).
+.TP
+.B help
+Print the top-level help.
+.SH EXAMPLES
+.PP
+Bring up a server and a docker-backed runner:
+.PP
+.RS
+.nf
+forgejo-node daemon install
+forgejo-node daemon enable && forgejo-node daemon start
+forgejo-node runner install
+forgejo-node runner register --instance http://127.0.0.1:3000 \\
+    --token <tok> --platform docker
+forgejo-node runner enable && forgejo-node runner start
+.fi
+.RE
+.SH SEE ALSO
+.BR forgejo-node-daemon (1),
+.BR forgejo-node-runner (1)
+.br
+https://forgejo.org/docs/
+.SH HISTORY
+Introduced in the decentral-nodes stack alongside the other Tier 3
+self-hosting nodes.

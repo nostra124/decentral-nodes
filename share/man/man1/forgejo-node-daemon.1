@@ -1,0 +1,72 @@
+.TH FORGEJO-NODE-DAEMON 1 "2026" "decentral-nodes" "User Commands"
+.SH NAME
+forgejo-node-daemon \- install and operate a boot-persistent Forgejo server
+.SH SYNOPSIS
+.B forgejo-node daemon
+.I subcommand
+.RI [ args ]
+.SH DESCRIPTION
+Render a platform-appropriate service unit (systemd on Linux, launchd on
+macOS), install it, and operate the Forgejo web server. The service runs
+system-mode under a dedicated
+.B git
+account (the account name Forgejo expects for SSH access), with a
+.I /var/lib/forgejo
+data directory and an
+.I /etc/forgejo/app.ini
+config.
+.PP
+The web UI binds 127.0.0.1:3000 by default. First-run setup
+(database choice, admin user) is completed in the browser; place a reverse
+proxy in front for TLS and a public hostname.
+.SH SUBCOMMANDS
+.TP
+.B install
+Download the Forgejo server binary for this OS/arch to
+.I /usr/local/bin/forgejo
+from the official Codeberg release. Set
+.B FORGEJO_VERSION
+to pin a specific version.
+.TP
+.B enable
+Provision the
+.B git
+account and the data/config directories, install the service unit, and
+register it to start at boot. Requires root.
+.TP
+.B disable
+Stop the service and remove its unit. The data directory under
+.I /var/lib/forgejo
+is preserved.
+.TP
+.BR start / stop / restart
+Drive the installed service.
+.TP
+.B status
+Report whether Forgejo is running, plus the binary version.
+.TP
+.B monitor
+Tail the daemon log.
+.SH FILES
+.TP
+.I /usr/local/bin/forgejo
+The server binary.
+.TP
+.I /etc/forgejo/app.ini
+Service configuration.
+.TP
+.I /var/lib/forgejo
+Data directory (repositories, database when SQLite, logs).
+.SH ENVIRONMENT
+.TP
+.B FORGEJO_VERSION
+Version to download in
+.BR install " (default: a pinned recent release)."
+.SH SEE ALSO
+.BR forgejo-node (1),
+.BR forgejo-node-runner (1)
+.br
+https://forgejo.org/docs/latest/admin/installation/binary/
+.SH HISTORY
+Introduced alongside
+.BR forgejo-node (1).
