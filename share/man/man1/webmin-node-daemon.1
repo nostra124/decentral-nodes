@@ -1,0 +1,68 @@
+.TH WEBMIN-NODE-DAEMON 1 "2026" "decentral-nodes" "User Commands"
+.SH NAME
+webmin-node-daemon \- install and operate the Webmin service
+.SH SYNOPSIS
+.B webmin-node daemon
+.I subcommand
+.RI [ args ]
+.SH DESCRIPTION
+Install Webmin from its official signed repository and drive its systemd
+service. Webmin runs
+.B as root
+(it administers the host) and serves HTTPS on 127.0.0.1:10000; there is
+no dedicated service account. Linux only (apt/dnf).
+.SH SUBCOMMANDS
+.TP
+.BI "install " "[--from auto|apt|dnf]"
+Fetch the upstream
+.I setup-repos.sh
+to configure the signed Webmin repo, then install the
+.B webmin
+package. With
+.B --from auto
+(the default) the package manager is detected (apt-get, then dnf).
+.TP
+.B enable
+Enable the
+.B webmin
+service to start at boot
+.RB ( "systemctl enable webmin" ).
+.TP
+.B disable
+Stop the service and disable it at boot. The
+.I /etc/webmin
+config is preserved.
+.TP
+.BR start / stop / restart
+Drive the installed service.
+.TP
+.B status
+Report whether Webmin is running, plus the installed version.
+.TP
+.B monitor
+Tail the miniserv log (or the journal when no log file is present).
+.SH FILES
+.TP
+.I /usr/share/webmin
+Webmin programs and module libraries.
+.TP
+.I /etc/webmin
+Configuration
+.RI ( miniserv.conf ", " miniserv.users ).
+.TP
+.I /var/log/webmin/miniserv.log
+Server log.
+.SH SECURITY
+Webmin exposes full root administration over HTTPS. Keep port 10000
+firewalled to trusted networks, restrict
+.I miniserv.conf
+.B allow=
+to known hosts, and prefer a reverse proxy with strong auth for any
+non-local access.
+.SH SEE ALSO
+.BR webmin-node (1)
+.br
+https://www.webmin.com/docs/
+.SH HISTORY
+Introduced alongside
+.BR webmin-node (1).

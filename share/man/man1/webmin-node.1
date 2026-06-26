@@ -1,0 +1,61 @@
+.TH WEBMIN-NODE 1 "2026" "decentral-nodes" "User Commands"
+.SH NAME
+webmin-node \- install and operate a Webmin web administration service
+.SH SYNOPSIS
+.B webmin-node
+.I command
+.RI [ subcommand ]
+.RI [ args ]
+.SH DESCRIPTION
+.B webmin-node
+installs and operates
+.B Webmin
+(https://www.webmin.com/), a browser-based system administration UI for
+Unix/Linux \(em manage users, groups, packages, services, cron, the
+firewall, and module UIs (Apache, BIND, MySQL/PostgreSQL, Samba, …) from
+a web browser. Webmin ships its own mini HTTPS server
+.RB ( miniserv.pl )
+on port 10000.
+.PP
+The command is a thin dispatcher: each verb maps to an executable under
+.IR libexec/webmin-node/ .
+The
+.B daemon
+verb carries the weight (install + lifecycle).
+.PP
+Unlike the other nodes, Webmin runs
+.B as root
+\(em it administers the host \(em so there is no dedicated service
+account. Restrict access with the firewall and/or
+.I miniserv.conf
+.B allow=
+rules, and front it with a reverse proxy for a public hostname. Webmin
+is packaged for Linux (apt/dnf) only; macOS is not supported by this
+node.
+.SH COMMANDS
+.TP
+.B version
+Print the package version.
+.TP
+.B daemon " " \fIsubcommand\fR
+Install and run the Webmin service. See
+.BR webmin-node-daemon (1).
+.TP
+.B help
+Print the top-level help.
+.SH EXAMPLES
+.PP
+.RS
+.nf
+webmin-node daemon install
+webmin-node daemon enable && webmin-node daemon start
+# then open https://127.0.0.1:10000
+.fi
+.RE
+.SH SEE ALSO
+.BR webmin-node-daemon (1)
+.br
+https://www.webmin.com/
+.SH HISTORY
+Introduced in the decentral-nodes stack alongside the other Tier 3
+self-hosting nodes.
