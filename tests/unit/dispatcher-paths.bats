@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# BUG-044 regression: the unit suites must reference the current `-node`
+# BUG-056 regression: the unit suites must reference the current `-node`
 # dispatcher names, not the pre-rename `bin/<cmd>` paths removed by
 # commit e732c2b. Invoking a removed path makes bats fail with exit 127
 # ("command not found"), which is what reddened the merge gate.
@@ -15,7 +15,7 @@ setup() {
 # Bare pre-rename dispatcher references: `bin/<cmd>` NOT followed by '-'
 # (which would be the new `-node` name) and NOT followed by an alnum
 # (which would be `bitcoind` / `bitcoin-cli` / `lightningd`).
-@test "BUG-044: no tests/unit suite references a pre-rename bin/<cmd> path" {
+@test "BUG-056: no tests/unit suite references a pre-rename bin/<cmd> path" {
 	# Functional references only — bats comment lines (e.g. historical
 	# "moved from bin/bitcoin" notes) are not invocations and are exempt.
 	local hits
@@ -29,7 +29,7 @@ setup() {
 	fi
 }
 
-@test "BUG-044: no tests/unit suite sources a pre-rename libexec/<cmd>/ verb" {
+@test "BUG-056: no tests/unit suite sources a pre-rename libexec/<cmd>/ verb" {
 	# Catches sibling/source refs like $SELF_LIBEXEC/bitcoin/bip174, including
 	# the bash-quoting variant ($SELF_LIBEXEC"'/bitcoin/bip174). Data dirs
 	# ($XDG_*/bitcoin/wallets, $LIGHTNING_DIR/bitcoin/config) are not libexec
@@ -45,7 +45,7 @@ setup() {
 	fi
 }
 
-@test "BUG-044: each -node dispatcher exists and 'version' prints VERSION" {
+@test "BUG-056: each -node dispatcher exists and 'version' prints VERSION" {
 	local v; v="$(cat "$REPO/VERSION")"
 	for cmd in bitcoin-node lightning-node fulcrum-node monero-node; do
 		[ -x "$REPO/bin/$cmd" ] || { echo "missing $REPO/bin/$cmd"; return 1; }
