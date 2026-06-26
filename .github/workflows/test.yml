@@ -140,14 +140,18 @@ jobs:
       - name: configure
         run: ./configure --prefix="$HOME/.local"
       - name: run coverage
+        # Advisory: the coverage report is not a merge gate. kcov-instrumented
+        # bash can SIGPIPE bats on piped subshells (BUG-057); don't fail CI on
+        # it. The merge gate is `bats + pytest unit tests`.
+        continue-on-error: true
         run: make coverage
       - name: summarize coverage
         if: always()
         run: |
           {
             echo "## Coverage"
-            if [ -f build/bitcoin/coverage/bats/coverage.json ]; then
-              pct=$(jq -r .percent_covered build/bitcoin/coverage/bats/coverage.json)
+            if [ -f build/decentral-nodes/coverage/bats/coverage.json ]; then
+              pct=$(jq -r .percent_covered build/decentral-nodes/coverage/bats/coverage.json)
               printf -- "- line coverage: **%s%%**\n" "$pct"
             else
               echo "- coverage.json not produced; check the run-coverage step output"
@@ -159,7 +163,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-html
-          path: build/bitcoin/coverage/
+          path: build/decentral-nodes/coverage/
           retention-days: 14
 
   lint:
