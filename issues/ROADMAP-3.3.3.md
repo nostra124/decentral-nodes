@@ -4,15 +4,15 @@ Bug-fix-only release that gets CI back to green and verifies the
 container integration suites. No new behaviour, no new flags, no new
 commands (semver patch contract, skills/milestones.md §2.1).
 
-The headline is **BUG-044**: the mandatory unit-test gate has been red
+The headline is **BUG-056**: the mandatory unit-test gate has been red
 since the `-node` rename (`e732c2b`) because the tests still invoke the
 old `bin/bitcoin` / `bin/lightning` names. Nothing else can merge green
 until this lands, so it ships first as a patch.
 
 ---
 
-## BUG-044 — unit tests still invoke the pre-`-node` binary names ✅ DONE
-**File:** `issues/bug/done/044-test-suite-node-rename.md`
+## BUG-056 — unit tests still invoke the pre-`-node` binary names ✅ DONE
+**File:** `issues/bug/done/056-test-suite-node-rename.md`
 **Landed:** test guard `tests/unit/dispatcher-paths.bats` + the full
 `-node` repoint across tests and the cross-verb source calls the rename
 missed (bip32/wif self-calls, bip341/bip174 + lightning sibling paths,
@@ -28,12 +28,21 @@ are still `skip`-ped against the live stack. Now unblockable in cloud
 sessions thanks to the podman SessionStart hook (the container tiers can
 actually run). Bring the three suites green end-to-end.
 
+## BUG-057 — `kcov coverage` CI job fails (exit 2; stale build dir)
+**File:** `issues/bug/057-kcov-coverage-job.md`
+**Effort:** small–medium (workflow path fix + kcov/bats broken-pipe diagnosis)
+Surfaced once BUG-056 turned the gate green: the `needs: test` coverage
+job ran for the first time and failed (`make coverage` exits 2 under
+kcov; summarize/upload still point at the stale `build/bitcoin/`). Not
+the merge gate. Fix the build-dir path and the kcov+bats broken pipe, or
+make the job advisory (`continue-on-error`) in the interim.
+
 ---
 
 ## Recommended order
 
 ```
-BUG-044   first — restores the merge gate; everything else needs green CI
+BUG-056   first — restores the merge gate; everything else needs green CI
 BUG-043   second — depends on a runnable container tier (podman hook)
 ```
 

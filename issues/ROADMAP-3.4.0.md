@@ -20,7 +20,7 @@ while the unit gate is red.
 **Effort:** small (flip `continue-on-error`, clear residual findings)
 Shellcheck runs advisory (`continue-on-error: true`) today. Make it a
 blocking gate at `-S warning` once the tree is clean. Sequence it after
-BUG-044 so the `-node` test fixes don't surface as fresh findings mid-flip.
+BUG-056 so the `-node` test fixes don't surface as fresh findings mid-flip.
 
 ## FEAT-051 — required-tools preflight for the test suites
 **File:** `issues/feature/051-test-required-tools-preflight.md`
@@ -40,7 +40,7 @@ desync).
 **Effort:** medium (mechanical split; large diff, low risk)
 `bitcoin.bats` (~235 tests), `streamline.bats` (~175), and
 `lightning.bats` (~887) are far past a readable size. Split by
-subcommand/feature into focused files. Do this *after* BUG-044 so the
+subcommand/feature into focused files. Do this *after* BUG-056 so the
 split starts from a green suite.
 
 ## FEAT-304 — bitcoind backend `get-address-utxos` + `broadcast`
@@ -57,7 +57,7 @@ balance/utxos/send`) currently skipped on FEAT-304.
 ## Recommended order
 
 ```
-FEAT-052   cheap win once BUG-044 lands; locks the lint gate
+FEAT-052   cheap win once BUG-056 lands; locks the lint gate
 FEAT-051   preflight makes the next two easier to develop
 FEAT-050   fixture guard
 FEAT-053   big mechanical split — do on a green, guarded suite
