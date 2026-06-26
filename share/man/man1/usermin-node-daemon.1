@@ -1,0 +1,69 @@
+.TH USERMIN-NODE-DAEMON 1 "2026" "decentral-nodes" "User Commands"
+.SH NAME
+usermin-node-daemon \- install and operate the Usermin service
+.SH SYNOPSIS
+.B usermin-node daemon
+.I subcommand
+.RI [ args ]
+.SH DESCRIPTION
+Install Usermin from the official signed repository and drive its systemd
+service. Usermin serves HTTPS on 127.0.0.1:20000; its miniserv starts as
+root to authenticate local accounts and then runs each session as the
+logged-in user (no host administration \(em that is Webmin). Linux only
+(apt/dnf).
+.SH SUBCOMMANDS
+.TP
+.BI "install " "[--from auto|apt|dnf]"
+Fetch the upstream
+.I setup-repos.sh
+to configure the signed Webmin/Usermin repo, then install the
+.B usermin
+package. With
+.B --from auto
+(the default) the package manager is detected (apt-get, then dnf).
+.TP
+.B enable
+Enable the
+.B usermin
+service to start at boot
+.RB ( "systemctl enable usermin" ).
+.TP
+.B disable
+Stop the service and disable it at boot. The
+.I /etc/usermin
+config is preserved.
+.TP
+.BR start / stop / restart
+Drive the installed service.
+.TP
+.B status
+Report whether Usermin is running, plus the installed version.
+.TP
+.B monitor
+Tail the miniserv log (or the journal when no log file is present).
+.SH FILES
+.TP
+.I /usr/share/usermin
+Usermin programs and module libraries.
+.TP
+.I /etc/usermin
+Configuration
+.RI ( miniserv.conf ", " miniserv.users ).
+.TP
+.I /var/log/usermin/miniserv.log
+Server log.
+.SH SECURITY
+Usermin exposes per-user mail and file access over HTTPS. Keep port
+20000 firewalled to trusted networks, restrict
+.I miniserv.conf
+.B allow=
+to known hosts, and prefer a reverse proxy with strong auth for any
+non-local access.
+.SH SEE ALSO
+.BR usermin-node (1),
+.BR webmin-node-daemon (1)
+.br
+https://www.webmin.com/usermin.html
+.SH HISTORY
+Introduced alongside
+.BR usermin-node (1).
