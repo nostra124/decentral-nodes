@@ -109,7 +109,7 @@ fi
 # generation + nicknames recfile + secret-store insertion all stay in
 # one place (FEAT-212 PR-1 plumbed those).
 SELF_LIBEXEC="${LIGHTNING_LIBEXEC:-$(cd "$(dirname "$0")/.." && pwd)}"
-create_out=$("$SELF_LIBEXEC/lightning/account" create "$local_name" \
+create_out=$("$SELF_LIBEXEC/lightning-node/account" create "$local_name" \
 	${desc:+"$desc"} \
 	--limit "$LIMIT_DEFAULT_SAT" --overdraft deny 2>&1) || {
 		printf '{"error":"create_failed","detail":%s}\n' \

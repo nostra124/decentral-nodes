@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# Unit tests for bin/lightning — the educational Lightning Network
+# Unit tests for bin/lightning-node — the educational Lightning Network
 # frontend on clightning (FEAT-170..206). Covers the 0.2.0–0.7.0
 # surface: dispatcher, source-mode guard, and the
 # libexec object dispatchers (wallet / channel / daemon / account /
@@ -24,7 +24,7 @@ setup() {
 	unset XDG_SOURCE_HOME XDG_BACKUP_HOME XDG_RUNTIME_DIR
 	export HOME
 	export SELF_QUIET=1
-	export LIGHTNING_BIN="$BATS_TEST_DIRNAME/../../bin/lightning"
+	export LIGHTNING_BIN="$BATS_TEST_DIRNAME/../../bin/lightning-node"
 
 	# Point at a mock lightning-cli so verbs can exercise their
 	# parsing logic without a real lightningd.
@@ -275,8 +275,8 @@ EOF
 	[ "$output" = "function" ]
 }
 
-@test "FEAT-170: no script-invocation matches for sister packages in bin/lightning" {
-	# Acceptance criterion 4: bin/lightning must not shell out to
+@test "FEAT-170: no script-invocation matches for sister packages in bin/lightning-node" {
+	# Acceptance criterion 4: bin/lightning-node must not shell out to
 	# other packages (cache / check / data / hosts / repo / scripts /
 	# task / user). Allow the word as part of help text / comments
 	# only; reject as the first token after whitespace or as `$(`.
@@ -1663,13 +1663,13 @@ _lsps_plugin_loaded() {
 	# (see _stub_trustedcoin_curl for the pattern).  Here we just verify
 	# the flag is recognised, the existing service-unit code still runs,
 	# and the relevant constants are present in the source.
-	grep -q '^LSPS_PLUGIN_REPO=' "$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
-	grep -q '^LSPS_PLUGIN_VERSION=' "$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
-	grep -q 'install_lsps_plugin' "$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	grep -q '^LSPS_PLUGIN_REPO=' "$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
+	grep -q '^LSPS_PLUGIN_VERSION=' "$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
+	grep -q 'install_lsps_plugin' "$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	# Flag parses — daemon enable --lsps shouldn't fail on the flag itself.
 	# (It WILL fail later trying to download the plugin without curl shims;
 	# we just check it gets past flag parsing.)
-	run grep -E '^\s+--lsps\)' "$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	run grep -E '^\s+--lsps\)' "$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	[ "$status" -eq 0 ]
 }
 
@@ -2198,7 +2198,7 @@ EOF
 # 1.2.0 — coverage + correctness pass
 # ---------------------------------------------------------------------------
 
-# --- bin/lightning getopts fix ---------------------------------------------
+# --- bin/lightning-node getopts fix ---------------------------------------------
 
 @test "1.2.0: -q flag parses + version still prints" {
 	run "$LIGHTNING_BIN" -q version
@@ -2445,9 +2445,9 @@ EOF
 }
 
 @test "FEAT-210: FEAT-210 issue file status is implemented" {
-	f="$BATS_TEST_DIRNAME/../../issues/feature/210-nostr-liquidity-discovery.md"
+	f="$BATS_TEST_DIRNAME/../../issues/feature/done/210-nostr-liquidity-discovery.md"
 	[ -f "$f" ]
-	grep -q "status: implemented" "$f"
+	grep -qE "status: (implemented|done)" "$f"
 }
 
 @test "FEAT-210: liquidity.py CGI exists and is executable" {
@@ -2542,16 +2542,16 @@ EOF
 @test "1.2.0: shellcheck -S warning is clean across the verb tree" {
 	command -v shellcheck >/dev/null || skip "shellcheck not installed"
 	root="$BATS_TEST_DIRNAME/../.."
-	# libexec/lightning/ also holds Python helpers (FEAT-222 PR-3's
+	# libexec/lightning-node/ also holds Python helpers (FEAT-222 PR-3's
 	# _webauthn-verify, _session-token) — pick only files with a sh/bash
 	# shebang so shellcheck doesn't trip on SC1071 (unsupported shell).
 	shell_files=()
 	while IFS= read -r f; do
 		head -1 "$f" 2>/dev/null | grep -qE '^#!.*/(ba)?sh([[:space:]]|$)' \
 			&& shell_files+=("$f")
-	done < <(find "$root/libexec/lightning" -type f)
+	done < <(find "$root/libexec/lightning-node" -type f)
 	run shellcheck -S warning \
-		"$root/bin/lightning" \
+		"$root/bin/lightning-node" \
 		"${shell_files[@]}" \
 		$(find "$root/share/lightning/hooks" -type f) \
 		"$root/tests/sit/helpers.bash" \
@@ -2895,7 +2895,7 @@ EOF
 	[[ "$output" != *"/usr/local/var/clightning"* ]]
 	# And the production default really is /var/lib/lightning (not the Intel
 	# path) — assert against the daemon source so the default can't regress.
-	local daemon_src="$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	local daemon_src="$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	grep -q 'LIGHTNING_SYSTEM_STATE:-/var/lib/lightning' "$daemon_src"
 	! grep -q '/usr/local/var/clightning' "$daemon_src"
 }
@@ -3007,7 +3007,7 @@ EOF
 	[ -n "$output" ]
 }
 
-# --- bin/lightning dispatcher edge cases -----------------------------------
+# --- bin/lightning-node dispatcher edge cases -----------------------------------
 
 @test "1.2.0 ext: sourced dispatcher doesn't run getopts on host's argv" {
 	# Regression: getopts in a sourced script can chew host's argv.
@@ -3473,7 +3473,7 @@ EOF
 	_fake_alpine_os_release
 	# Reach into the daemon verb's helper via subshell.
 	run env LIGHTNING_OS_RELEASE="$LIGHTNING_OS_RELEASE" sh -c '
-		. "'"$BATS_TEST_DIRNAME"'/../../libexec/lightning/daemon" >/dev/null 2>&1
+		. "'"$BATS_TEST_DIRNAME"'/../../libexec/lightning-node/daemon" >/dev/null 2>&1
 		platform_id
 	' 2>/dev/null || true
 	# The daemon script invokes case logic when sourced; we can't rely on
@@ -3777,7 +3777,7 @@ _podman_common_setup() {
 	# This test depends on the inherited environment NOT having podman
 	# installed.  GH-hosted runners ship podman in /usr/bin, and we
 	# can't strip /usr/bin from PATH without also losing coreutils
-	# (dirname, basename, grep, …) that bin/lightning's own path
+	# (dirname, basename, grep, …) that bin/lightning-node's own path
 	# resolution needs — earlier strip-PATH approach broke the
 	# script's libexec dispatch and the failure mode changed.
 	# When podman is present in the environment, skip; the verb's
@@ -5073,7 +5073,7 @@ _acct212pr4_teardown() {
 	# We don't actually run the install (it tries to call systemctl);
 	# we just verify the flag is recognised by parsing — and check
 	# the verb source contains the sidecar function.
-	f="$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	f="$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	grep -q "\-\-topup-watcher" "$f"
 	grep -q "install_topup_watcher_sidecar" "$f"
 	grep -q "TOPUP_WATCHER_LABEL" "$f"
@@ -5256,7 +5256,7 @@ _acct212pr5_teardown() {
 }
 
 @test "FEAT-212 PR-5: daemon enable --account-gc accepts the flag" {
-	f="$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	f="$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	grep -q "\-\-account-gc" "$f"
 	grep -q "install_account_gc_sidecar" "$f"
 	grep -q "ACCOUNT_GC_LABEL" "$f"
@@ -5723,7 +5723,7 @@ _acct215_teardown() {
 }
 
 @test "FEAT-215: daemon enable --fee-autotune accepts the flag" {
-	f="$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	f="$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	grep -q "\-\-fee-autotune" "$f"
 	grep -q "install_fee_autotune_sidecar" "$f"
 	grep -q "FEE_AUTOTUNE_LABEL" "$f"
@@ -6894,7 +6894,7 @@ _price229_teardown() {
 }
 
 @test "FEAT-229: daemon enable --price-oracle is wired" {
-	f="$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	f="$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	grep -q "\-\-price-oracle" "$f"
 	grep -q "install_price_oracle_sidecar" "$f"
 	grep -q "PRICE_ORACLE_LABEL" "$f"
@@ -7081,7 +7081,7 @@ _acct226_teardown() {
 }
 
 @test "FEAT-226: daemon enable --standing-orders accepts the flag" {
-	f="$BATS_TEST_DIRNAME/../../libexec/lightning/daemon"
+	f="$BATS_TEST_DIRNAME/../../libexec/lightning-node/daemon"
 	grep -q "\-\-standing-orders" "$f"
 	grep -q "install_standing_orders_sidecar" "$f"
 	grep -q "STANDING_ORDER_LABEL" "$f"
@@ -7974,7 +7974,7 @@ _cc_test_module() {
 # ---------------------------------------------------------------------------
 
 @test "FEAT-221: every dispatchable verb has a man page naming it" {
-	local libexec="$BATS_TEST_DIRNAME/../../libexec/lightning"
+	local libexec="$BATS_TEST_DIRNAME/../../libexec/lightning-node"
 	local man="$BATS_TEST_DIRNAME/../../share/man/man1"
 	local missing=""
 	local v page
@@ -8548,7 +8548,7 @@ _acct243_teardown() {
 # ---------------------------------------------------------------------------
 
 @test "FEAT-246: api-account-history verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-history" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-history" ]
 }
 
 @test "FEAT-246: api-account-history returns entries + has_more for unknown account exits 4" {
@@ -8623,7 +8623,7 @@ _acct243_teardown() {
 # FEAT-249 — PWA Settings backup + api-key endpoint
 
 @test "FEAT-249: api-account-apikey verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-apikey" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-apikey" ]
 }
 
 
@@ -8649,7 +8649,7 @@ _acct243_teardown() {
 # FEAT-252 — node info verb + PWA node screen
 
 @test "FEAT-252: api-node-info verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-node-info" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-node-info" ]
 }
 
 @test "FEAT-252: node.py CGI script exists" {
@@ -8670,11 +8670,11 @@ _acct243_teardown() {
 # FEAT-253 — payment note / memo
 
 @test "FEAT-253: api-account-pay accepts --note argument" {
-	grep -q "\-\-note" "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-pay"
+	grep -q "\-\-note" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-pay"
 }
 
 @test "FEAT-253: api-account-pay writes note to ledger" {
-	grep -q "sql_quote.*note\|note.*sql_quote" "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-pay"
+	grep -q "sql_quote.*note\|note.*sql_quote" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-pay"
 }
 
 
@@ -8683,7 +8683,7 @@ _acct243_teardown() {
 # FEAT-254 — PATCH history/<entry_id> update note
 
 @test "FEAT-254: api-account-history-note verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-history-note" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-history-note" ]
 }
 
 
@@ -8711,7 +8711,7 @@ assert t['auth'] is None
 # FEAT-256 — api-account-list verb
 
 @test "FEAT-256: api-account-list verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-list" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-list" ]
 }
 
 @test "FEAT-256: api-account-list returns JSON array for empty wallet" {
@@ -8719,22 +8719,22 @@ assert t['auth'] is None
 	mkdir -p "$LIGHTNING_WALLETS_ROOT/default"
 	sqlite3 "$LIGHTNING_WALLETS_ROOT/default/state.db" \
 		"CREATE TABLE IF NOT EXISTS accounts(address TEXT,name TEXT,description TEXT,overdraft TEXT,created_at TEXT); CREATE TABLE IF NOT EXISTS ledger(id INTEGER,account TEXT,amount_msat INTEGER,message TEXT);"
-	out=$("$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-list")
+	out=$("$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-list")
 	[ "$out" = "[]" ] || echo "$out" | python3 -c "import sys,json; json.load(sys.stdin)"
 }
 
 @test "FEAT-256: api-account-list --search filters results" {
-	grep -q "\-\-search" "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-list"
+	grep -q "\-\-search" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-list"
 }
 
 @test "FEAT-256: api-account-list --limit caps results" {
-	grep -q "\-\-limit" "$BATS_TEST_DIRNAME/../../libexec/lightning/api-account-list"
+	grep -q "\-\-limit" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-account-list"
 }
 
 # FEAT-257 — channel list verb + endpoint
 
 @test "FEAT-257: api-channel-list verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-channel-list" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-channel-list" ]
 }
 
 @test "FEAT-257: channels.py CGI script exists" {
@@ -8760,19 +8760,19 @@ assert t['auth'] is None
 # FEAT-259 — peer-connect / peer-disconnect / peer-list verbs
 
 @test "FEAT-259: peer-connect verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/peer-connect" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/peer-connect" ]
 }
 
 @test "FEAT-259: peer-disconnect verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/peer-disconnect" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/peer-disconnect" ]
 }
 
 @test "FEAT-259: peer-list verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/peer-list" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/peer-list" ]
 }
 
 @test "FEAT-259: peer-list returns empty array when no daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/peer-list" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/peer-list" 2>/dev/null)
 	[ "$out" = "[]" ]
 }
 
@@ -8785,11 +8785,11 @@ assert t['auth'] is None
 # FEAT-260 — channel-open / channel-close verbs
 
 @test "FEAT-260: channel-open verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/channel-open" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/channel-open" ]
 }
 
 @test "FEAT-260: channel-close verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/channel-close" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/channel-close" ]
 }
 
 @test "FEAT-260: man pages exist for channel-open and channel-close" {
@@ -8798,18 +8798,18 @@ assert t['auth'] is None
 }
 
 @test "FEAT-260: channel-open validates sat argument" {
-	grep -q "case.*sat.*\*\[!\*0-9\]\*\|NOT_A_NUMBER\|0-9.*exit 2" "$BATS_TEST_DIRNAME/../../libexec/lightning/channel-open"
+	grep -q "case.*sat.*\*\[!\*0-9\]\*\|NOT_A_NUMBER\|0-9.*exit 2" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/channel-open"
 }
 
 # FEAT-261 — wallet-stats verb
 
 @test "FEAT-261: wallet-stats verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-stats" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-stats" ]
 }
 
 @test "FEAT-261: wallet-stats returns valid JSON for missing wallet" {
 	export LIGHTNING_WALLETS_ROOT="$BATS_TMPDIR/wallets261"
-	out=$("$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-stats" 2>/dev/null)
+	out=$("$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-stats" 2>/dev/null)
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['num_accounts']==0"
 }
 
@@ -8820,7 +8820,7 @@ assert t['auth'] is None
 # FEAT-262 — invoice-decode verb + preview
 
 @test "FEAT-262: invoice-decode verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/invoice-decode" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/invoice-decode" ]
 }
 
 @test "FEAT-262: decode.py CGI exists" {
@@ -8836,11 +8836,11 @@ assert t['auth'] is None
 # FEAT-263 — invoice-list verb
 
 @test "FEAT-263: invoice-list verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/invoice-list" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/invoice-list" ]
 }
 
 @test "FEAT-263: invoice-list returns empty array without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/invoice-list" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/invoice-list" 2>/dev/null)
 	[ "$out" = "[]" ]
 }
 
@@ -8851,11 +8851,11 @@ assert t['auth'] is None
 # FEAT-264 — payment-list verb
 
 @test "FEAT-264: payment-list verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/payment-list" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/payment-list" ]
 }
 
 @test "FEAT-264: payment-list returns empty array without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/payment-list" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/payment-list" 2>/dev/null)
 	[ "$out" = "[]" ]
 }
 
@@ -8866,11 +8866,11 @@ assert t['auth'] is None
 # FEAT-265 — node-funds verb + PWA screen
 
 @test "FEAT-265: node-funds verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/node-funds" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-funds" ]
 }
 
 @test "FEAT-265: node-funds returns zero totals without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/node-funds" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-funds" 2>/dev/null)
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['total_sat']==0"
 }
 
@@ -8886,7 +8886,7 @@ assert t['auth'] is None
 # FEAT-266 — route-find verb
 
 @test "FEAT-266: route-find verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/route-find" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/route-find" ]
 }
 
 @test "FEAT-266: route-find man page exists" {
@@ -8894,17 +8894,17 @@ assert t['auth'] is None
 }
 
 @test "FEAT-266: route-find validates sat argument" {
-	grep -q "case.*sat.*0-9\|sat.*exit 2" "$BATS_TEST_DIRNAME/../../libexec/lightning/route-find"
+	grep -q "case.*sat.*0-9\|sat.*exit 2" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/route-find"
 }
 
 # FEAT-267 — node-log verb
 
 @test "FEAT-267: node-log verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/node-log" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-log" ]
 }
 
 @test "FEAT-267: node-log returns empty array without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/node-log" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-log" 2>/dev/null)
 	[ "$out" = "[]" ]
 }
 
@@ -8915,16 +8915,16 @@ assert t['auth'] is None
 # FEAT-268 — node-config verb
 
 @test "FEAT-268: node-config verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/node-config" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-config" ]
 }
 
 @test "FEAT-268: node-config handles get subcommand" {
-	grep -q '"get"' "$BATS_TEST_DIRNAME/../../libexec/lightning/node-config" || \
-	grep -q 'get)' "$BATS_TEST_DIRNAME/../../libexec/lightning/node-config"
+	grep -q '"get"' "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-config" || \
+	grep -q 'get)' "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-config"
 }
 
 @test "FEAT-268: node-config handles set subcommand" {
-	grep -q '"set"\|set)' "$BATS_TEST_DIRNAME/../../libexec/lightning/node-config"
+	grep -q '"set"\|set)' "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-config"
 }
 
 @test "FEAT-268: node-config man page exists" {
@@ -8983,7 +8983,7 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-273 — api-price verb + MCP price tool
 
 @test "FEAT-273: api-price verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-price" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-price" ]
 }
 
 @test "FEAT-273: MCP tools/list includes price" {
@@ -8993,11 +8993,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-275 — wallet-backup verb
 
 @test "FEAT-275: wallet-backup verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-backup" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-backup" ]
 }
 
 @test "FEAT-275: wallet-backup returns valid JSON without a wallet" {
-	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-such-wallet-dir "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-backup" 2>/dev/null)
+	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-such-wallet-dir "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-backup" 2>/dev/null)
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'accounts' in d"
 }
 
@@ -9008,11 +9008,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-276 — wallet-check verb
 
 @test "FEAT-276: wallet-check verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-check" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-check" ]
 }
 
 @test "FEAT-276: wallet-check reports database_not_found without wallet" {
-	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-such-wallet-276 "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-check" 2>/dev/null) || true
+	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-such-wallet-276 "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-check" 2>/dev/null) || true
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['ok'] is False"
 }
 
@@ -9022,7 +9022,7 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 	sqlite3 "$tmpdir/default/state.db" \
 		"CREATE TABLE accounts (id INTEGER); CREATE TABLE ledger (id INTEGER);"
 	out=$(LIGHTNING_WALLETS_ROOT="$tmpdir" \
-		"$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-check" 2>/dev/null)
+		"$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-check" 2>/dev/null)
 	rm -rf "$tmpdir"
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['ok'] is True"
 }
@@ -9034,11 +9034,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-277 — api-fee-list verb + MCP fee_list tool
 
 @test "FEAT-277: api-fee-list verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-fee-list" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-fee-list" ]
 }
 
 @test "FEAT-277: api-fee-list returns empty array without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/api-fee-list" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-fee-list" 2>/dev/null)
 	[ "$out" = "[]" ]
 }
 
@@ -9049,11 +9049,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-278 — api-forward-stats verb + MCP forward_stats tool
 
 @test "FEAT-278: api-forward-stats verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-forward-stats" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-forward-stats" ]
 }
 
 @test "FEAT-278: api-forward-stats returns zero totals without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/api-forward-stats" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-forward-stats" 2>/dev/null)
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['count']==0"
 }
 
@@ -9064,12 +9064,12 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-279 — wallet-export-csv verb
 
 @test "FEAT-279: wallet-export-csv verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-export-csv" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-export-csv" ]
 }
 
 @test "FEAT-279: wallet-export-csv outputs CSV header without wallet" {
 	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-wallet-279 \
-		"$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-export-csv" 2>/dev/null)
+		"$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-export-csv" 2>/dev/null)
 	echo "$out" | grep -q "id,account,ts,direction"
 }
 
@@ -9080,11 +9080,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-280 — api-peer-summary verb + MCP peer_summary tool
 
 @test "FEAT-280: api-peer-summary verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/api-peer-summary" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-peer-summary" ]
 }
 
 @test "FEAT-280: api-peer-summary returns empty array without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/api-peer-summary" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/api-peer-summary" 2>/dev/null)
 	[ "$out" = "[]" ]
 }
 
@@ -9095,11 +9095,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-281 — node-health verb + MCP node_health tool
 
 @test "FEAT-281: node-health verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/node-health" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-health" ]
 }
 
 @test "FEAT-281: node-health returns valid JSON without daemon" {
-	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning/node-health" 2>/dev/null)
+	out=$(PATH="" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-health" 2>/dev/null)
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'ok' in d"
 }
 
@@ -9114,11 +9114,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-282 — node-version verb
 
 @test "FEAT-282: node-version verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/node-version" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-version" ]
 }
 
 @test "FEAT-282: node-version returns valid JSON" {
-	out=$("$BATS_TEST_DIRNAME/../../libexec/lightning/node-version" 2>/dev/null)
+	out=$("$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-version" 2>/dev/null)
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'lightning' in d"
 }
 
@@ -9149,12 +9149,12 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # FEAT-285 — wallet-prune verb
 
 @test "FEAT-285: wallet-prune verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-prune" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-prune" ]
 }
 
 @test "FEAT-285: wallet-prune returns zero counts without wallet" {
 	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-wallet-285 \
-		"$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-prune" 2>/dev/null)
+		"$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-prune" 2>/dev/null)
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('pruned_accounts',0)==0"
 }
 
@@ -9165,7 +9165,7 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 		 CREATE TABLE ledger (id INTEGER, account TEXT);
 		 INSERT INTO accounts VALUES('bc1qtest','test',0,'2020-01-01','2020-01-02');"
 	out=$(LIGHTNING_WALLETS_ROOT="$tmpdir" \
-		"$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-prune" --dry-run 2>/dev/null)
+		"$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-prune" --dry-run 2>/dev/null)
 	rm -rf "$tmpdir"
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'would_prune_accounts' in d"
 }
@@ -9177,17 +9177,17 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # consolidated peer-* micro-verbs
 
 @test "peer stats subcommand returns JSON" {
-	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning/peer stats 2>/dev/null) || true
+	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning-node/peer stats 2>/dev/null) || true
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'peer_count' in d"
 }
 
 @test "peer stats --field returns single value" {
-	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning/peer stats --field peer_count 2>/dev/null) || true
+	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning-node/peer stats --field peer_count 2>/dev/null) || true
 	python3 -c "import sys,json; json.loads('$out')"
 }
 
 @test "peer connected requires peer_id" {
-	run libexec/lightning/peer connected
+	run libexec/lightning-node/peer connected
 	[ "$status" -ne 0 ]
 }
 
@@ -9196,11 +9196,11 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 }
 
 @test "peer stats subcommand in dispatcher" {
-	grep -q "stats)" libexec/lightning/peer
+	grep -q "stats)" libexec/lightning-node/peer
 }
 
 @test "peer disconnect-all arm present" {
-	grep -q "disconnect-all" libexec/lightning/peer
+	grep -q "disconnect-all" libexec/lightning-node/peer
 }
 
 # ---------------------------------------------------------------------------
@@ -9208,25 +9208,25 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 # ---------------------------------------------------------------------------
 
 @test "node dispatcher exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/node" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node" ]
 }
 
 @test "node --help exits 0" {
-	run "$BATS_TEST_DIRNAME/../../libexec/lightning/node" help
+	run "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node" help
 	[ "$status" -eq 0 ]
 }
 
 @test "node no-args exits non-zero" {
-	run "$BATS_TEST_DIRNAME/../../libexec/lightning/node"
+	run "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node"
 	[ "$status" -ne 0 ]
 }
 
 @test "node pubkey subcommand arm exists" {
-	grep -q "pubkey)" "$BATS_TEST_DIRNAME/../../libexec/lightning/node"
+	grep -q "pubkey)" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node"
 }
 
 @test "node alias subcommand arm exists" {
-	grep -q "alias)" "$BATS_TEST_DIRNAME/../../libexec/lightning/node"
+	grep -q "alias)" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node"
 }
 
 @test "node man page exists with correct NAME" {
@@ -9235,70 +9235,70 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 }
 
 @test "node bash syntax is valid" {
-	bash -n "$BATS_TEST_DIRNAME/../../libexec/lightning/node"
+	bash -n "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node"
 }
 
 # statistics object (factored out of node)
 
 @test "statistics stats returns JSON with node key (mock)" {
 	out=$(PATH="$BATS_TEST_DIRNAME/../mock_bins:$PATH" \
-		"$BATS_TEST_DIRNAME/../../libexec/lightning/statistics" stats 2>/dev/null || true)
+		"$BATS_TEST_DIRNAME/../../libexec/lightning-node/statistics" stats 2>/dev/null || true)
 	# either json or error json — must be parseable
 	echo "$out" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null || true
 }
 
 @test "statistics forward-stats arm exists" {
-	grep -q "forward-stats)" "$BATS_TEST_DIRNAME/../../libexec/lightning/statistics"
+	grep -q "forward-stats)" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/statistics"
 }
 
 @test "statistics channel-count arm exists" {
-	grep -q "channel-count)" "$BATS_TEST_DIRNAME/../../libexec/lightning/statistics"
+	grep -q "channel-count)" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/statistics"
 }
 
 @test "statistics stats --field flag documented" {
-	"$BATS_TEST_DIRNAME/../../libexec/lightning/statistics" help stats 2>&1 | grep -q "\-\-field"
+	"$BATS_TEST_DIRNAME/../../libexec/lightning-node/statistics" help stats 2>&1 | grep -q "\-\-field"
 }
 
 @test "statistics no-args exits non-zero" {
-	run "$BATS_TEST_DIRNAME/../../libexec/lightning/statistics"
+	run "$BATS_TEST_DIRNAME/../../libexec/lightning-node/statistics"
 	[ "$status" -ne 0 ]
 }
 
 @test "statistics bash syntax is valid" {
-	bash -n "$BATS_TEST_DIRNAME/../../libexec/lightning/statistics"
+	bash -n "$BATS_TEST_DIRNAME/../../libexec/lightning-node/statistics"
 }
 
 @test "node no longer carries the stats/plugin arms (factored out)" {
-	! grep -q "cmd_stats" "$BATS_TEST_DIRNAME/../../libexec/lightning/node"
-	! grep -q "cmd_plugin_list" "$BATS_TEST_DIRNAME/../../libexec/lightning/node"
+	! grep -q "cmd_stats" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node"
+	! grep -q "cmd_plugin_list" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node"
 }
 
 # plugin object — reckless package-mgmt + runtime load/stop
 
 @test "plugin loaded/start/stop runtime arms exist" {
-	grep -q "loaded)" "$BATS_TEST_DIRNAME/../../libexec/lightning/plugin"
-	grep -q "start)"  "$BATS_TEST_DIRNAME/../../libexec/lightning/plugin"
-	grep -q "stop)"   "$BATS_TEST_DIRNAME/../../libexec/lightning/plugin"
+	grep -q "loaded)" "$BATS_TEST_DIRNAME/../../libexec/lightning-node/plugin"
+	grep -q "start)"  "$BATS_TEST_DIRNAME/../../libexec/lightning-node/plugin"
+	grep -q "stop)"   "$BATS_TEST_DIRNAME/../../libexec/lightning-node/plugin"
 }
 
 @test "plugin bash syntax is valid" {
-	bash -n "$BATS_TEST_DIRNAME/../../libexec/lightning/plugin"
+	bash -n "$BATS_TEST_DIRNAME/../../libexec/lightning-node/plugin"
 }
 
 # consolidated wallet-* micro-verbs
 
 @test "wallet stats subcommand returns JSON" {
-	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning/wallet stats 2>/dev/null) || true
+	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning-node/wallet stats 2>/dev/null) || true
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'wallet_count' in d"
 }
 
 @test "wallet stats --field returns single value" {
-	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning/wallet stats --field wallet_count 2>/dev/null) || true
+	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning-node/wallet stats --field wallet_count 2>/dev/null) || true
 	python3 -c "import json; json.loads('$out')"
 }
 
 @test "wallet count subcommand returns JSON" {
-	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-wallets-test libexec/lightning/wallet count 2>/dev/null) || true
+	out=$(LIGHTNING_WALLETS_ROOT=/tmp/no-wallets-test libexec/lightning-node/wallet count 2>/dev/null) || true
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'count' in d"
 }
 
@@ -9307,23 +9307,23 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 }
 
 @test "wallet stats arm present in dispatcher" {
-	grep -q "stats)" libexec/lightning/wallet
+	grep -q "stats)" libexec/lightning-node/wallet
 }
 
 # consolidated invoice-* micro-verbs
 
 @test "invoice stats subcommand returns JSON" {
-	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning/invoice stats 2>/dev/null) || true
+	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning-node/invoice stats 2>/dev/null) || true
 	echo "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'total_count' in d"
 }
 
 @test "invoice stats --field returns value" {
-	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning/invoice stats --field total_count 2>/dev/null) || true
+	out=$(LIGHTNING_DIR=/nonexistent libexec/lightning-node/invoice stats --field total_count 2>/dev/null) || true
 	python3 -c "import json; json.loads('$out')"
 }
 
 @test "invoice cancel requires label" {
-	run libexec/lightning/invoice cancel
+	run libexec/lightning-node/invoice cancel
 	[ "$status" -ne 0 ]
 }
 
@@ -9332,53 +9332,53 @@ assert '\"auth\": None' in snippet or \"'auth': None\" in snippet, repr(snippet)
 }
 
 @test "invoice stats arm present in dispatcher" {
-	grep -q "stats)" libexec/lightning/invoice
+	grep -q "stats)" libexec/lightning-node/invoice
 }
 
 @test "invoice list-paid arm present" {
-	grep -q "list-paid" libexec/lightning/invoice
+	grep -q "list-paid" libexec/lightning-node/invoice
 }
 
 # consolidated channel-* micro-verbs
 
 @test "channel stats arm present in dispatcher" {
-	grep -q "stats)" libexec/lightning/channel
+	grep -q "stats)" libexec/lightning-node/channel
 }
 
 @test "channel stats --help works" {
-	libexec/lightning/channel stats --help 2>&1 | grep -q "capacity_count"
+	libexec/lightning-node/channel stats --help 2>&1 | grep -q "capacity_count"
 }
 
 @test "channel inspect arm present in dispatcher" {
-	grep -q "inspect)" libexec/lightning/channel
+	grep -q "inspect)" libexec/lightning-node/channel
 }
 
 @test "channel close-all arm present in dispatcher" {
-	grep -q "close-all)" libexec/lightning/channel
+	grep -q "close-all)" libexec/lightning-node/channel
 }
 
 @test "channel peer-summary arm present in dispatcher" {
-	grep -q "peer-summary)" libexec/lightning/channel
+	grep -q "peer-summary)" libexec/lightning-node/channel
 }
 
 @test "channel rebalance-suggestion arm present in dispatcher" {
-	grep -q "rebalance-suggestion)" libexec/lightning/channel
+	grep -q "rebalance-suggestion)" libexec/lightning-node/channel
 }
 
 @test "channel top-earners arm present in dispatcher" {
-	grep -q "top-earners)" libexec/lightning/channel
+	grep -q "top-earners)" libexec/lightning-node/channel
 }
 
 @test "channel balance-gini arm present in dispatcher" {
-	grep -q "balance-gini)" libexec/lightning/channel
+	grep -q "balance-gini)" libexec/lightning-node/channel
 }
 
 @test "channel stuck arm present in dispatcher" {
-	grep -q "stuck)" libexec/lightning/channel
+	grep -q "stuck)" libexec/lightning-node/channel
 }
 
 @test "channel bash syntax is valid" {
-	bash -n libexec/lightning/channel
+	bash -n libexec/lightning-node/channel
 }
 
 @test "channel man page has STATS section" {
@@ -9490,7 +9490,7 @@ assert '\"auth\": None' in window or \"'auth': None\" in window, 'auth not None'
 # FEAT-297 — node-htlc-list verb
 
 @test "FEAT-411: invoice-decode verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/invoice-decode" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/invoice-decode" ]
 }
 
 @test "FEAT-411: invoice-decode man page exists" {
@@ -9500,7 +9500,7 @@ assert '\"auth\": None' in window or \"'auth': None\" in window, 'auth not None'
 # FEAT-412 — node-watchtower-status verb
 
 @test "FEAT-471: peer-disconnect verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/peer-disconnect" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/peer-disconnect" ]
 }
 
 @test "FEAT-471: peer-disconnect man page exists" {
@@ -9510,7 +9510,7 @@ assert '\"auth\": None' in window or \"'auth': None\" in window, 'auth not None'
 # FEAT-472 — node-keysend-status verb
 
 @test "FEAT-478: wallet-export-csv verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-export-csv" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-export-csv" ]
 }
 
 @test "FEAT-478: wallet-export-csv man page exists" {
@@ -9520,7 +9520,7 @@ assert '\"auth\": None' in window or \"'auth': None\" in window, 'auth not None'
 # FEAT-479 — peer-connect verb
 
 @test "FEAT-479: peer-connect verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/peer-connect" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/peer-connect" ]
 }
 
 @test "FEAT-479: peer-connect man page exists" {
@@ -9530,7 +9530,7 @@ assert '\"auth\": None' in window or \"'auth': None\" in window, 'auth not None'
 # FEAT-480 — node-version verb
 
 @test "FEAT-480: node-version verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/node-version" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/node-version" ]
 }
 
 @test "FEAT-480: node-version man page exists" {
@@ -9540,7 +9540,7 @@ assert '\"auth\": None' in window or \"'auth': None\" in window, 'auth not None'
 # FEAT-481 — channel-capacity-check verb
 
 @test "FEAT-487: wallet-stats verb exists and is executable" {
-	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning/wallet-stats" ]
+	[ -x "$BATS_TEST_DIRNAME/../../libexec/lightning-node/wallet-stats" ]
 }
 
 @test "FEAT-487: wallet-stats man page exists" {

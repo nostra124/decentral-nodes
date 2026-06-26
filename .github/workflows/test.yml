@@ -60,8 +60,8 @@ jobs:
           set -o pipefail
           # libexec/lightning/ also holds Python helpers (FEAT-222) — filter
           # to files with a sh/bash shebang so shellcheck doesn't trip SC1071.
-          files=(bin/lightning)
-          for f in libexec/lightning/*; do
+          files=(bin/lightning-node)
+          for f in libexec/lightning-node/*; do
             [ -f "$f" ] || continue
             head -1 "$f" | grep -qE '^#!.*/(ba)?sh([[:space:]]|$)' && files+=("$f")
           done
@@ -181,4 +181,4 @@ jobs:
       # `shellcheck -S warning`, so this reports without failing the gate.
       - name: shellcheck (advisory)
         continue-on-error: true
-        run: shellcheck -S warning bin/* $(find libexec/bitcoin -type f)
+        run: shellcheck -S warning bin/* $(find libexec/bitcoin-node -type f)

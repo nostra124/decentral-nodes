@@ -18,7 +18,7 @@ setup() {
 	HOME="$(mktemp -d "$BATS_TMPDIR/home.XXXXXX")"
 	unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME
 	export HOME SELF_QUIET=1
-	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin"
+	export BITCOIN_BIN="$BATS_TEST_DIRNAME/../../bin/bitcoin-node"
 	export SELF_LIBEXEC="$BATS_TEST_DIRNAME/../../libexec"
 
 	# Known test vector: sk = 3, internal x = 3G.x, output key = TapTweak(3G.x).
@@ -94,7 +94,7 @@ teardown() { rm -rf "$HOME"; }
 	export SELF_LIBEXEC
 	export SELF_DEBUG=""
 	sighash="$(bash -c '
-		source "'"$SELF_LIBEXEC"'/bitcoin/bip174"
+		source "'"$SELF_LIBEXEC"'/bitcoin-node/bip174"
 		psbt:_bip341_sighash "'"$tx_hex"'" 0 \
 			"a086010000000000" \
 			"225120'"${OUTPUT_X,,}"'" \

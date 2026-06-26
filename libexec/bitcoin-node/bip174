@@ -672,7 +672,7 @@ psbt:_bip341_sighash() {
 	msg+="$input_index_le"
 
 	# tagged_hash("TapSighash", msg) — delegate to bip340.
-	"$SELF_LIBEXEC/bitcoin/bip340" tagged-hash TapSighash "$msg" | tr A-F a-f
+	"$SELF_LIBEXEC/bitcoin-node/bip340" tagged-hash TapSighash "$msg" | tr A-F a-f
 }
 
 # Parse a PSBT into structured per-input records. Populates the
@@ -981,8 +981,8 @@ command:sign() {
 		# BIP-371 Taproot key-path. Compute Qx lazily.
 		if [[ "$script" =~ ^5120[0-9a-f]{64}$ ]]; then
 			if [ -z "$expected_taproot_script" ]; then
-				taproot_pubkey_x="$("$SELF_LIBEXEC/bitcoin/bip340" pubkey "$key_hex" 2>/dev/null | tr A-F a-f)"
-				taproot_output_x="$("$SELF_LIBEXEC/bitcoin/bip341" tweak "$taproot_pubkey_x" 2>/dev/null | tr A-F a-f)"
+				taproot_pubkey_x="$("$SELF_LIBEXEC/bitcoin-node/bip340" pubkey "$key_hex" 2>/dev/null | tr A-F a-f)"
+				taproot_output_x="$("$SELF_LIBEXEC/bitcoin-node/bip341" tweak "$taproot_pubkey_x" 2>/dev/null | tr A-F a-f)"
 				expected_taproot_script="5120${taproot_output_x}"
 			fi
 			if [[ "$script" = "$expected_taproot_script" ]]; then
@@ -991,8 +991,8 @@ command:sign() {
 					continue
 				fi
 				local tap_sighash; tap_sighash="$(psbt:_bip341_sighash "$tx" "$i" "$_all_amounts_le" "$_all_scripts_with_varint")" || return 10
-				local d_tweaked; d_tweaked="$("$SELF_LIBEXEC/bitcoin/bip341" sign-scalar "$key_hex" 2>/dev/null | tr A-F a-f)" || return 11
-				local tap_sig; tap_sig="$("$SELF_LIBEXEC/bitcoin/bip340" sign "$d_tweaked" "$tap_sighash" 2>/dev/null | tr A-F a-f)" || return 12
+				local d_tweaked; d_tweaked="$("$SELF_LIBEXEC/bitcoin-node/bip341" sign-scalar "$key_hex" 2>/dev/null | tr A-F a-f)" || return 11
+				local tap_sig; tap_sig="$("$SELF_LIBEXEC/bitcoin-node/bip340" sign "$d_tweaked" "$tap_sighash" 2>/dev/null | tr A-F a-f)" || return 12
 				# Insert PSBT_IN_TAP_KEY_SIG (type 0x13, no key data).
 				local key_field_tap="13"
 				local -i key_len_tap=1

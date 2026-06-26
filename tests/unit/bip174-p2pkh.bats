@@ -53,7 +53,7 @@ setup() {
     BATS_TMPDIR=${BATS_TMPDIR:-$(mktemp -d)}
     export SELF_LIBEXEC="$BATS_TEST_DIRNAME/../../libexec"
     export SELF_QUIET=1
-    BIP174="$SELF_LIBEXEC/bitcoin/bip174"
+    BIP174="$SELF_LIBEXEC/bitcoin-node/bip174"
 }
 
 # ---------------------------------------------------------------------------

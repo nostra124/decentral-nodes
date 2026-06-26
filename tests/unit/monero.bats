@@ -11,8 +11,8 @@
 
 setup() {
 	REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-	MONERO="$REPO/bin/monero"
-	BITCOIN="$REPO/bin/bitcoin"
+	MONERO="$REPO/bin/monero-node"
+	BITCOIN="$REPO/bin/bitcoin-node"
 	export SELF_LIBEXEC="$REPO/libexec"
 	MROOT="$BATS_TEST_TMPDIR"
 	export HOME="$MROOT/home"; mkdir -p "$HOME"
@@ -48,11 +48,11 @@ setup() {
 	run "$MONERO" frobnicate
 	[ "$status" -ne 0 ]
 	[[ "$output" == *frobnicate* ]]
-	[[ "$output" == *"not a monero command"* ]]
+	[[ "$output" == *"not a monero-node command"* ]]
 }
 
-@test "FEAT-299 AC3: .rpk/identity is unchanged (bitcoin); no second package" {
-	[ "$(cat "$REPO/.rpk/identity")" = bitcoin ]
+@test "FEAT-299 AC3: .rpk/identity is the meta-package (decentral-nodes); no second package" {
+	[ "$(cat "$REPO/.rpk/identity")" = decentral-nodes ]
 	grep -qE '^COMMANDS=.*monero' "$REPO/.rpk/package"
 }
 
@@ -61,10 +61,10 @@ setup() {
 	local prefix="$MROOT/prefix"; mkdir -p "$prefix"
 	( cd "$REPO" && ./configure --prefix="$prefix" >/dev/null 2>&1 && make install >/dev/null 2>&1 )
 	# Staged build tree (stow source) mirrors $PREFIX *relative* (BUG-038).
-	[ -f "$REPO/build/bitcoin/bin/monero" ]
-	[ -d "$REPO/build/bitcoin/libexec/monero" ]
+	[ -f "$REPO/build/decentral-nodes/bin/monero-node" ]
+	[ -d "$REPO/build/decentral-nodes/libexec/monero" ]
 	# …and stow installs the dispatcher directly onto PATH under $PREFIX.
-	[ -x "$prefix/bin/monero" ]
+	[ -x "$prefix/bin/monero-node" ]
 	[ -f "$prefix/share/monero/version" ]
 	( cd "$REPO" && make uninstall >/dev/null 2>&1; rm -rf build Makefile )
 }
@@ -87,15 +87,15 @@ _scan_forbidden() {  # returns 0 if a violation is found, 1 if clean
 	return 1
 }
 
-@test "FEAT-299 AC5: bin/monero + libexec/monero/* call no forbidden siblings" {
-	run _scan_forbidden "$REPO/bin/monero"
+@test "FEAT-299 AC5: bin/monero-node + libexec/monero-node/* call no forbidden siblings" {
+	run _scan_forbidden "$REPO/bin/monero-node"
 	[ "$status" -eq 1 ]
 	local f
-	# libexec/monero/ may be empty in the skeleton; find handles that.
+	# libexec/monero-node/ may be empty in the skeleton; find handles that.
 	while IFS= read -r f; do
 		run _scan_forbidden "$f"
 		[ "$status" -eq 1 ] || { echo "forbidden call in $f"; return 1; }
-	done < <(find "$REPO/libexec/monero" -type f 2>/dev/null)
+	done < <(find "$REPO/libexec/monero-node" -type f 2>/dev/null)
 }
 
 @test "FEAT-299 AC5: the scanner catches a planted forbidden sibling call" {

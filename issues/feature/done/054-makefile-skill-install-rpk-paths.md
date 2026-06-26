@@ -1,6 +1,6 @@
 # FEAT-054 — point Makefile skill install at the consolidated `.rpk/skills/` source
 
-**Status:** open
+**Status:** done
 **Milestone:** unscheduled
 
 ## Summary

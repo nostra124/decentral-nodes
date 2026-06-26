@@ -59,8 +59,8 @@ EOF
 	echo "lightning: tor enabled in $cfg"
 
 	# Restart through FEAT-183 if available.
-	if [ -x "$SELF_LIBEXEC/lightning/daemon" ]; then
-		"$SELF_LIBEXEC/lightning/daemon" restart || true
+	if [ -x "$SELF_LIBEXEC/lightning-node/daemon" ]; then
+		"$SELF_LIBEXEC/lightning-node/daemon" restart || true
 	else
 		echo "lightning: restart lightningd manually for the change to take effect" >&2
 	fi
@@ -90,7 +90,7 @@ cmd_off() {
 	mv "$tmp" "$cfg"
 	echo "lightning: tor disabled in $cfg"
 
-	[ -x "$SELF_LIBEXEC/lightning/daemon" ] && "$SELF_LIBEXEC/lightning/daemon" restart || true
+	[ -x "$SELF_LIBEXEC/lightning-node/daemon" ] && "$SELF_LIBEXEC/lightning-node/daemon" restart || true
 }
 
 cmd_status() {

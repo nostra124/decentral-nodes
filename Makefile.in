@@ -159,8 +159,8 @@ check-vectors:
 	fi; \
 	if [ -d tests/vectors ] && command -v prove >/dev/null 2>&1; then \
 		d=$$(mktemp -d); \
-		ln -s $$(pwd)/bin/bitcoin $$d/bitcoin; \
-		for p in libexec/bitcoin/*; do \
+		ln -s $$(pwd)/bin/bitcoin-node $$d/bitcoin; \
+		for p in libexec/bitcoin-node/*; do \
 			[ -e "$$p" ] && ln -s $$(pwd)/$$p $$d/$$(basename $$p); \
 		done; \
 		PATH=$$d:$$PATH prove tests/vectors/*.t; \
@@ -231,7 +231,7 @@ coverage:
 	@rm -rf $(COVERAGE_DIR)
 	@mkdir -p $(COVERAGE_DIR)
 	@kcov \
-		--include-path=$(PWD)/bin/bitcoin,$(PWD)/bin/lightning,$(PWD)/libexec/bitcoin,$(PWD)/libexec/lightning \
+		--include-path=$(PWD)/bin/bitcoin-node,$(PWD)/bin/lightning-node,$(PWD)/libexec/bitcoin-node,$(PWD)/libexec/lightning-node \
 		--exclude-path=$(PWD)/tests \
 		$(COVERAGE_DIR) \
 		bats tests/unit/*.bats >/dev/null

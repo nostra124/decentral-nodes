@@ -3,7 +3,7 @@
 # FEAT-041: per-subcommand man pages.
 #
 # Every verb in `bitcoin modules` plus every command: function in
-# bin/bitcoin must have a corresponding share/man/man1/bitcoin-<verb>.1
+# bin/bitcoin-node must have a corresponding share/man/man1/bitcoin-<verb>.1
 # source file conforming to the 10-section structure (NAME, SYNOPSIS,
 # DESCRIPTION, OPTIONS, EXIT STATUS, FILES, ENVIRONMENT, SEE ALSO,
 # HISTORY; STANDARDS for BIP plugins only).
@@ -23,7 +23,7 @@ setup() {
 # Coverage: every shipping verb has a man-page source file.
 # ---------------------------------------------------------------------------
 
-# Verbs implemented inside bin/bitcoin as command:<name> functions.
+# Verbs implemented inside bin/bitcoin-node as command:<name> functions.
 # Help / version / modules are documented in the parent bitcoin(1)
 # and intentionally do not get their own page.
 # psbt shim removed in 1.24.0 (FEAT-035 alias-removal sweep);
@@ -31,7 +31,7 @@ setup() {
 # bech32 / bech32-verify / bech32-encode / bech32-decode shims
 # removed in 1.24.0 (FEAT-035 alias-removal sweep); canonical
 # homes are bip173 (bech32) and bip350 (bech32m). `help:bech32`
-# survives in bin/bitcoin so `bitcoin help bech32` still cites
+# survives in bin/bitcoin-node so `bitcoin help bech32` still cites
 # the BIPs (FEAT-017), but the verbs themselves error out.
 # descriptor: checksum/verify/derive moved to bip380 in 1.23.0
 # (FEAT-035 Stream B) and the deprecated aliases were removed in
@@ -46,7 +46,7 @@ setup() {
 # price verb added in 1.25.0 (FEAT-040); BTC/EUR oracle.
 COMMAND_VERBS="wallet tx utxo tax price backend descriptor address"
 
-# Verbs implemented as standalone libexec/bitcoin/<name> executables.
+# Verbs implemented as standalone libexec/bitcoin-node/<name> executables.
 # bip173 / bip350 added in 1.23.0 (FEAT-035 Stream C).
 # bip174 added in 1.23.0 (FEAT-035 Stream D).
 # mnemonic-to-seed shim removed in 1.24.0 (FEAT-035 alias-removal

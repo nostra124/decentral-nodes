@@ -2,7 +2,7 @@
 id: FEAT-267
 type: feature
 priority: medium
-status: open
+status: done
 ---
 
 # macOS system daemons prefer MacPorts, with a service-account runnable arbiter

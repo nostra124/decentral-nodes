@@ -276,7 +276,7 @@ command:create() {
 		fi
 		openssl mac -digest sha512 -macopt key:"Bitcoin seed" -binary hmac |
 		basenc --base16 -w64 | tac | sed 2i00 
-	} | basenc --base16 -d | bitcoin bip13 base58-encode
+	} | basenc --base16 -d | bitcoin-node bip13 base58-encode
 }
 
 command:derive() {
@@ -310,7 +310,7 @@ command:derive() {
 		local path="$1" hexdump="$(
 		if test -t 0; then
 			read -p "eXtended key (secret or public): "
-			bitcoin bip13 base58-decode <<<"$REPLY"
+			bitcoin-node bip13 base58-decode <<<"$REPLY"
 		else
 			cat
 		fi | head -c 78 | basenc --base16 -w0)"

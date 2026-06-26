@@ -89,9 +89,9 @@ cmd_create() {
 			sqlite3 "$DB" "INSERT INTO invoices (bolt11, payment_hash, account, amount_msat, expiry, message, state) VALUES ('$(echo "$bolt11" | sed "s/'/''/g")', '$(echo "$hash" | sed "s/'/''/g")', '$(echo "$acct" | sed "s/'/''/g")', $msat, '$expiry_ts', '$(echo "$desc" | sed "s/'/''/g")', 'pending')" 2>/dev/null || true
 	fi
 
-	if [ "$want_qr" -eq 1 ] && [ -x "$SELF_LIBEXEC/lightning/qr" ]; then
+	if [ "$want_qr" -eq 1 ] && [ -x "$SELF_LIBEXEC/lightning-node/qr" ]; then
 		echo
-		"$SELF_LIBEXEC/lightning/qr" "lightning:$bolt11"
+		"$SELF_LIBEXEC/lightning-node/qr" "lightning:$bolt11"
 	fi
 }
 

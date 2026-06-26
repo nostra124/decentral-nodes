@@ -80,9 +80,9 @@ cmd_create() {
 	echo "$bolt12"
 	echo "# offer_id: $offer_id" >&2
 
-	if [ "$want_qr" -eq 1 ] && [ -x "$SELF_LIBEXEC/lightning/qr" ]; then
+	if [ "$want_qr" -eq 1 ] && [ -x "$SELF_LIBEXEC/lightning-node/qr" ]; then
 		echo
-		"$SELF_LIBEXEC/lightning/qr" "lightning:$bolt12"
+		"$SELF_LIBEXEC/lightning-node/qr" "lightning:$bolt12"
 	fi
 }
 
@@ -117,9 +117,9 @@ cmd_pay() {
 
 	if [ "$status" = "complete" ]; then
 		# FEAT-211 — if the operator passed --account, debit it.
-		if [ -n "$account" ] && [ -x "$SELF_LIBEXEC/lightning/ledger" ]; then
+		if [ -n "$account" ] && [ -x "$SELF_LIBEXEC/lightning-node/ledger" ]; then
 			local amount_msat; amount_msat=$(jq -r '.amount_msat // 0' <<<"$result")
-			"$SELF_LIBEXEC/lightning/ledger" add out "$amount_msat" \
+			"$SELF_LIBEXEC/lightning-node/ledger" add out "$amount_msat" \
 				--account "$account" \
 				--payment-hash "$hash" 2>/dev/null || true
 		fi

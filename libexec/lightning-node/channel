@@ -496,7 +496,7 @@ cmd_autopilot_run() {
 	if [ "$dry_run" -eq 1 ]; then
 		echo "would run: lightning fee policy $fee_policy"
 	else
-		"$SELF_LIBEXEC/lightning/_fee" policy "$fee_policy" >/dev/null 2>&1 || {
+		"$SELF_LIBEXEC/lightning-node/_fee" policy "$fee_policy" >/dev/null 2>&1 || {
 			warn "channel autopilot: fee policy '$fee_policy' failed (continuing)"
 		}
 	fi
@@ -525,7 +525,7 @@ cmd_autopilot_run() {
 				actions_log="${actions_log}would-rebalance: $cid pct=$pct%\n"
 			else
 				echo "rebalancing $cid (pct=$pct%, delta=$delta_sat sat)"
-				if "$SELF_LIBEXEC/lightning/_rebalance" "$delta_sat" --max-fee "$would_spend" >/dev/null 2>&1; then
+				if "$SELF_LIBEXEC/lightning-node/_rebalance" "$delta_sat" --max-fee "$would_spend" >/dev/null 2>&1; then
 					budget_used=$(( budget_used + would_spend ))
 					actions_log="${actions_log}rebalanced: $cid pct=$pct% spent=$would_spend\n"
 				else

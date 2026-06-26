@@ -19,7 +19,7 @@ bats_require_minimum_version 1.5.0
 
 setup() {
 	export REPO_ROOT="$BATS_TEST_DIRNAME/../.."
-	export BITCOIN_BIN="$REPO_ROOT/bin/bitcoin"
+	export BITCOIN_BIN="$REPO_ROOT/bin/bitcoin-node"
 	export SELF_LIBEXEC="$REPO_ROOT/libexec"
 	export SELF_QUIET=1
 	export BIP39_PASSPHRASE=TREZOR
@@ -192,8 +192,8 @@ feat037_setup_wallet() {
 # ---------------------------------------------------------------------------
 # Stream D: psbt → bitcoin bip174 (BIP-174 PSBT).
 #
-# Full rename: psbt block moved verbatim from bin/bitcoin into
-# libexec/bitcoin/bip174. command:psbt remains as a deprecated
+# Full rename: psbt block moved verbatim from bin/bitcoin-node into
+# libexec/bitcoin-node/bip174. command:psbt remains as a deprecated
 # alias that emits one warn line and execs bip174. Internal callers
 # in wallet:sign / wallet:send migrated to call bip174 directly
 # (same pattern as Stream A's mnemonic-to-seed fix).
@@ -306,7 +306,7 @@ feat037_setup_wallet() {
 # Stream B: descriptor → bitcoin bip380 (BIP-380 descriptors).
 #
 # Three pure verbs (checksum / verify / derive) move to libexec.
-# `bitcoin descriptor wallet <name>` stays in bin/bitcoin because it
+# `bitcoin descriptor wallet <name>` stays in bin/bitcoin-node because it
 # reads `secret`-managed wallet state; not deprecated yet (re-home in
 # a future PR under `wallet descriptor`).
 # ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ feat037_setup_wallet() {
 }
 
 @test "FEAT-035 B — bitcoin descriptor wallet (no warn — not deprecated)" {
-	# wallet subcommand stays in bin/bitcoin and should NOT emit a
+	# wallet subcommand stays in bin/bitcoin-node and should NOT emit a
 	# deprecation warn line. With no args it errors with a clear
 	# "name required" message on stderr; that's not the warn line.
 	run --separate-stderr "$BITCOIN_BIN" descriptor wallet
@@ -597,7 +597,7 @@ feat037_setup_wallet() {
 @test "FEAT-037 followup — utxo:_freeze_reason returns the reason or empty" {
 	feat037_setup_wallet
 	"$BITCOIN_BIN" utxo freeze alice deadbeef:0 --reason "KYC hold" >/dev/null
-	# Source the dispatcher (bin/bitcoin is source-safe per FEAT-006)
+	# Source the dispatcher (bin/bitcoin-node is source-safe per FEAT-006)
 	# and call the helper directly. Lets us assert the helper without
 	# needing a real backend fixture.
 	got=$(bash -c "source '$BITCOIN_BIN'; utxo:_freeze_reason alice deadbeef:0")
@@ -612,7 +612,7 @@ feat037_setup_wallet() {
 
 @test "FEAT-037 followup — tx:build warn line text mentions 'skipping frozen UTXO'" {
 	# Verify the warn line wording without spinning up a real wallet
-	# build. Greps the function body in bin/bitcoin.
+	# build. Greps the function body in bin/bitcoin-node.
 	grep -qE "skipping frozen UTXO" "$BITCOIN_BIN" \
 		|| { echo "tx:build missing the frozen-UTXO skip warn"; return 1; }
 }
@@ -656,7 +656,7 @@ feat037_setup_wallet() {
 }
 
 @test "FEAT-037 AC#5 — branch-and-bound finds the smallest exact subset" {
-	# Source bin/bitcoin (source-safe per FEAT-006) and exercise the
+	# Source bin/bitcoin-node (source-safe per FEAT-006) and exercise the
 	# BnB inner loop with fixture arrays. For values [10,20,30,40]
 	# and target=50, the smallest exact subset is {20,30} (2 UTXOs),
 	# not {10,40} (also 2 UTXOs — both have count 2, so the loop
