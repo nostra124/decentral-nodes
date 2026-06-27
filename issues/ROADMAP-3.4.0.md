@@ -30,11 +30,16 @@ Seven dispatchers ship with no unit tests (tor/ipfs/storj/joinmarket/
 liquid/stacks/i2pd). Add the shared-contract suite for each + a guard so
 no future `bin/*-node` ships untested.
 
-## FEAT-315 — SIT smoke suites for the service nodes
+## FEAT-315 — SIT smoke suites for the service nodes ⏸ BLOCKED (needs a podman host with egress — see issue)
 **File:** `issues/feature/315-sit-smoke-service-nodes.md`
 **Effort:** medium
 Container suites that install + start + health-check forgejo/webmin/
-usermin end-to-end, leveraging the now-permanent podman (FEAT-309).
+usermin end-to-end. Podman is permanent in cloud sessions (FEAT-309), but
+that is **not sufficient**: run-time containers in the cloud sandbox have
+no outbound network (service installs download from codeberg/forgejo/
+webmin), and the suites need systemd-in-container. Ready to implement on a
+desktop/CI host with egress — see the issue's "Environment prerequisites"
+for the measured constraints.
 
 ## FEAT-052 — promote shellcheck to a blocking CI lint step ⏸ DEFERRED (138 findings; needs focused triage — see issue)
 **File:** `issues/feature/052-shellcheck-blocking-ci.md`
@@ -97,9 +102,32 @@ FEAT-304   backend feature; verify against the SIT derive/receive suite ✅
 
 ## Release gate
 
-- All unit tiers green; shellcheck blocking at `-S warning` (FEAT-052).
-- Installed-tree tier (FEAT-313) green; every `bin/*-node` has a unit
+- [x] All unit tiers green (the split suites + new guards/fixtures).
+- [x] Installed-tree tier (FEAT-313) green; every `bin/*-node` has a unit
   suite (FEAT-314).
-- `tests/sit/suites/02_derive_and_receive.bats` runs without FEAT-304
-  skips.
-- `VERSION` bumped to `3.4.0`.
+- [x] `tests/sit/suites/02_derive_and_receive.bats` un-skipped for
+  FEAT-304 (SIT execution needs a podman host with the rpk siblings —
+  see the suite/README notes).
+- [ ] shellcheck blocking at `-S warning` (FEAT-052) — **deferred**
+  (138 findings; unscheduled).
+- [ ] SIT smoke for the service nodes (FEAT-315) — **blocked** on a
+  podman host with egress.
+- [ ] `VERSION` bumped to `3.4.0`.
+
+## Release status (2026-06-27)
+
+The CI-verifiable scope of this milestone is **complete and green**:
+BUG-058, FEAT-313, FEAT-314, FEAT-051, FEAT-050, FEAT-053, FEAT-304 are
+all merged. The two remaining items (FEAT-052, FEAT-315) and FEAT-304's
+SIT *execution* proof are blocked by the cloud sandbox (deferred
+shellcheck triage; no run-time container egress; missing rpk siblings) —
+they need a desktop/CI host.
+
+**Open release-sequencing question for a human:** `VERSION` is still
+`3.3.2`, yet the `3.3.3`, `3.3.4`, and `3.5.0` roadmaps all describe work
+already merged to `master` (the audit in CLAUDE.md §13 flagged this
+backfill). `master` *already contains* the 3.5.0 service nodes, so simply
+labelling it `3.4.0` would mislabel the tree. Decide the version
+sequence (e.g. fast-forward straight to `3.5.0`, or cut `3.3.3 → 3.4.0 →
+3.5.0` in order) before bumping `VERSION` per `skills/version.md`. This
+was intentionally left to a maintainer rather than chosen autonomously.

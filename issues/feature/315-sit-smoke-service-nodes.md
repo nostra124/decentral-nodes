@@ -35,3 +35,33 @@ These are the first SIT suites for the self-hosting nodes; keep them fast
 (single-container, no external network beyond the package repo) and
 deterministic. Builds on FEAT-309 (podman) and complements the
 unit-level coverage.
+
+## Environment prerequisites (measured 2026-06-27)
+
+Authoring + running this needs a host the Claude Code cloud sandbox does
+**not** provide, even with FEAT-309's podman in place — confirmed by
+direct probing:
+
+1. **Outbound network from run-time containers.** `podman run`
+   containers in the cloud sandbox have no external egress (the agent
+   proxy is host-loopback-only; `codeberg.org` / `dl.forgejo.org` /
+   `download.webmin.com` are unreachable at both build and run time).
+   Each node's `daemon install` downloads from exactly those hosts, so
+   the install step can't complete there. Develop/run on a desktop or a
+   CI runner with unrestricted egress.
+2. **systemd in the container.** `forgejo`/`webmin`/`usermin` install as
+   systemd units; the existing SIT harness (clightning) uses a custom
+   entrypoint, not systemd. The smoke container must either run systemd
+   (`podman run --systemd=true` on a cgroups-v2 host) or the suites must
+   drive the daemons' non-systemd/`--user` run path. Decide this when
+   authoring.
+3. **Health-check seams.** forgejo `:3000` (HTTP setup page), webmin
+   `:10000` / usermin `:20000` (HTTPS self-signed — poll with
+   `curl -k`).
+
+Because the suites cannot be executed in the cloud sandbox, they were
+**not** authored blind here (unrun container/systemd test code would fake
+coverage). This issue is ready to implement on a podman host with egress;
+the patterns to mirror are `tests/sit/podman/Dockerfile.bitcoind` and
+`tests/sit/helpers.bash`, and the soft-skip + `make check-sit` wiring is
+already in place.
