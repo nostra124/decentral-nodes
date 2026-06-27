@@ -121,6 +121,28 @@ curl_fixture() {
 	printf '%s' "$body" > "$CURL_STUB_RESPONSES/$key"
 }
 
+# FEAT-304 — bitcoind backend. The backend talks JSON-RPC over HTTP to the
+# configured rpc.url; for tests we use its fixture seam
+# ($BITCOIN_BITCOIND_RPC_FIXTURE, a dir of <method>.json) so no node, curl,
+# or config read is exercised — the same pattern the fulcrum backend uses.
+# `bitcoind_rpc_fixture <method> <envelope>` sets a canned JSON-RPC reply
+# (pass the full envelope, e.g. '{"result":…,"error":null}'). A method with
+# no fixture makes the RPC call fail, modelling an unreachable node.
+setup_bitcoind_backend_env() {
+	export BITCOIN_BITCOIND_RPC_FIXTURE="$BATS_TMPDIR/bitcoind-rpc"
+	rm -rf "$BITCOIN_BITCOIND_RPC_FIXTURE"
+	mkdir -p "$BITCOIN_BITCOIND_RPC_FIXTURE"
+	export XDG_CONFIG_HOME="$BATS_TMPDIR/xdg-config-bitcoind"
+	rm -rf "$XDG_CONFIG_HOME"
+	mkdir -p "$XDG_CONFIG_HOME"
+	export BITCOIN_BACKEND=bitcoind
+}
+
+bitcoind_rpc_fixture() {
+	local method="$1" body="$2"
+	printf '%s' "$body" > "$BITCOIN_BITCOIND_RPC_FIXTURE/$method.json"
+}
+
 # ---------------------------------------------------------------------------
 # FEAT-012 (extend, 1.12.0) — backend estimate-fee. Fourth verb on the
 # backend abstraction: returns the recommended sat/vB rate for a given

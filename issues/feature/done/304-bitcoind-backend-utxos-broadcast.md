@@ -2,7 +2,8 @@
 id: FEAT-304
 type: feature
 priority: medium
-status: open
+status: done
+milestone: 3.4.0
 ---
 
 # Implement the bitcoind backend's `get-address-utxos` + `broadcast`
@@ -47,3 +48,33 @@ pending this.
 2. `wallet utxos` lists the funded outpoint.
 3. `wallet send` broadcasts via the bitcoind backend and returns a txid.
 4. The `mempool`/`fulcrum` backends are unchanged.
+
+## Resolution
+
+`bin/bitcoin-node`:
+- `backend:_bitcoind_rpc <method> <params>` — a JSON-RPC-over-HTTP client
+  that reads `rpc.url` / `rpc.user` / `rpc.pass` via the `config` plugin
+  (an allowed sibling per CLAUDE.md §4) and POSTs with `curl` + basic auth.
+  Carries a `$BITCOIN_BITCOIND_RPC_FIXTURE` test seam mirroring the fulcrum
+  backend, so the unit suite exercises the parsing without a node or curl.
+- `backend:bitcoind:get-address-utxos <addr>` — `scantxoutset start
+  '[{"desc":"addr(<addr>)"}]'`, reshaping the BTC-denominated `.result.unspents`
+  into the sat-denominated `{txid,vout,value,status}` shape the wallet already
+  consumes from the mempool/fulcrum backends.
+- `backend:bitcoind:broadcast <hex>` — `sendrawtransaction <hex>`, surfacing
+  the JSON-RPC error message on rejection and validating the returned txid.
+- `chain-height`/`estimate-fee`/`get-address-txs` deliberately remain
+  "not implemented" stubs (out of this feature's scope; `wallet send` already
+  falls back to a default fee rate when `estimate-fee` is unavailable, and a
+  full address-tx history needs an index bitcoind lacks by default).
+
+AC coverage:
+- [x] (4) `mempool`/`fulcrum` backends untouched.
+- [x] (1–3) get-address-utxos + broadcast implemented and unit-tested
+      (`tests/unit/bitcoin-02.bats`, FEAT-304 cases: shape mapping, empty set,
+      arg validation, transport failure, RPC-error reply, txid round-trip,
+      node rejection).
+- [~] (1–3) SIT proof: the three `02_derive_and_receive` flows are
+      **un-skipped**, but SIT needs podman + a regtest container, which the
+      unit-only CI and this cloud sandbox don't provide. **Run
+      `make check-sit` on a desktop with podman to confirm end-to-end.**
