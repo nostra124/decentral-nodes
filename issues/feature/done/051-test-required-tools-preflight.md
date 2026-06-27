@@ -1,6 +1,6 @@
 # FEAT-051 — required-tools preflight for the test suites
 
-**Status:** open
+**Status:** done
 **Milestone:** unscheduled
 
 ## Summary

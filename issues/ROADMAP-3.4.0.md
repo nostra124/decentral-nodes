@@ -36,15 +36,15 @@ no future `bin/*-node` ships untested.
 Container suites that install + start + health-check forgejo/webmin/
 usermin end-to-end, leveraging the now-permanent podman (FEAT-309).
 
-## FEAT-052 — promote shellcheck to a blocking CI lint step
+## FEAT-052 — promote shellcheck to a blocking CI lint step ⏸ DEFERRED (138 findings; needs focused triage — see issue)
 **File:** `issues/feature/052-shellcheck-blocking-ci.md`
 **Effort:** small (flip `continue-on-error`, clear residual findings)
 Shellcheck runs advisory (`continue-on-error: true`) today. Make it a
 blocking gate at `-S warning` once the tree is clean. Sequence it after
 BUG-056 so the `-node` test fixes don't surface as fresh findings mid-flip.
 
-## FEAT-051 — required-tools preflight for the test suites
-**File:** `issues/feature/051-test-required-tools-preflight.md`
+## FEAT-051 — required-tools preflight for the test suites ✅ DONE
+**File:** `issues/feature/done/051-test-required-tools-preflight.md`
 **Effort:** small (a `setup_suite` probe per tier)
 Fail fast with a clear message when a suite's external tools (`xxd`,
 `dc`, `openssl`, …) are missing, instead of opaque mid-test errors.
