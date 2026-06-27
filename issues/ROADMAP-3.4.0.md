@@ -23,8 +23,8 @@ The unit tests only exercise the dev tree, which let BUG-058 ship
 asserts every dispatcher resolves a real verb + prints the right VERSION
 from the staged prefix. Depends on BUG-058 (3.3.4).
 
-## FEAT-314 — unit-test parity: a suite for every node dispatcher
-**File:** `issues/feature/314-unit-test-parity-all-nodes.md`
+## FEAT-314 — unit-test parity: a suite for every node dispatcher ✅ DONE
+**File:** `issues/feature/done/314-unit-test-parity-all-nodes.md`
 **Effort:** medium
 Seven dispatchers ship with no unit tests (tor/ipfs/storj/joinmarket/
 liquid/stacks/i2pd). Add the shared-contract suite for each + a guard so

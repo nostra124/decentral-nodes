@@ -45,6 +45,21 @@ setup() {
 	fi
 }
 
+@test "FEAT-314: every bin/*-node has a unit suite" {
+	# A node is covered by tests/unit/<node>.bats, or by its base-name
+	# suite (bitcoin-node -> bitcoin.bats, lightning-node -> lightning.bats,
+	# fulcrum/monero likewise).
+	local path node base fail=0
+	for path in "$REPO"/bin/*-node; do
+		node="$(basename "$path")"
+		base="${node%-node}"
+		if [ ! -f "$BATS_TEST_DIRNAME/$node.bats" ] && [ ! -f "$BATS_TEST_DIRNAME/$base.bats" ]; then
+			echo "no unit suite for $node (expected $node.bats or $base.bats)"; fail=1
+		fi
+	done
+	[ "$fail" -eq 0 ]
+}
+
 @test "BUG-056: each -node dispatcher exists and 'version' prints VERSION" {
 	local v; v="$(cat "$REPO/VERSION")"
 	for cmd in bitcoin-node lightning-node fulcrum-node monero-node; do

@@ -2,7 +2,7 @@
 id: FEAT-314
 type: feature
 priority: medium
-status: open
+status: done
 milestone: 3.4.0
 ---
 
