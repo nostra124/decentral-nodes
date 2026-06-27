@@ -40,6 +40,28 @@ The make target soft-skips when `podman` isn't installed,
 so CI without container support reports a clean
 "skipping" rather than a failure.
 
+> **Podman present ≠ SIT runnable (cloud-sandbox limits, measured
+> 2026-06-27).** The Claude Code on the web SessionStart hook
+> (FEAT-309) installs `podman`, but two further constraints mean the
+> SIT tiers still cannot complete in that sandbox — they need a
+> desktop / CI host with real egress:
+> - **Run-time containers have no outbound network.** `podman run`
+>   containers can't reach external hosts (the agent proxy listens on
+>   the host loopback, outside the container netns). Direct fetches to
+>   `codeberg.org` / `dl.forgejo.org` / `download.webmin.com` fail at
+>   both build *and* run time, so any suite whose flow downloads a
+>   service (the FEAT-315 `*-node daemon install` step) can't proceed.
+>   `apt` works at build time only because the Debian mirror is
+>   proxied. Run `make check-sit` where containers have unrestricted
+>   egress.
+> - **The bitcoin host-side suites need the rpk sibling stack.**
+>   `02_derive_and_receive.bats` (the FEAT-304 proof) calls
+>   `sit:install_bitcoin`, which needs `bitcoin-cli` on the host plus
+>   the `account` / `secret` sibling commands (`bitcoin wallet new`
+>   stores the seed via `secret`). Those are separate `nostra124/rpk`
+>   packages, absent from a bare cloud sandbox. Install the rpk
+>   siblings + Bitcoin Core first.
+
 Internally it does:
 
     podman build -t lightning-regtest    -f tests/sit/podman/Dockerfile.regtest    tests/sit
