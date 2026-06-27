@@ -101,4 +101,4 @@ Optional add-ons (operator opts in explicitly):
 ## 8. Versioning
 
 Semver. The root `VERSION` file is the source of truth.
-`tests/unit/lightning.bats` is the contract.
+`tests/unit/lightning-*.bats` is the contract.

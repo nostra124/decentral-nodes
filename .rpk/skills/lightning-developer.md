@@ -69,7 +69,7 @@ cascading failures when one verb changes.
    script that calls `lightning-cli` inline. Cite the BOLT / LUD at
    the top.
 3. **Write the bats test first** (TDD): add a `@test` in
-   `tests/unit/lightning.bats` that fails before the verb exists.
+   `tests/unit/lightning-*.bats` that fails before the verb exists.
 4. **Implement** the verb until the test passes.
 5. **Write the man page**: `share/man/man1/lightning-<verb>.1`. The
    bats suite asserts every dispatchable verb (excluding `_*`
@@ -120,9 +120,9 @@ verb's CLI surface changes, update its man page in the same PR.
 ## Testing
 
 ```sh
-make test                          # bats tests/unit/lightning.bats
-bats tests/unit/lightning.bats     # same, direct
-bats tests/unit/lightning.bats -f '<pattern>'  # single test
+make test                          # bats tests/unit/lightning-*.bats
+bats tests/unit/lightning-*.bats     # same, direct
+bats tests/unit/lightning-*.bats -f '<pattern>'  # single test
 ```
 
 Tests follow the TDD-first discipline from `rpk skills rpk bugs`:
@@ -189,6 +189,6 @@ Use `rpk skills rpk audit` to verify traceability before a release.
 ## Where to read more
 
 - `CLAUDE.md` — package scope, no-shared-lib policy, man page rule.
-- `tests/unit/lightning.bats` — the contract suite; semver anchor.
+- `tests/unit/lightning-*.bats` — the contract suite; semver anchor.
 - `share/doc/lightning/standards/` — vendored specs to cite.
 - `man rpk` — full rpk CLI reference.

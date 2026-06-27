@@ -44,7 +44,7 @@ runtime. BIP plugins call only their primitives (openssl for hashing,
 awk for encoding, dc for arithmetic, xxd for hex I/O); never a shared
 crypto-helpers library.
 
-The dependency boundary is enforced by `tests/unit/bitcoin.bats`
+The dependency boundary is enforced by `tests/unit/bitcoin-*.bats`
 (FEAT-195); any re-introduction of forbidden sibling calls fails CI.
 
 ## 5. What is intentionally duplicated

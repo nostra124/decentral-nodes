@@ -160,7 +160,7 @@ lives in `skills/automerging.md` §3b.1.
 
 | You wrote a … | Put it in | Then |
 |---|---|---|
-| Regression for a fixed bug (CLI contract) | `tests/unit/bitcoin.bats` | Reference the BUG-NNN id in a comment above the test |
+| Regression for a fixed bug (CLI contract) | `tests/unit/bitcoin-NN.bats` (the part that owns that feature) | Reference the BUG-NNN id in a comment above the test |
 | BIP-vector translation | `tests/vectors/<bip>.t` | Add to plan count (FEAT-022 makes this automatic) |
 | Container scenario | `tests/sit/<scenario>.bats` | Document the regtest invariants it relies on |
 | Long-running / multi-wallet scenario | `tests/pit/<scenario>.bats` | Add a `README.md` if it's the first PIT file |
@@ -198,6 +198,37 @@ length, missing magic, truncated tail). **When you add a new hand-typed
 PSBT/tx fixture, add an `assert_psbt_wellformed` case for it there** —
 that is what turns a future off-by-one into an immediate local red
 instead of a silent ship.
+
+### 4.2 Split suites + per-family libs (FEAT-053)
+
+The three largest suites were split from single monolithic files into
+numbered parts, each ≤50 `@test`s, so navigation/review/selective runs
+stay tractable and merge conflicts don't concentrate:
+
+| Was | Now | Shared scaffolding |
+|---|---|---|
+| `bitcoin.bats` (235) | `bitcoin-01..05.bats` | `tests/unit/lib/bitcoin.bash` |
+| `streamline.bats` (175) | `streamline-01..04.bats` | `tests/unit/lib/streamline.bash` |
+| `lightning.bats` (887) | `lightning-01..18.bats` | `tests/unit/lib/lightning.bash` |
+
+Each part is a thin `.bats` file: shebang, `bats_require_minimum_version`,
+`load lib/<family>`, then its `@test` blocks. **All `setup()`/`teardown()`
+and fixture/helper functions live in the family's `lib/<family>.bash`**
+(definitions only — nothing runs at source time) so they are defined once
+and shared by every part. The parts preserve the original feature
+ordering, so `…-01` → `…-NN` reads as contiguous feature areas.
+
+Rules when touching these:
+- Add a new test to the part that owns its feature; if a part crosses ~55
+  tests, start the next-numbered part rather than overflowing one file.
+- Put any new shared fixture/helper in `lib/<family>.bash`, not inline in
+  a part (keeps it DRY and visible to every part).
+- A new `bin/*-node` dispatcher still needs a suite — `<node>.bats`,
+  `<base>.bats`, or `<base>-NN.bats` parts; the `FEAT-314` guard in
+  `dispatcher-paths.bats` enforces this.
+
+CI runs `bats tests/unit/*.bats`, which globs the parts automatically — no
+workflow change is needed when you add a part.
 
 ## 5. Common failures and remedies
 

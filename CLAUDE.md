@@ -31,7 +31,7 @@ out to each other** (§4); the on-chain leg of a channel
 open is handled by clightning's own bitcoind connection.
 
 The combined contract is the union of
-`tests/unit/bitcoin.bats` and `tests/unit/lightning.bats`
+`tests/unit/bitcoin-*.bats` and `tests/unit/lightning-*.bats`
 (plus `tests/python/` for the CGI layer).
 
 ## 1. Scope
@@ -96,7 +96,7 @@ runtime. BIP plugins call only their own primitives
 xxd for hex I/O); never a shared crypto-helpers library.
 
 The dependency boundary is enforced by two bats tests in
-`tests/unit/bitcoin.bats` (FEAT-195, closed 1.30.0).
+`tests/unit/bitcoin-*.bats` (FEAT-195, closed 1.30.0).
 Forbidden sibling calls (`cache`, `data`, `hosts`, `scripts`, `task`)
 fail CI if re-introduced.
 
@@ -125,7 +125,7 @@ need address derivation.
 Semver. The single semver string in `VERSION` at the
 repo root is the source of truth; `bin/bitcoin` reads
 it at runtime and `make install` copies it to
-`$DATADIR/bitcoin/version`. `tests/unit/bitcoin.bats`
+`$DATADIR/bitcoin/version`. `tests/unit/bitcoin-*.bats`
 is the contract; the BIP vector tests under
 `tests/vectors/` are the deeper regression baseline.
 

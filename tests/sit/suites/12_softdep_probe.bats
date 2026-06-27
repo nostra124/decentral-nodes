@@ -6,7 +6,7 @@
 # `lightning` on PATH, and a probe can't hide one of them without also
 # hiding the `lightning` dispatcher itself — so these probes skip cleanly
 # when the dependency is present. The degradation paths themselves are
-# covered hermetically by tests/unit/lightning.bats (install-hint + exit
+# covered hermetically by tests/unit/lightning-*.bats (install-hint + exit
 # codes), which can stub PATH precisely. (BUG-044.)
 
 @test "lightning node info exits 127 with install hint when lightning-cli is hidden" {

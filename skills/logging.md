@@ -78,7 +78,7 @@ Before a change leaves the checkout, walk every new branch and ask:
    branch?
 
 If either answer is no, add the log before pushing. This is
-non-negotiable in the same way that `tests/unit/bitcoin.bats` is the
+non-negotiable in the same way that `tests/unit/bitcoin-*.bats` is the
 contract: silent failures undermine the whole testing pyramid
 because the test never even tells you what to assert against.
 
