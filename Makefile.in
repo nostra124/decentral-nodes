@@ -39,11 +39,13 @@ REL_SYSCONFDIR = $(patsubst $(PREFIX)/%,%,$(SYSCONFDIR))
 REL_DATADIR    = $(patsubst $(PREFIX)/%,%,$(DATADIR))
 REL_MANDIR     = $(patsubst $(PREFIX)/%,%,$(MANDIR))
 
-# The commands this one package ships. Each has bin/<cmd>, libexec/<cmd>/,
-# share/<cmd>/, share/doc/<cmd>/. monero (FEAT-299) is the fourth.
-# forgejo-node (self-hosted Git forge + CI runners) uses the -node name
-# to match its bin/ and libexec/ directories.
-PACKAGES = bitcoin lightning fulcrum monero forgejo-node webmin-node usermin-node
+# The commands this one package ships — the `-node` dispatcher names, which
+# match bin/<cmd> and libexec/<cmd>/ (BUG-058). Runtime *data* lives under a
+# separate namespace (share/bitcoin, share/lightning, …) that is hardcoded
+# in the verbs and copied wholesale at install time, independent of these
+# command names, so the version file (share/<cmd>/version) and the data dir
+# coexist.
+PACKAGES = bitcoin-node lightning-node fulcrum-node monero-node liquid-node stacks-node tor-node ipfs-node storj-node joinmarket-node i2pd-node forgejo-node webmin-node usermin-node
 
 BUILD_DIR = build/$(PACKAGE)
 
@@ -70,22 +72,22 @@ install:
 	@mkdir -p $(BUILD_DIR)/$(REL_BINDIR) \
 	          $(BUILD_DIR)/$(REL_SYSCONFDIR)/bash_completion.d \
 	          $(BUILD_DIR)/$(REL_MANDIR)/man1
-	@for p in $(PACKAGES); do \
-		mkdir -p $(BUILD_DIR)/$(REL_LIBEXECDIR)/$$p \
-		         $(BUILD_DIR)/$(REL_DATADIR)/doc/$$p \
-		         $(BUILD_DIR)/$(REL_DATADIR)/$$p; \
-	done
 	@cp -a bin/* $(BUILD_DIR)/$(REL_BINDIR)/
+	@# libexec verbs: one dir per command (the -node dirs).
 	@for p in $(PACKAGES); do \
 		if [ -d libexec/$$p ]; then \
+			mkdir -p $(BUILD_DIR)/$(REL_LIBEXECDIR)/$$p; \
 			cp -a libexec/$$p/* $(BUILD_DIR)/$(REL_LIBEXECDIR)/$$p/; \
 		fi; \
-		if [ -d share/doc/$$p ]; then \
-			cp -a share/doc/$$p/* $(BUILD_DIR)/$(REL_DATADIR)/doc/$$p/; \
-		fi; \
-		if [ -d share/$$p ]; then \
-			cp -a share/$$p/* $(BUILD_DIR)/$(REL_DATADIR)/$$p/; \
-		fi; \
+	done
+	@# Runtime data + docs: copy every share/ namespace as-is (bitcoin,
+	@# lightning, liquid, monero, doc, …). These are the project data
+	@# namespaces the verbs hardcode (share/bitcoin/bip39, …), distinct from
+	@# the -node command names — BUG-058. `man` is staged separately below.
+	@for d in share/*/; do \
+		name=$$(basename "$$d"); \
+		[ "$$name" = man ] && continue; \
+		cp -a "$$d" $(BUILD_DIR)/$(REL_DATADIR)/; \
 	done
 	@if [ -d etc/bash_completion.d ]; then \
 		cp -a etc/bash_completion.d/* \
@@ -122,7 +124,7 @@ install:
 	# when invoked as the installed entry, and to ./VERSION in a dev tree.
 	@if [ -f VERSION ]; then \
 		for p in $(PACKAGES); do \
-			install -m 644 VERSION $(BUILD_DIR)/$(REL_DATADIR)/$$p/version; \
+			install -D -m 644 VERSION $(BUILD_DIR)/$(REL_DATADIR)/$$p/version; \
 		done; \
 	fi
 	@# stow refuses a non-existent target, so ensure $(PREFIX) exists for a

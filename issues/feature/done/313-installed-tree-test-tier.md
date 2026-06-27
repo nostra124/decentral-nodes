@@ -2,7 +2,7 @@
 id: FEAT-313
 type: feature
 priority: high
-status: open
+status: done
 milestone: 3.4.0
 ---
 

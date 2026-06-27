@@ -111,8 +111,8 @@ fixdir() {  # create a fixture dir with one <method>.json; echo its path
 	# $PREFIX` left files at $PREFIX$PREFIX/… and never on PATH.
 	[ -f "$REPO/build/decentral-nodes/bin/bitcoin-node" ]
 	[ -f "$REPO/build/decentral-nodes/bin/fulcrum-node" ]
-	[ -d "$REPO/build/decentral-nodes/libexec/bitcoin" ]
-	[ -d "$REPO/build/decentral-nodes/libexec/fulcrum" ]
+	[ -d "$REPO/build/decentral-nodes/libexec/bitcoin-node" ]
+	[ -d "$REPO/build/decentral-nodes/libexec/fulcrum-node" ]
 	# …and `stow -t $PREFIX` installs directly into $PREFIX.
 	[ -x "$prefix/bin/bitcoin-node" ]
 	[ -x "$prefix/bin/fulcrum-node" ]

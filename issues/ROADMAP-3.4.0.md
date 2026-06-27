@@ -15,8 +15,8 @@ while the unit gate is red.
 
 ---
 
-## FEAT-313 — installed-tree (post-`make install`) test tier
-**File:** `issues/feature/313-installed-tree-test-tier.md`
+## FEAT-313 — installed-tree (post-`make install`) test tier ✅ DONE
+**File:** `issues/feature/done/313-installed-tree-test-tier.md` (landed early with BUG-058)
 **Effort:** small–medium
 The unit tests only exercise the dev tree, which let BUG-058 ship
 (installed nodes with no verbs). Add a tier that runs `make install` and

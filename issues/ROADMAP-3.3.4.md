@@ -5,8 +5,8 @@ behaviour (semver patch).
 
 ---
 
-## BUG-058 — `make install` ships no verbs for the `-node` commands
-**File:** `issues/bug/058-install-node-rename-incomplete.md`
+## BUG-058 — `make install` ships no verbs for the `-node` commands ✅ DONE
+**File:** `issues/bug/done/058-install-node-rename-incomplete.md`
 **Effort:** medium (packaging rename completion + `share/` dir moves +
 an installed-tree regression test)
 The `-node` rename never reached `PACKAGES`/`.rpk` `COMMANDS`/`share/`, so
