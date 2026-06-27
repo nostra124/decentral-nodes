@@ -1,0 +1,63 @@
+.TH USERMIN-NODE 1 "2026" "decentral-nodes" "User Commands"
+.SH NAME
+usermin-node \- install and operate a Usermin web interface service
+.SH SYNOPSIS
+.B usermin-node
+.I command
+.RI [ subcommand ]
+.RI [ args ]
+.SH DESCRIPTION
+.B usermin-node
+installs and operates
+.B Usermin
+(https://www.webmin.com/usermin.html), Webmin's per-user sibling: a
+simplified web interface where ordinary (non-root) accounts read mail,
+change their password, manage SSH keys, edit home-directory files, and
+set up cron. It shares Webmin's mini HTTPS server
+.RB ( miniserv.pl )
+but listens on port 20000.
+.PP
+The command is a thin dispatcher: each verb maps to an executable under
+.IR libexec/usermin-node/ .
+The
+.B daemon
+verb carries the weight (install + lifecycle).
+.PP
+Usermin's miniserv starts as root to authenticate any local account,
+then drops to that user for the session \(em so end users get only their
+own files and mail, not host administration. Pair it with
+.BR webmin-node (1)
+for the root administration UI. Restrict access with the firewall and/or
+.I miniserv.conf
+.B allow=
+rules, and front it with a reverse proxy for a public hostname. Usermin
+is packaged for Linux (apt/dnf) only; macOS is not supported by this
+node.
+.SH COMMANDS
+.TP
+.B version
+Print the package version.
+.TP
+.B daemon " " \fIsubcommand\fR
+Install and run the Usermin service. See
+.BR usermin-node-daemon (1).
+.TP
+.B help
+Print the top-level help.
+.SH EXAMPLES
+.PP
+.RS
+.nf
+usermin-node daemon install
+usermin-node daemon enable && usermin-node daemon start
+# then open https://127.0.0.1:20000
+.fi
+.RE
+.SH SEE ALSO
+.BR usermin-node-daemon (1),
+.BR webmin-node (1)
+.br
+https://www.webmin.com/usermin.html
+.SH HISTORY
+Introduced in the decentral-nodes stack alongside the other Tier 3
+self-hosting nodes.

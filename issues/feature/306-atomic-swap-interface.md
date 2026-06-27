@@ -6,7 +6,7 @@ status: draft
 depends_on:
   - FEAT-012  # bitcoin backend abstraction
   - FEAT-183  # lightning daemon
-milestone: 3.5.0
+milestone: 3.6.0
 ---
 
 # Atomic swap interface (BTC ↔ ETH, L-BTC ↔ BTC)
@@ -117,7 +117,7 @@ Each swap client:
 
 ## Implementation Phases
 
-### Phase 1: Thorchain BTC ↔ ETH (3.5.0)
+### Phase 1: Thorchain BTC ↔ ETH (3.6.0)
 
 Thorchain is the most mature cross-chain DEX:
 - Native BTC support (no wrapped assets)
@@ -135,7 +135,7 @@ bitcoin swap btc-eth 0.1 0x1234... --service thorchain
 # 6. Report completion
 ```
 
-### Phase 2: Boltz LN ↔ L-BTC (3.6.0)
+### Phase 2: Boltz LN ↔ L-BTC (3.7.0)
 
 Boltz submarine swaps for Lightning ↔ Liquid:
 - User sends LN invoice
@@ -152,7 +152,7 @@ lightning swap ln-lbtc 1000000 lq1... --service boltz
 # 5. Boltz releases L-BTC to user's address
 ```
 
-### Phase 3: Liquality support (3.7.0)
+### Phase 3: Liquality support (3.8.0)
 
 Liquality is an atomic swap protocol:
 - No trusted third party

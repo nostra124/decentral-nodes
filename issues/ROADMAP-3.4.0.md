@@ -9,11 +9,32 @@ while the unit gate is red.
 > milestones is already implemented in the tree but was never cut as a
 > release (`VERSION` is still `3.3.2`). Those items have been moved to
 > `issues/feature/done/` (see the audit below); this roadmap lists only
-> what remains genuinely open for the next minor. The atomic-swap work
-> (FEAT-306) keeps its own draft plan at 3.5.0+ and is the milestone
-> after this one.
+> what remains genuinely open for the next minor. The shipped self-hosting
+> nodes are tracked in `ROADMAP-3.5.0.md`; the atomic-swap work (FEAT-306)
+> is at 3.6.0.
 
 ---
+
+## FEAT-313 — installed-tree (post-`make install`) test tier
+**File:** `issues/feature/313-installed-tree-test-tier.md`
+**Effort:** small–medium
+The unit tests only exercise the dev tree, which let BUG-058 ship
+(installed nodes with no verbs). Add a tier that runs `make install` and
+asserts every dispatcher resolves a real verb + prints the right VERSION
+from the staged prefix. Depends on BUG-058 (3.3.4).
+
+## FEAT-314 — unit-test parity: a suite for every node dispatcher
+**File:** `issues/feature/314-unit-test-parity-all-nodes.md`
+**Effort:** medium
+Seven dispatchers ship with no unit tests (tor/ipfs/storj/joinmarket/
+liquid/stacks/i2pd). Add the shared-contract suite for each + a guard so
+no future `bin/*-node` ships untested.
+
+## FEAT-315 — SIT smoke suites for the service nodes
+**File:** `issues/feature/315-sit-smoke-service-nodes.md`
+**Effort:** medium
+Container suites that install + start + health-check forgejo/webmin/
+usermin end-to-end, leveraging the now-permanent podman (FEAT-309).
 
 ## FEAT-052 — promote shellcheck to a blocking CI lint step
 **File:** `issues/feature/052-shellcheck-blocking-ci.md`
@@ -57,16 +78,21 @@ balance/utxos/send`) currently skipped on FEAT-304.
 ## Recommended order
 
 ```
+FEAT-313   installed-tree tier — lock in the BUG-058 fix first
+FEAT-314   per-node unit parity (+ the no-untested-node guard)
 FEAT-052   cheap win once BUG-056 lands; locks the lint gate
 FEAT-051   preflight makes the next two easier to develop
 FEAT-050   fixture guard
 FEAT-053   big mechanical split — do on a green, guarded suite
+FEAT-315   SIT smoke for the service nodes (needs podman)
 FEAT-304   backend feature; verify against the SIT derive/receive suite
 ```
 
 ## Release gate
 
 - All unit tiers green; shellcheck blocking at `-S warning` (FEAT-052).
+- Installed-tree tier (FEAT-313) green; every `bin/*-node` has a unit
+  suite (FEAT-314).
 - `tests/sit/suites/02_derive_and_receive.bats` runs without FEAT-304
   skips.
 - `VERSION` bumped to `3.4.0`.

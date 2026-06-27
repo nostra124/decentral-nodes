@@ -28,8 +28,8 @@ are still `skip`-ped against the live stack. Now unblockable in cloud
 sessions thanks to the podman SessionStart hook (the container tiers can
 actually run). Bring the three suites green end-to-end.
 
-## BUG-057 — `kcov coverage` CI job fails (exit 2; stale build dir)
-**File:** `issues/bug/057-kcov-coverage-job.md`
+## BUG-057 — `kcov coverage` CI job fails (exit 2; stale build dir) ✅ DONE
+**File:** `issues/bug/done/057-kcov-coverage-job.md`
 **Effort:** small–medium (workflow path fix + kcov/bats broken-pipe diagnosis)
 Surfaced once BUG-056 turned the gate green: the `needs: test` coverage
 job ran for the first time and failed (`make coverage` exits 2 under

@@ -10,7 +10,7 @@ VERSION=$1
 # the rpk identity; lightning was merged in from nostra124/lightning;
 # fulcrum (FEAT-055..060), monero (FEAT-299..), stacks, and others
 # slot into this same list.
-COMMANDS="bitcoin lightning fulcrum monero forgejo-node"
+COMMANDS="bitcoin lightning fulcrum monero forgejo-node webmin-node usermin-node"
 
 test -z "$VERSION" && VERSION=$(rpk versions | tail -1)
 

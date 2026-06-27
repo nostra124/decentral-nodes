@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+
+############################################################################
+# usermin daemon — system Usermin web interface service.
+#
+# Tier 3 (Self-hosting) tool. Installs and operates Usermin
+# (https://www.webmin.com/usermin.html), Webmin's per-user sibling: a
+# simplified web UI where ordinary accounts read mail, change their
+# password, manage SSH keys, edit home-dir files, and set up cron.
+#
+# Usermin shares Webmin's mini HTTPS server (miniserv.pl). Its miniserv
+# starts as root so it can authenticate any local account and then drops
+# to that user for the session — so end users get only their own access,
+# not host administration (that is Webmin's job).
+#
+# Layout (Linux, official package):
+#   binary/libs  /usr/share/usermin
+#   config       /etc/usermin (miniserv.conf, miniserv.users)
+#   logs         /var/log/usermin/miniserv.log
+#   service      systemd unit `usermin` (installed by the package)
+#   web UI       https://127.0.0.1:20000
+#
+# Usermin is packaged for Linux (apt/dnf) only; macOS is not supported by
+# this node (no launchd package upstream).
+############################################################################
+
+[ -n "$SELF_DEBUG" ] && set -vx
+
+SELF=$(basename "$0")
+
+die()   { echo "$1" >&2; exit "${2:-1}"; }
+fatal() { echo "$SELF: fatal - $1" >&2; exit "${2:-1}"; }
+debug() { [ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2; }
+info()  { if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi; }
+warn()  { echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2; }
+error() { echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2; }
+
+is_macos() { [ "$(uname -s)" = "Darwin" ]; }
+
+# --- commands ----------------------------------------------------------------
+
+usage() {
+	cat >&2 <<EOF
+usage: usermin-node daemon <subcommand> [args]
+
+   Lifecycle of the Usermin web interface service.
+
+   lifecycle:
+     start                       start the usermin service
+     stop                        stop the usermin service
+     restart                     stop + start
+     status                      health check
+     monitor                     tail the miniserv log
+
+   setup:
+     install [--from auto|apt|dnf]
+                                 add the official repo and install usermin
+     enable                      enable the boot service
+     disable                     stop and disable the service
+
+   Usermin serves HTTPS on 127.0.0.1:20000. After install, open
+   https://<host>:20000 and log in as any local (non-root) user. Pair it
+   with webmin-node for the root administration UI. See
+   usermin-node-daemon(1).
+EOF
+	exit 1
+}
+
+usermin_running() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl --quiet is-active usermin 2>/dev/null
+	else
+		pgrep -f "usermin.*miniserv.pl" >/dev/null 2>&1
+	fi
+}
+
+require_linux() {
+	if is_macos; then
+		error "Usermin is not packaged for macOS via this node (no launchd service)."
+		error "See https://www.webmin.com/usermin.html for a manual install."
+		exit 2
+	fi
+}
+
+cmd_install() {
+	require_linux
+	local from=auto
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--from) from="$2"; shift 2 ;;
+			-h|--help) usage ;;
+			*) error "install: unexpected arg '$1'"; usage ;;
+		esac
+	done
+
+	# Resolve the package manager.
+	if [ "$from" = auto ]; then
+		if command -v apt-get >/dev/null 2>&1; then from=apt
+		elif command -v dnf >/dev/null 2>&1; then from=dnf
+		else error "no supported package manager (apt-get/dnf) found"; exit 1
+		fi
+	fi
+
+	# Validate BEFORE any network/sudo side effect.
+	case "$from" in
+		apt|dnf) ;;
+		*) error "install: unknown --from '$from' (use auto|apt|dnf)"; exit 2 ;;
+	esac
+
+	info "installing Usermin via $from (official repo)..."
+
+	# The upstream setup-repos.sh configures the signed Webmin/Usermin repo
+	# for both apt and dnf, then we install the package.
+	local repo_script="https://raw.githubusercontent.com/webmin/webmin/master/setup-repos.sh"
+	local tmp; tmp=$(mktemp)
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL "$repo_script" -o "$tmp" || { error "could not fetch setup-repos.sh"; rm -f "$tmp"; exit 1; }
+	elif command -v wget >/dev/null 2>&1; then
+		wget -qO "$tmp" "$repo_script" || { error "could not fetch setup-repos.sh"; rm -f "$tmp"; exit 1; }
+	else
+		error "curl or wget required"; rm -f "$tmp"; exit 1
+	fi
+	sudo sh "$tmp" -f || { error "repo setup failed"; rm -f "$tmp"; exit 1; }
+	rm -f "$tmp"
+
+	case "$from" in
+		apt)
+			sudo apt-get update
+			sudo apt-get install -y --install-recommends usermin
+			;;
+		dnf)
+			sudo dnf install -y usermin
+			;;
+	esac
+
+	info "usermin installed — web UI on https://127.0.0.1:20000"
+	info "next: usermin-node daemon enable && usermin-node daemon start"
+}
+
+cmd_enable() {
+	require_linux
+	command -v systemctl >/dev/null 2>&1 || { error "systemctl not found"; exit 1; }
+	sudo systemctl enable usermin || { error "could not enable usermin (is it installed?)"; exit 1; }
+	info "usermin service enabled at boot"
+	info "next: usermin-node daemon start"
+}
+
+cmd_disable() {
+	require_linux
+	cmd_stop 2>/dev/null || true
+	if command -v systemctl >/dev/null 2>&1; then
+		sudo systemctl disable usermin 2>/dev/null || true
+		info "usermin service disabled"
+	fi
+	info "config preserved: /etc/usermin"
+}
+
+cmd_start() {
+	require_linux
+	if usermin_running; then info "usermin already running"; return 0; fi
+	sudo systemctl start usermin
+	info "usermin started — https://127.0.0.1:20000"
+}
+
+cmd_stop() {
+	require_linux
+	if ! usermin_running; then info "usermin not running"; return 0; fi
+	sudo systemctl stop usermin
+	info "usermin stopped"
+}
+
+cmd_restart() {
+	require_linux
+	sudo systemctl restart usermin 2>/dev/null || { cmd_stop || true; sleep 1; cmd_start; }
+	info "usermin restarted"
+}
+
+cmd_status() {
+	if usermin_running; then
+		echo "running"
+		[ -f /etc/usermin/version ] && echo "version $(cat /etc/usermin/version)"
+	else
+		echo "down"
+	fi
+}
+
+cmd_monitor() {
+	local logfile="/var/log/usermin/miniserv.log"
+	if [ ! -f "$logfile" ] && command -v journalctl >/dev/null 2>&1; then
+		exec sudo journalctl -u usermin "${@:--f}"
+	fi
+	[ -f "$logfile" ] || { error "no log file at $logfile"; exit 2; }
+	exec sudo tail "${@:--f}" "$logfile"
+}
+
+# Dispatch
+case "${1:-help}" in
+	start)    shift; cmd_start "$@" ;;
+	stop)     shift; cmd_stop "$@" ;;
+	restart)  shift; cmd_restart "$@" ;;
+	status)   shift; cmd_status "$@" ;;
+	monitor)  shift; cmd_monitor "$@" ;;
+	install)  shift; cmd_install "$@" ;;
+	enable)   shift; cmd_enable "$@" ;;
+	disable)  shift; cmd_disable "$@" ;;
+	help|-h|--help) usage ;;
+	*)        usage; exit 1 ;;
+esac

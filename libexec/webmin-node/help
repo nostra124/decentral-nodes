@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+
+cat <<'EOF'
+webmin-node — install and operate a Webmin web administration service
+
+COMMANDS
+  version            Print the package version
+  daemon install     Add the official repo and install webmin
+  daemon enable      Enable the boot service
+  daemon start       Start the webmin service
+  daemon stop        Stop the webmin service
+  daemon restart     Restart the webmin service
+  daemon status      Check whether webmin is running
+  daemon monitor     Tail the miniserv log
+  daemon disable     Stop and disable the service
+
+USAGE
+  webmin-node daemon install
+  webmin-node daemon enable && webmin-node daemon start
+  # then open https://127.0.0.1:10000
+
+WEBMIN PROVIDES
+  - Browser-based system administration (users, groups, cron, packages)
+  - Service, firewall, network, and disk management
+  - Module UIs for Apache, BIND, MySQL/PostgreSQL, Samba, and more
+
+RUNS AS ROOT
+  Webmin administers the host, so it runs as root (no dedicated service
+  account). Restrict access with the firewall and/or miniserv.conf
+  'allow=' rules; put a reverse proxy in front for a public hostname.
+
+SERVICES
+  Web UI:  https://127.0.0.1:10000
+
+FILES
+  Binary/libs:  /usr/share/webmin
+  Config:       /etc/webmin/ (miniserv.conf, miniserv.users)
+  Logs:         /var/log/webmin/miniserv.log
+
+PLATFORM
+  Linux only (apt/dnf). macOS is not packaged by this node.
+
+SETUP
+  1. Install:        webmin-node daemon install
+  2. Enable + start: webmin-node daemon enable && webmin-node daemon start
+  3. Log in:         https://<host>:10000 as a root/sudo user
+
+SEE ALSO
+  webmin-node-daemon(1)
+  https://www.webmin.com/
+EOF

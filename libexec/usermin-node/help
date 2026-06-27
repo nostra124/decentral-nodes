@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+cat <<'EOF'
+usermin-node — install and operate a Usermin web interface service
+
+COMMANDS
+  version            Print the package version
+  daemon install     Add the official repo and install usermin
+  daemon enable      Enable the boot service
+  daemon start       Start the usermin service
+  daemon stop        Stop the usermin service
+  daemon restart     Restart the usermin service
+  daemon status      Check whether usermin is running
+  daemon monitor     Tail the miniserv log
+  daemon disable     Stop and disable the service
+
+USAGE
+  usermin-node daemon install
+  usermin-node daemon enable && usermin-node daemon start
+  # then open https://127.0.0.1:20000
+
+USERMIN PROVIDES
+  - A per-user web interface (mail, password change, SSH keys)
+  - Home-directory file manager, cron, GnuPG, and more
+  - Webmin's sibling: ordinary users self-serve, root admin stays in
+    Webmin (see webmin-node)
+
+PER-USER, NOT ROOT ADMIN
+  Usermin's miniserv authenticates any local account and runs each
+  session as that user — end users get only their own files and mail,
+  never host administration. Restrict access with the firewall and/or
+  miniserv.conf 'allow=' rules; front it with a reverse proxy for a
+  public hostname.
+
+SERVICES
+  Web UI:  https://127.0.0.1:20000
+
+FILES
+  Binary/libs:  /usr/share/usermin
+  Config:       /etc/usermin/ (miniserv.conf, miniserv.users)
+  Logs:         /var/log/usermin/miniserv.log
+
+PLATFORM
+  Linux only (apt/dnf). macOS is not packaged by this node.
+
+SETUP
+  1. Install:        usermin-node daemon install
+  2. Enable + start: usermin-node daemon enable && usermin-node daemon start
+  3. Log in:         https://<host>:20000 as any local user
+
+SEE ALSO
+  usermin-node-daemon(1), webmin-node(1)
+  https://www.webmin.com/usermin.html
+EOF

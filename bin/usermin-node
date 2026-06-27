@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+
+############################################################################
+# usermin-node — install and operate a Usermin web interface service.
+#
+# Tier 3 (Self-hosting) tool. Usermin (https://www.webmin.com/usermin.html)
+# is Webmin's sibling: a simplified, per-user web interface that lets
+# ordinary (non-root) accounts read mail, change their password, manage
+# SSH keys, edit files in their home dir, set up cron, etc. It shares
+# Webmin's mini HTTPS server (miniserv.pl) but listens on port 20000 and
+# logs each user in as themselves.
+#
+# Commands:
+#   daemon install   — add the official repo and install usermin
+#   daemon enable    — enable the boot service
+#   daemon start     — start the usermin service
+#   daemon stop      — stop the usermin service
+#   daemon status    — check whether usermin is running
+#   daemon disable   — stop and disable the service
+#
+# Usage:
+#   usermin-node daemon install
+#   usermin-node daemon enable && usermin-node daemon start
+#   # then open https://127.0.0.1:20000
+############################################################################
+
+# This should always be the first line of code to facilitate debugging
+[ -n "$SELF_DEBUG" ] && set -vx
+
+# Per FEAT-194: VERSION read at runtime from VERSION at the repo root
+__d="$(cd "$(dirname "$0")" && pwd)"; __s="$(basename "$0")"
+VERSION=$(cat "$__d/../VERSION" 2>/dev/null || cat "$__d/../share/$__s/version" 2>/dev/null || echo '1.0.0')
+unset __d __s
+SELF=$(basename "$0")
+
+# Resolve $SELF_LIBEXEC (FEAT-001 libexec convention)
+if [ -z "$SELF_LIBEXEC" ]; then
+	for _d in \
+		"$(cd "$(dirname "$0")/../libexec" 2>/dev/null && pwd)" \
+		"$HOME/.local/libexec" \
+		"/usr/local/libexec" \
+		"/usr/libexec"; do
+		[ -d "$_d/$SELF" ] && SELF_LIBEXEC="$_d" && break
+	done
+	unset _d
+fi
+
+die() {
+	echo "$1" >&2
+	exit "${2:-1}"
+}
+
+fatal() {
+	echo "$SELF: fatal - $1" >&2
+	exit "${2:-1}"
+}
+
+debug() {
+	[ -n "$SELF_DEBUG" ] && echo "$SELF: debug - $*" >&2
+}
+
+info() {
+	if [ ! -n "$SELF_QUIET" ]; then echo -e "$SELF: info - \033[33;m$*\033[0m" >&2; fi
+}
+
+warn() {
+	echo -e "$SELF: warn - \033[31;1;m$*\033[0m" >&2
+}
+
+error() {
+	echo -e "$SELF: error - \033[31;1;m$*\033[0m" >&2
+}
+
+has() {
+	local KIND=$1
+	local NAME=$2
+	type -t "$KIND:$NAME" | grep -q function
+}
+
+# We run getopts as early as possible so global flags are caught before
+# the command dispatch at the end of the file.
+while getopts "c:dqpt" flag; do
+	if [ x"$1" = x'-q' ]; then SELF_QUIET=1; fi
+	if [ x"$1" = x'-d' ]; then SELF_DEBUG=1; fi
+	if [ x"$1" = x'-t' ]; then SELF_TEST=1; fi
+done
+shift $((OPTIND - 1))
+
+# Command dispatch — every verb maps to libexec/usermin-node/$verb.
+if [ $# -eq 0 ]; then
+	"$SELF_LIBEXEC/$SELF/help" 2>&1 | head -40
+	die "Run '$SELF help' for usage."
+fi
+
+# `usermin-node version` is handled inline so it works without a libexec
+# verb (FEAT-194: one package, one VERSION).
+if [ "$1" = version ] || [ "$1" = --version ]; then
+	echo "$VERSION"
+	exit 0
+fi
+
+verb="$1"; shift
+if [ ! -x "$SELF_LIBEXEC/$SELF/$verb" ]; then
+	warn "unknown verb: $verb"
+	die "Run '$SELF help' for usage."
+fi
+
+# Export VERSION for subcommands (FEAT-194)
+export SELF_VERSION="$VERSION"
+
+exec "$SELF_LIBEXEC/$SELF/$verb" "$@"
