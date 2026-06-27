@@ -169,6 +169,36 @@ After adding tests, run the suite that owns the new file *and* the
 ones it depends on (e.g. a new PIT test should pass on a clean
 desktop with `make check-all`, not just `make check-pit`).
 
+### 4.1 Shared helpers + fixture well-formedness (FEAT-050)
+
+`tests/unit/helpers.bash` holds assertions shared across suites; load
+it from a `.bats` file with `load helpers`. Its primary job is the
+**fixture well-formedness guard** for the hand-typed PSBT/tx hex
+literals scattered through the bip174 suites.
+
+These literals carry their own length prefixes (compactSize key/value
+lengths, the embedded unsigned-tx serialization). A human reviewer
+cannot eyeball whether a 160-character hex blob's declared `82` matches
+its actual byte count — and BUG-021 proved the cost: a PSBT whose
+global unsigned-tx record declared 82 bytes but carried 83. The parser
+honoured the prefix, the stray byte desynced every later section, and
+`sign` silently emitted nothing. Nothing failed; the bug shipped.
+
+The helpers catch that class at authoring time:
+
+| Helper | Checks |
+|---|---|
+| `tx_byte_len <txhex>` | Parses one legacy tx from the start, echoes its exact serialized byte length, returns non-zero on overrun. |
+| `assert_psbt_wellformed <hex>` | Walks the PSBT (magic + compactSize key/value records + 0x00 map separators); for the global unsigned-tx record asserts the *real* tx length equals the *declared* length (the exact BUG-021 off-by-one); requires a clean separator-terminated EOF. |
+
+`tests/unit/fixtures-wellformed.bats` runs these over the canonical
+P2PKH/P2SH vectors and pins the assertions with both positive cases and
+deliberately-corrupted negatives (over- and under-declared global tx
+length, missing magic, truncated tail). **When you add a new hand-typed
+PSBT/tx fixture, add an `assert_psbt_wellformed` case for it there** —
+that is what turns a future off-by-one into an immediate local red
+instead of a silent ship.
+
 ## 5. Common failures and remedies
 
 | Symptom | Cause | Fix |

@@ -1,7 +1,7 @@
 # FEAT-050 — fixture well-formedness check for PSBT/tx test vectors
 
-**Status:** open
-**Milestone:** unscheduled
+**Status:** done
+**Milestone:** 3.4.0
 
 ## Summary
 
@@ -28,6 +28,9 @@ corrupted fixture).
 
 ## Acceptance Criteria
 
-- [ ] A helper validates PSBT/tx fixture length fields vs. byte length.
-- [ ] The bip174 / tx fixtures are validated by a test.
-- [ ] Documented in `skills/testing.md`.
+- [x] A helper validates PSBT/tx fixture length fields vs. byte length.
+      (`tests/unit/helpers.bash`: `tx_byte_len`, `assert_psbt_wellformed`.)
+- [x] The bip174 / tx fixtures are validated by a test.
+      (`tests/unit/fixtures-wellformed.bats` — canonical P2PKH/P2SH
+      vectors + negative cases reproducing BUG-021.)
+- [x] Documented in `skills/testing.md` (§4.1).

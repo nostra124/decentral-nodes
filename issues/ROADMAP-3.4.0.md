@@ -49,12 +49,13 @@ BUG-056 so the `-node` test fixes don't surface as fresh findings mid-flip.
 Fail fast with a clear message when a suite's external tools (`xxd`,
 `dc`, `openssl`, …) are missing, instead of opaque mid-test errors.
 
-## FEAT-050 — fixture well-formedness check for PSBT/tx vectors
-**File:** `issues/feature/050-fixture-wellformedness-check.md`
+## FEAT-050 — fixture well-formedness check for PSBT/tx vectors ✅ DONE
+**File:** `issues/feature/done/050-fixture-wellformedness-check.md`
 **Effort:** small (a `tests/unit/helpers.bash` assertion)
 Validate hand-crafted PSBT/tx hex fixtures' declared lengths against
 their actual bytes at authoring time (the BUG-021 class of silent
-desync).
+desync). Landed as `tests/unit/helpers.bash` (`tx_byte_len`,
+`assert_psbt_wellformed`) + `tests/unit/fixtures-wellformed.bats`.
 
 ## FEAT-053 — split the monolithic unit-test files
 **File:** `issues/feature/053-split-monolithic-test-files.md`
@@ -81,8 +82,8 @@ balance/utxos/send`) currently skipped on FEAT-304.
 FEAT-313   installed-tree tier — lock in the BUG-058 fix first
 FEAT-314   per-node unit parity (+ the no-untested-node guard)
 FEAT-052   cheap win once BUG-056 lands; locks the lint gate
-FEAT-051   preflight makes the next two easier to develop
-FEAT-050   fixture guard
+FEAT-051   preflight makes the next two easier to develop ✅
+FEAT-050   fixture guard ✅
 FEAT-053   big mechanical split — do on a green, guarded suite
 FEAT-315   SIT smoke for the service nodes (needs podman)
 FEAT-304   backend feature; verify against the SIT derive/receive suite
