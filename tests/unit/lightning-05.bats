@@ -172,13 +172,14 @@ EOF
 }
 
 @test "1.2.0: every documented exit code has at least one test asserting it" {
-	# Meta-test: grep the bats file for assertions on each documented
-	# exit code (1, 2, 3, 4, 5, 6, 127). Two syntaxes count:
+	# Meta-test: grep the lightning bats parts for assertions on each
+	# documented exit code (1, 2, 3, 4, 5, 6, 127). Two syntaxes count:
 	#   - `[ "$status" -eq N ]` / `[ "$status" = "N" ]`  (older)
 	#   - `run -N ...`                                    (bats 1.5+)
-	f="$BATS_TEST_DIRNAME/lightning.bats"
+	# FEAT-053 split the monolith into lightning-NN.bats; scan them all so
+	# an assertion living in any part satisfies the code it covers.
 	for code in 1 2 3 4 5 6 127; do
-		grep -qE -- "status[\" ]+-eq[\" ]+$code|status[\" ]+=[\" ]+\"?$code|run -$code " "$f" \
+		grep -qhE -- "status[\" ]+-eq[\" ]+$code|status[\" ]+=[\" ]+\"?$code|run -$code " "$BATS_TEST_DIRNAME"/lightning-*.bats \
 			|| { echo "no test asserts exit $code"; return 1; }
 	done
 }
