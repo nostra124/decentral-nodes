@@ -2,9 +2,22 @@
 id: BUG-058
 type: bug
 priority: high
-status: open
+status: done
 milestone: 3.3.4
 ---
+
+## Resolution
+
+Completed the rename in packaging without touching runtime data refs:
+`Makefile.in` `PACKAGES` and `.rpk/package` `COMMANDS` now list all 14
+`-node` command names; libexec verbs stage per command; the runtime data
+namespaces (`share/bitcoin`, `share/lightning`, …) are copied wholesale
+so `share/<cmd>-node/version` and the hardcoded data dir coexist; the
+version file installs to `share/<cmd>/version` matching the dispatcher's
+`$SELF` read. Regression: `tests/unit/install-tree.bats` (FEAT-313) —
+failed against the old packaging, passes now. The `VERSION` bump to cut
+3.3.4 remains a separate release step (systemic version drift; see the
+audit).
 
 # `make install` ships no verbs for the `-node` commands (rename incomplete)
 

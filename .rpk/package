@@ -5,12 +5,12 @@ function die() { echo "$@"; exit 100; }
 PACKAGE=$(rpk identity)
 VERSION=$1
 
-# This one rpk package ships multiple commands (each with its own
-# bin/<cmd>, libexec/<cmd>/, share/<cmd>/, share/doc/<cmd>). decentral-nodes is
-# the rpk identity; lightning was merged in from nostra124/lightning;
-# fulcrum (FEAT-055..060), monero (FEAT-299..), stacks, and others
-# slot into this same list.
-COMMANDS="bitcoin lightning fulcrum monero forgejo-node webmin-node usermin-node"
+# This one rpk package ships multiple commands. COMMANDS are the `-node`
+# dispatcher names (matching bin/<cmd> + libexec/<cmd>/, BUG-058). Runtime
+# data lives under a separate hardcoded namespace (share/bitcoin, …) copied
+# wholesale below, independent of the command names. decentral-nodes is the
+# rpk identity; lightning/fulcrum/monero/… all slot into this one package.
+COMMANDS="bitcoin-node lightning-node fulcrum-node monero-node liquid-node stacks-node tor-node ipfs-node storj-node joinmarket-node i2pd-node forgejo-node webmin-node usermin-node"
 
 test -z "$VERSION" && VERSION=$(rpk versions | tail -1)
 
@@ -32,23 +32,21 @@ git checkout "$COMMIT" || die "failed to checkout $COMMIT"
 mkdir -p "$TARGET/bin" \
          "$TARGET/etc/bash_completion.d" \
          "$TARGET/share/man/man1"
-for cmd in $COMMANDS; do
-    mkdir -p "$TARGET/libexec/$cmd" \
-             "$TARGET/share/doc/$cmd" \
-             "$TARGET/share/$cmd"
-done
 
 cp -a bin/* "$TARGET/bin/"
+# libexec verbs: one dir per command (the -node dirs).
 for cmd in $COMMANDS; do
     if [ -d "libexec/$cmd" ]; then
+        mkdir -p "$TARGET/libexec/$cmd"
         cp -a "libexec/$cmd/"* "$TARGET/libexec/$cmd/"
     fi
-    if [ -d "share/doc/$cmd" ]; then
-        cp -a "share/doc/$cmd/"* "$TARGET/share/doc/$cmd/"
-    fi
-    if [ -d "share/$cmd" ]; then
-        cp -a "share/$cmd/"* "$TARGET/share/$cmd/"
-    fi
+done
+# Runtime data + docs: copy every share/ namespace as-is (the hardcoded
+# project data namespaces, distinct from the -node command names; BUG-058).
+for d in share/*/; do
+    name=$(basename "$d")
+    [ "$name" = man ] && continue
+    cp -a "$d" "$TARGET/share/"
 done
 if [ -d etc/bash_completion.d ]; then
     cp -a etc/bash_completion.d/* "$TARGET/etc/bash_completion.d/"
@@ -72,7 +70,7 @@ if ls .rpk/skills/*.md >/dev/null 2>&1; then
 fi
 if [ -f VERSION ]; then
     for cmd in $COMMANDS; do
-        install -m 644 VERSION "$TARGET/share/$cmd/version"
+        install -D -m 644 VERSION "$TARGET/share/$cmd/version"
     done
 fi
 

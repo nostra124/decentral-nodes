@@ -62,10 +62,10 @@ setup() {
 	( cd "$REPO" && ./configure --prefix="$prefix" >/dev/null 2>&1 && make install >/dev/null 2>&1 )
 	# Staged build tree (stow source) mirrors $PREFIX *relative* (BUG-038).
 	[ -f "$REPO/build/decentral-nodes/bin/monero-node" ]
-	[ -d "$REPO/build/decentral-nodes/libexec/monero" ]
+	[ -d "$REPO/build/decentral-nodes/libexec/monero-node" ]
 	# …and stow installs the dispatcher directly onto PATH under $PREFIX.
 	[ -x "$prefix/bin/monero-node" ]
-	[ -f "$prefix/share/monero/version" ]
+	[ -f "$prefix/share/monero-node/version" ]
 	( cd "$REPO" && make uninstall >/dev/null 2>&1; rm -rf build Makefile )
 }
 
