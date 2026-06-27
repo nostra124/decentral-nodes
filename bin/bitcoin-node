@@ -712,20 +712,112 @@ backend:fulcrum:estimate-fee() {
 	printf '%s\n' "$satvb"
 }
 
-# --- bitcoind / blockstream stubs --------------------------------------------
+# --- bitcoind RPC implementation ---------------------------------------------
 #
-# Scaffolded so `bitcoin backend set bitcoind|blockstream` doesn't
-# break the dispatcher; verbs return "not implemented" with a clear
-# error. Filling these out is FEAT-NNN follow-up.
+# FEAT-304: query the operator's own `bitcoind` via `bitcoin-cli`. Per
+# CLAUDE.md §4 the backend talks to bitcoind directly (the daemon's RPC
+# is this backend's own primitive); it does NOT shell out to the
+# `bitcoin-node daemon` verbs. `get-address-utxos` (scantxoutset) and
+# `broadcast` (sendrawtransaction) are implemented — enough for the
+# `wallet balance`/`utxos`/`send` flow without an external indexer.
+# `chain-height`/`estimate-fee`/`get-address-txs` remain unimplemented:
+# the first two are covered by the public backends / a send-time fee
+# fallback, and a full address-tx history needs an index bitcoind lacks
+# by default.
+
+# Read a configured RPC setting via the config plugin (an allowed sibling
+# per CLAUDE.md §4; `bitcoin config set rpc.url|rpc.user|rpc.pass` writes
+# them into bitcoin.conf). Empty on an unset key.
+backend:_bitcoind_conf() {
+	"$SELF_LIBEXEC/${SELF:-bitcoin-node}/config" get "$1" 2>/dev/null
+}
+
+# One JSON-RPC call to the operator's bitcoind over HTTP, authenticated with
+# the configured rpc.url / rpc.user / rpc.pass. Emits the raw JSON-RPC reply
+# on stdout; non-zero on a transport failure. $BITCOIN_BITCOIND_RPC_FIXTURE
+# (a dir of <method>.json, or a single file) stubs the HTTP call for tests —
+# the same seam the fulcrum backend uses.
+backend:_bitcoind_rpc() {
+	local method="$1" params="${2:-[]}"
+	if [ -n "${BITCOIN_BITCOIND_RPC_FIXTURE:-}" ]; then
+		local f
+		if [ -d "$BITCOIN_BITCOIND_RPC_FIXTURE" ]; then f="$BITCOIN_BITCOIND_RPC_FIXTURE/$method.json"
+		else f="$BITCOIN_BITCOIND_RPC_FIXTURE"; fi
+		[ -f "$f" ] && { cat "$f"; return 0; }
+		error "bitcoind: no RPC fixture for method '$method'"
+		return 1
+	fi
+	local url user pass
+	url="$(backend:_bitcoind_conf rpc.url)"
+	user="$(backend:_bitcoind_conf rpc.user)"
+	pass="$(backend:_bitcoind_conf rpc.pass)"
+	if [ -z "$url" ]; then
+		error "bitcoind: rpc.url not configured (run: ${SELF:-bitcoin-node} config set rpc.url <url>)"
+		return 1
+	fi
+	local body reply
+	body="{\"jsonrpc\":\"1.0\",\"id\":\"${SELF:-bitcoin-node}\",\"method\":\"$method\",\"params\":$params}"
+	if ! reply="$(curl -sf --user "$user:$pass" --data-binary "$body" \
+		-H 'content-type: text/plain' "$url" 2>/dev/null)"; then
+		error "bitcoind: RPC '$method' to $url failed (curl)"
+		return 1
+	fi
+	printf '%s' "$reply"
+}
+
+# Extract a JSON-RPC error message ("" when none), shared by the verbs.
+backend:_bitcoind_rpc_error() {
+	printf '%s' "$1" \
+		| jq -r '.error // empty | if type=="object" then .message else tostring end' 2>/dev/null
+}
 
 backend:bitcoind:chain-height() {
-	error "backend bitcoind: not implemented in this release (use mempool)"
+	error "backend bitcoind: chain-height not implemented (use mempool/fulcrum)"
 	return 99
 }
-backend:bitcoind:get-address-utxos() { backend:bitcoind:chain-height; }
-backend:bitcoind:broadcast()         { backend:bitcoind:chain-height; }
+
+# scantxoutset is a full-UTXO-set scan (no address index needed), so it is
+# O(set) per call — acceptable for the educational single-address wallet
+# flow, but not a substitute for a real indexer at scale.
+backend:bitcoind:get-address-utxos() {
+	local addr="${1:-}"
+	[ -n "$addr" ] || { error "backend get-address-utxos: address required"; return 2; }
+	local reply err
+	reply="$(backend:_bitcoind_rpc scantxoutset "[\"start\",[{\"desc\":\"addr($addr)\"}]]")" || return 1
+	err="$(backend:_bitcoind_rpc_error "$reply")"
+	[ -n "$err" ] && { error "bitcoind: scantxoutset: $err"; return 1; }
+	# Reshape bitcoind's BTC-denominated unspents into the sat-denominated
+	# UTXO shape the wallet consumes (.txid/.vout/.value/.status), matching
+	# the mempool + fulcrum backends.
+	printf '%s' "$reply" | jq -c \
+		'[.result.unspents[] | {txid: .txid, vout: .vout,
+		                        value: (.amount * 100000000 | round),
+		                        status: {confirmed: (.height > 0), block_height: .height}}]' \
+		2>/dev/null || { error "bitcoind: could not parse scantxoutset reply"; return 1; }
+}
+
+backend:bitcoind:broadcast() {
+	local hex="${1:-}"
+	[ -n "$hex" ] || { error "backend broadcast: tx hex required"; return 2; }
+	local reply err txid
+	reply="$(backend:_bitcoind_rpc sendrawtransaction "[\"$hex\"]")" || return 1
+	err="$(backend:_bitcoind_rpc_error "$reply")"
+	[ -n "$err" ] && { error "bitcoind: sendrawtransaction rejected: $err"; return 1; }
+	txid="$(printf '%s' "$reply" | jq -r '.result // empty' 2>/dev/null)"
+	if [[ ! "$txid" =~ ^[0-9a-fA-F]{64}$ ]]; then
+		error "bitcoind: broadcast reply is not a txid ('$txid')"
+		return 1
+	fi
+	printf '%s\n' "$txid"
+}
+
 backend:bitcoind:estimate-fee()      { backend:bitcoind:chain-height; }
 backend:bitcoind:get-address-txs()   { backend:bitcoind:chain-height; }
+
+# --- blockstream stub --------------------------------------------------------
+#
+# Scaffolded so `bitcoin backend set blockstream` doesn't break the
+# dispatcher; verbs return "not implemented" with a clear error.
 
 backend:blockstream:chain-height() {
 	error "backend blockstream: not implemented in this release (use mempool)"

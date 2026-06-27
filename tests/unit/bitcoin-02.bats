@@ -2,6 +2,7 @@
 #
 # bitcoin unit tests — part 2 of 5 (FEAT-053 split of tests/unit/bitcoin.bats).
 # Shared setup/teardown/fixtures: tests/unit/lib/bitcoin.bash.
+# (Also hosts the FEAT-304 bitcoind-backend get-address-utxos/broadcast tests.)
 
 bats_require_minimum_version 1.5.0
 load lib/bitcoin
@@ -89,6 +90,77 @@ load lib/bitcoin
 	"$BITCOIN_BIN" backend set bitcoind >/dev/null
 	run "$BITCOIN_BIN" backend estimate-fee
 	[ "$status" -ne 0 ]
+}
+
+@test "FEAT-304 — bitcoind get-address-utxos maps scantxoutset to the wallet UTXO shape" {
+	setup_bitcoind_backend_env
+	# scantxoutset reports amounts in BTC; the backend must convert to sats
+	# and reshape to {txid,vout,value,status}. 0.001 BTC -> 100000 sat.
+	bitcoind_rpc_fixture scantxoutset \
+		'{"result":{"success":true,"height":830000,"unspents":[{"txid":"aa11","vout":2,"amount":0.001,"height":829000}],"total_amount":0.001},"error":null,"id":"x"}'
+	run "$BITCOIN_BIN" backend get-address-utxos bc1qexampleaddress
+	[ "$status" -eq 0 ]
+	[[ "$output" == *'"txid":"aa11"'* ]]
+	[[ "$output" == *'"vout":2'* ]]
+	[[ "$output" == *'"value":100000'* ]]
+	[[ "$output" == *'"block_height":829000'* ]]
+	[[ "$output" == *'"confirmed":true'* ]]
+}
+
+@test "FEAT-304 — bitcoind get-address-utxos returns an empty array when nothing is found" {
+	setup_bitcoind_backend_env
+	bitcoind_rpc_fixture scantxoutset \
+		'{"result":{"success":true,"height":830000,"unspents":[],"total_amount":0},"error":null,"id":"x"}'
+	run "$BITCOIN_BIN" backend get-address-utxos bc1qexampleaddress
+	[ "$status" -eq 0 ]
+	[ "$output" = "[]" ]
+}
+
+@test "FEAT-304 — bitcoind get-address-utxos requires an address" {
+	setup_bitcoind_backend_env
+	run "$BITCOIN_BIN" backend get-address-utxos
+	[ "$status" -eq 2 ]
+}
+
+@test "FEAT-304 — bitcoind get-address-utxos errors when the RPC is unreachable" {
+	setup_bitcoind_backend_env
+	# No scantxoutset fixture → the RPC call fails (models an unreachable node).
+	run "$BITCOIN_BIN" backend get-address-utxos bc1qexampleaddress
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"bitcoind"* ]] || [[ "$stderr" == *"bitcoind"* ]]
+}
+
+@test "FEAT-304 — bitcoind get-address-utxos surfaces an RPC error reply" {
+	setup_bitcoind_backend_env
+	bitcoind_rpc_fixture scantxoutset \
+		'{"result":null,"error":{"code":-8,"message":"scan already in progress"},"id":"x"}'
+	run "$BITCOIN_BIN" backend get-address-utxos bc1qexampleaddress
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"scan already in progress"* ]] || [[ "$stderr" == *"scan already in progress"* ]]
+}
+
+@test "FEAT-304 — bitcoind broadcast sends the raw tx and returns the txid" {
+	setup_bitcoind_backend_env
+	bitcoind_rpc_fixture sendrawtransaction \
+		'{"result":"abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd","error":null,"id":"x"}'
+	run "$BITCOIN_BIN" backend broadcast 0200000001deadbeef
+	[ "$status" -eq 0 ]
+	[ "$output" = "abc123abc123abc123abc123abc123abc123abc123abc123abc123abc123abcd" ]
+}
+
+@test "FEAT-304 — bitcoind broadcast requires a tx hex" {
+	setup_bitcoind_backend_env
+	run "$BITCOIN_BIN" backend broadcast
+	[ "$status" -eq 2 ]
+}
+
+@test "FEAT-304 — bitcoind broadcast surfaces a node rejection" {
+	setup_bitcoind_backend_env
+	bitcoind_rpc_fixture sendrawtransaction \
+		'{"result":null,"error":{"code":-26,"message":"txn-mempool-conflict"},"id":"x"}'
+	run "$BITCOIN_BIN" backend broadcast 0200000001deadbeef
+	[ "$status" -ne 0 ]
+	[[ "$output" == *"rejected"* ]] || [[ "$stderr" == *"rejected"* ]]
 }
 
 @test "FEAT-012 — bitcoin help backend mentions estimate-fee" {

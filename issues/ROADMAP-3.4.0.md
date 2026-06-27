@@ -66,14 +66,15 @@ desync). Landed as `tests/unit/helpers.bash` (`tx_byte_len`,
 under `tests/unit/lib/<family>.bash`. Pass set verified byte-identical
 to the pre-split monolith.
 
-## FEAT-304 — bitcoind backend `get-address-utxos` + `broadcast`
-**File:** `issues/feature/304-bitcoind-backend-utxos-broadcast.md`
+## FEAT-304 — bitcoind backend `get-address-utxos` + `broadcast` ✅ DONE
+**File:** `issues/feature/done/304-bitcoind-backend-utxos-broadcast.md`
 **Effort:** medium
-Implement the two stubbed bitcoind-backend verbs (`bin/bitcoin-node`
-currently errors "not implemented in this release"): address-UTXO scan
-via `scantxoutset` and `broadcast` via `sendrawtransaction`. Unblocks the
-`tests/sit/suites/02_derive_and_receive.bats` flows (`wallet
-balance/utxos/send`) currently skipped on FEAT-304.
+Implemented the two stubbed bitcoind-backend verbs in `bin/bitcoin-node`:
+address-UTXO scan via `scantxoutset` and `broadcast` via
+`sendrawtransaction`, over a JSON-RPC/curl client reading
+`rpc.url`/`rpc.user`/`rpc.pass`. Unit-tested via a fixture seam; the
+`tests/sit/suites/02_derive_and_receive.bats` flows are un-skipped
+(SIT proof needs a local podman regtest run).
 
 ---
 
@@ -87,8 +88,12 @@ FEAT-051   preflight makes the next two easier to develop ✅
 FEAT-050   fixture guard ✅
 FEAT-053   big mechanical split — do on a green, guarded suite ✅
 FEAT-315   SIT smoke for the service nodes (needs podman)
-FEAT-304   backend feature; verify against the SIT derive/receive suite
+FEAT-304   backend feature; verify against the SIT derive/receive suite ✅
 ```
+
+> **FEAT-304 done ahead of FEAT-315.** FEAT-304 is unit-testable and
+> CI-gated; FEAT-315 is container-only (podman) and not verifiable in
+> unit-only CI, so it is sequenced last and needs a local podman run.
 
 ## Release gate
 
