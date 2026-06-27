@@ -56,7 +56,7 @@ Sources of truth for the surface area:
 - `libexec/bitcoin/*` entry-point scripts
 - `share/man/man1/bitcoin.1` (if present)
 - `docs/bitcoin-walkthrough.md` (if present)
-- `tests/unit/bitcoin.bats` assertions (these define the contract)
+- `tests/unit/bitcoin-*.bats` assertions (these define the contract)
 
 **Failure mode:** "behavior exists, no `done/` file."
 **Remediation:** File a backfill feature documenting what the

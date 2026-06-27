@@ -46,17 +46,28 @@ setup() {
 }
 
 @test "FEAT-314: every bin/*-node has a unit suite" {
-	# A node is covered by tests/unit/<node>.bats, or by its base-name
-	# suite (bitcoin-node -> bitcoin.bats, lightning-node -> lightning.bats,
-	# fulcrum/monero likewise).
+	# A node is covered by tests/unit/<node>.bats, by its base-name suite
+	# (bitcoin-node -> bitcoin.bats, lightning-node -> lightning.bats,
+	# fulcrum/monero likewise), or — since FEAT-053 split the monolithic
+	# suites — by numbered parts <base>-NN.bats / <node>-NN.bats.
 	local path node base fail=0
+	shopt -s nullglob
 	for path in "$REPO"/bin/*-node; do
 		node="$(basename "$path")"
 		base="${node%-node}"
-		if [ ! -f "$BATS_TEST_DIRNAME/$node.bats" ] && [ ! -f "$BATS_TEST_DIRNAME/$base.bats" ]; then
-			echo "no unit suite for $node (expected $node.bats or $base.bats)"; fail=1
+		local -a suites=(
+			"$BATS_TEST_DIRNAME/$node.bats"
+			"$BATS_TEST_DIRNAME/$base.bats"
+			"$BATS_TEST_DIRNAME/$base"-[0-9][0-9].bats
+			"$BATS_TEST_DIRNAME/$node"-[0-9][0-9].bats
+		)
+		local found=0 s
+		for s in "${suites[@]}"; do [ -f "$s" ] && found=1; done
+		if [ "$found" -eq 0 ]; then
+			echo "no unit suite for $node (expected $node.bats, $base.bats, or $base-NN.bats)"; fail=1
 		fi
 	done
+	shopt -u nullglob
 	[ "$fail" -eq 0 ]
 }
 

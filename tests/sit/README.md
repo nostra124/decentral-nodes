@@ -2,7 +2,7 @@
 
 > Per FEAT-182. End-to-end coverage against a real clightning
 > + bitcoind + Apache stack running in a podman container.
-> The unit suite at `tests/unit/lightning.bats` covers the
+> The unit suite at `tests/unit/lightning-*.bats` covers the
 > shell verbs in isolation; SIT covers the seams between
 > them.
 

@@ -57,13 +57,14 @@ their actual bytes at authoring time (the BUG-021 class of silent
 desync). Landed as `tests/unit/helpers.bash` (`tx_byte_len`,
 `assert_psbt_wellformed`) + `tests/unit/fixtures-wellformed.bats`.
 
-## FEAT-053 — split the monolithic unit-test files
-**File:** `issues/feature/053-split-monolithic-test-files.md`
+## FEAT-053 — split the monolithic unit-test files ✅ DONE
+**File:** `issues/feature/done/053-split-monolithic-test-files.md`
 **Effort:** medium (mechanical split; large diff, low risk)
-`bitcoin.bats` (~235 tests), `streamline.bats` (~175), and
-`lightning.bats` (~887) are far past a readable size. Split by
-subcommand/feature into focused files. Do this *after* BUG-056 so the
-split starts from a green suite.
+`bitcoin.bats` (235 tests), `streamline.bats` (175), and
+`lightning.bats` (887) were far past a readable size. Split into
+`<family>-NN.bats` parts (≤50 tests each) sharing per-family scaffolding
+under `tests/unit/lib/<family>.bash`. Pass set verified byte-identical
+to the pre-split monolith.
 
 ## FEAT-304 — bitcoind backend `get-address-utxos` + `broadcast`
 **File:** `issues/feature/304-bitcoind-backend-utxos-broadcast.md`
@@ -84,7 +85,7 @@ FEAT-314   per-node unit parity (+ the no-untested-node guard)
 FEAT-052   cheap win once BUG-056 lands; locks the lint gate
 FEAT-051   preflight makes the next two easier to develop ✅
 FEAT-050   fixture guard ✅
-FEAT-053   big mechanical split — do on a green, guarded suite
+FEAT-053   big mechanical split — do on a green, guarded suite ✅
 FEAT-315   SIT smoke for the service nodes (needs podman)
 FEAT-304   backend feature; verify against the SIT derive/receive suite
 ```

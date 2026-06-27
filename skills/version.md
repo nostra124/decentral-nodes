@@ -20,7 +20,7 @@ The current version is the single semver string in the file
   tree it resolves to `$repo/VERSION`; when installed it resolves
   to `$PREFIX/share/bitcoin/version` (a copy installed by
   `make install` from `VERSION`).
-- `tests/unit/bitcoin.bats` asserts `$BITCOIN_BIN version` equals
+- `tests/unit/bitcoin-*.bats` asserts `$BITCOIN_BIN version` equals
   the literal expected for the release.
 - `.rpk/versions` (note the plural) is the append-only ledger of
   `<version>\t<commit-sha>` pairs.
@@ -67,7 +67,7 @@ echo "1.0.2" > VERSION   # adjust the digits to the target
 
 ### Step 3 — update the bats version assertion
 
-`tests/unit/bitcoin.bats` contains:
+`tests/unit/bitcoin-*.bats` contains:
 
 ```bash
 @test "bitcoin version returns <OLD>" {

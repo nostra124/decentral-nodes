@@ -2,7 +2,7 @@
 
 > Per FEAT-177. Authoritative reference for every verb,
 > argument, env var, file path, and exit code. The bats
-> suite in `tests/unit/lightning.bats` is the executable
+> suite in `tests/unit/lightning-*.bats` is the executable
 > contract; this file is its prose form.
 
 `lightning(1)` is the man-page rendering of the same

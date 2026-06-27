@@ -101,7 +101,7 @@ Numbering: take the next free `NNN` across `issues/bug/` and
 
 ### Step 3 — write the failing test
 
-Add the regression test to `tests/unit/bitcoin.bats` (or the
+Add the regression test to `tests/unit/bitcoin-*.bats` (or the
 matching tier, see `skills/testing.md` §1). The test must
 exercise the broken path *as a user would* — not the patched
 internals.
